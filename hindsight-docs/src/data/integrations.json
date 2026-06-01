@@ -311,6 +311,16 @@
       "icon": "/img/icons/roo-code.png"
     },
     {
+      "id": "flowise",
+      "name": "Flowise",
+      "description": "Drop-in Hindsight tool nodes for Flowise visual chatflows and agents. Retain, Recall, and Reflect work alongside any LangChain agent in the canvas.",
+      "type": "official",
+      "by": "hindsight",
+      "category": "framework",
+      "link": "/sdks/integrations/flowise",
+      "icon": "/img/icons/flowise.png"
+    },
+    {
       "id": "hindclaw",
       "name": "HindClaw",
       "description": "Production memory infrastructure for AI agents — server-side access control via Hindsight extensions, Terraform provider for users/groups/banks/permissions, and an OpenClaw plugin with auto-managed embed.",
