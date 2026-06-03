@@ -1104,6 +1104,8 @@ async def test_version_endpoint_returns_correct_version(api_client):
     assert isinstance(features["observations"], bool)
     assert isinstance(features["mcp"], bool)
     assert isinstance(features["worker"], bool)
+    assert isinstance(features["audit_log"], bool)
+    assert isinstance(features["llm_trace"], bool)
 
     print(f"Version endpoint returned: api_version={result['api_version']}, features={features}")
 
@@ -1343,6 +1345,12 @@ async def test_patch_config_persists_override_for_uncreated_bank(api_client, fie
     body = response.json()
     assert body["config"][field] is False
     assert body["overrides"].get(field) is False
+
+    # The auto-created bank must have a name (defaults to bank_id). A NULL name
+    # would 500 the profile endpoint, whose response types name as a required str.
+    response = await api_client.get(f"/v1/default/banks/{test_bank_id}/profile")
+    assert response.status_code == 200, response.text
+    assert response.json()["name"] == test_bank_id
 
 
 @pytest.mark.hs_llm_core
