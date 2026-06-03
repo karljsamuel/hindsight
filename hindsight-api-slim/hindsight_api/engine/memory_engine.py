@@ -255,7 +255,17 @@ from .retain.types import RetainContentDict
 from .search import think_utils
 from .search.reranking import CrossEncoderReranker, apply_combined_scoring
 from .search.tags import TagGroup, TagsMatch, build_tag_groups_where_clause, build_tags_where_clause
+from .search.types import ScoredResult
 from .task_backend import TaskBackend
+
+# Recall ranking strategy: how the per-arm (semantic/bm25/graph/temporal) results are
+# fused and reranked into the final order.
+#   "cross_encoder" — RRF fusion + cross-encoder rerank (default, user-facing recall).
+#   "rrf"           — RRF fusion, no cross-encoder (RRF score is the order).
+#   "interleave"    — round-robin interleave fusion, no cross-encoder. Guarantees each
+#                     arm's top hits a slot (used by consolidation dedup recall, where RRF
+#                     buried the near-identical twin below budget). See interleave_fusion.
+RecallReranking = Literal["cross_encoder", "rrf", "interleave"]
 from .token_encoding import get_token_encoding
 
 RetainOutboxCallback = Callable[[asyncpg.Connection], Awaitable[None]]
@@ -3402,6 +3412,7 @@ class MemoryEngine(MemoryEngineInterface):
         created_before: datetime | None = None,
         _connection_budget: int | None = None,
         _quiet: bool = False,
+        reranking: RecallReranking = "cross_encoder",
     ) -> RecallResultModel:
         """
         Recall memories using N*4-way parallel retrieval (N fact types × 4 retrieval methods).
@@ -3558,6 +3569,7 @@ class MemoryEngine(MemoryEngineInterface):
                             include_source_facts=include_source_facts,
                             max_source_facts_tokens=max_source_facts_tokens,
                             max_source_facts_tokens_per_observation=max_source_facts_tokens_per_observation,
+                            reranking=reranking,
                         )
                         break  # Success - exit retry loop
                     except Exception as e:
@@ -3689,6 +3701,7 @@ class MemoryEngine(MemoryEngineInterface):
         include_source_facts: bool = False,
         max_source_facts_tokens: int = 4096,
         max_source_facts_tokens_per_observation: int = -1,
+        reranking: RecallReranking = "cross_encoder",
     ) -> RecallResultModel:
         """
         Search implementation with modular retrieval and reranking.
@@ -4027,9 +4040,13 @@ class MemoryEngine(MemoryEngineInterface):
                     if _dur > 0:
                         tracer.add_phase_metric(f"retrieval_{_method}", _dur)
 
-            # Step 3: Merge with RRF
+            # Step 3: Merge ranked lists. RRF by default; interleave (round-robin) when
+            # requested by consolidation dedup recall — RRF averages a strong-in-one-arm
+            # result down and buried the near-identical "twin" observation below budget
+            # (semantic #1 -> outside the shown set), whereas interleave guarantees each
+            # arm's top hits a slot. See interleave_fusion docstring.
             step_start = time.time()
-            from .search.fusion import reciprocal_rank_fusion
+            from .search.fusion import interleave_fusion, reciprocal_rank_fusion
 
             fusion_span = tracer_otel.start_span("hindsight.recall_fusion")
             fusion_span.set_attribute("hindsight.bank_id", bank_id)
@@ -4040,16 +4057,16 @@ class MemoryEngine(MemoryEngineInterface):
 
             try:
                 # Merge 3 or 4 result lists depending on temporal constraint
+                result_lists = [semantic_results, bm25_results, graph_results]
                 if temporal_results:
-                    merged_candidates = reciprocal_rank_fusion(
-                        [semantic_results, bm25_results, graph_results, temporal_results]
-                    )
-                else:
-                    merged_candidates = reciprocal_rank_fusion([semantic_results, bm25_results, graph_results])
+                    result_lists.append(temporal_results)
+                fuse = interleave_fusion if reranking == "interleave" else reciprocal_rank_fusion
+                merged_candidates = fuse(result_lists)
 
                 step_duration = time.time() - step_start
                 log_buffer.append(
-                    f"  [3] RRF merge: {len(merged_candidates)} unique candidates in {step_duration:.3f}s"
+                    f"  [3] {'interleave' if reranking == 'interleave' else 'RRF'} merge: "
+                    f"{len(merged_candidates)} unique candidates in {step_duration:.3f}s"
                 )
             finally:
                 fusion_span.set_attribute("hindsight.merged_count", len(merged_candidates))
@@ -4074,26 +4091,42 @@ class MemoryEngine(MemoryEngineInterface):
 
             scored_results: list = []
             pre_filtered_count = 0
+            rerank_kind = "cross-encoder"
             try:
-                # Ensure reranker is initialized (for lazy initialization mode)
-                await reranker_instance.ensure_initialized()
-
-                # Pre-filter candidates to reduce reranking cost (RRF already provides good ranking)
-                # This is especially important for remote rerankers with network latency
+                # Pre-filter candidates by RRF before the (optional) cross-encoder.
+                # RRF already provides good ranking; this caps cross-encoder cost.
                 reranker_max_candidates = get_config().reranker_max_candidates
                 if len(merged_candidates) > reranker_max_candidates:
-                    # Sort by RRF score and take top candidates
                     merged_candidates.sort(key=lambda mc: mc.rrf_score, reverse=True)
                     pre_filtered_count = len(merged_candidates) - reranker_max_candidates
                     merged_candidates = merged_candidates[:reranker_max_candidates]
 
-                # Rerank using cross-encoder
-                scored_results = await reranker_instance.rerank(query, merged_candidates)
+                if reranking == "cross_encoder":
+                    # Ensure reranker is initialized (for lazy initialization mode)
+                    await reranker_instance.ensure_initialized()
+                    scored_results = await reranker_instance.rerank(query, merged_candidates)
+                else:
+                    # "rrf" / "interleave": skip the cross-encoder and keep the fusion order
+                    # (rrf_score is descending by fusion position for both). The cross-encoder
+                    # was observed to demote a near-identical existing observation (the dedup
+                    # "twin") far below the budget cutoff (semantic rank #1 -> reranked #37),
+                    # causing the LLM to never see it and create a duplicate.
+                    rerank_kind = f"{reranking}-passthrough"
+                    scored_results = [
+                        ScoredResult(
+                            candidate=mc,
+                            cross_encoder_score=0.0,
+                            cross_encoder_score_normalized=0.0,
+                            weight=0.0,
+                        )
+                        for mc in sorted(merged_candidates, key=lambda mc: mc.rrf_score, reverse=True)
+                    ]
 
                 step_duration = time.time() - step_start
                 pre_filter_note = f" (pre-filtered {pre_filtered_count})" if pre_filtered_count > 0 else ""
                 log_buffer.append(
-                    f"  [4] Reranking: {len(scored_results)} candidates scored in {step_duration:.3f}s{pre_filter_note}"
+                    f"  [4] Reranking [{rerank_kind}]: {len(scored_results)} candidates "
+                    f"scored in {step_duration:.3f}s{pre_filter_note}"
                 )
             finally:
                 rerank_span.set_attribute("hindsight.scored_count", len(scored_results))
@@ -4106,9 +4139,18 @@ class MemoryEngine(MemoryEngineInterface):
             # is_passthrough_reranker tells the scoring code to seed CE scores
             # from RRF rank — only meaningful when the configured reranker is
             # the slim/passthrough one that returns a constant score per pair.
-            if scored_results:
+            if scored_results and reranking == "interleave":
+                # Interleave order is authoritative for dedup recall: do NOT re-sort by the
+                # recency/temporal boosts — that re-sort is precisely what buried the twin
+                # under RRF. Seed weight from the interleave-position rrf_score so the order
+                # survives Step 5 truncation and the Step 6 token-budget cut.
+                for sr in scored_results:
+                    sr.weight = sr.candidate.rrf_score
+                log_buffer.append("  [4.6] Interleave order preserved (combined scoring skipped)")
+            elif scored_results:
                 ce = reranker_instance.cross_encoder
-                is_passthrough = ce is not None and ce.provider_name == "rrf"
+                # "rrf" mode is passthrough by construction; so is a configured "rrf" CE.
+                is_passthrough = (reranking == "rrf") or (ce is not None and ce.provider_name == "rrf")
                 apply_combined_scoring(
                     scored_results,
                     now=_recall_scoring_now(question_date),
@@ -4128,7 +4170,7 @@ class MemoryEngine(MemoryEngineInterface):
                 tracer.add_phase_metric(
                     "reranking",
                     step_duration,
-                    {"reranker_type": "cross-encoder", "candidates_reranked": len(scored_results)},
+                    {"reranker_type": rerank_kind, "candidates_reranked": len(scored_results)},
                 )
 
             # Step 5: Truncate to thinking_budget * 2 for token filtering
