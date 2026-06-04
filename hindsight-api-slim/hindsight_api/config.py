@@ -363,6 +363,16 @@ ENV_LLM_VERTEXAI_SERVICE_ACCOUNT_KEY = "HINDSIGHT_API_LLM_VERTEXAI_SERVICE_ACCOU
 # Gemini safety settings
 ENV_LLM_GEMINI_SAFETY_SETTINGS = "HINDSIGHT_API_LLM_GEMINI_SAFETY_SETTINGS"
 
+# Gemini prompt caching. When enabled, retain fact-extraction reuses a
+# CachedContent prefix for the static system_instruction + response_schema,
+# cutting per-call input cost on workloads with many small documents.
+# Provider-agnostic prompt-prefix caching. Providers that support it (currently
+# Gemini/Vertex via CachedContent) reuse the large, fixed, bank-agnostic system
+# prefix at the cached-input rate; providers that don't simply ignore it. On by
+# default — the prefix is bank-agnostic so a single cache is shared across all
+# banks, and creation soft-fails to an uncached call, so it never breaks a request.
+ENV_LLM_PROMPT_CACHE_ENABLED = "HINDSIGHT_API_LLM_PROMPT_CACHE_ENABLED"
+
 # Retain settings
 ENV_RETAIN_MAX_COMPLETION_TOKENS = "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS"
 ENV_RETAIN_CHUNK_SIZE = "HINDSIGHT_API_RETAIN_CHUNK_SIZE"
@@ -766,6 +776,7 @@ DEFAULT_RETAIN_BATCH_TOKENS = 10_000  # ~40KB of text  # Max chars per sub-batch
 DEFAULT_RETAIN_ENTITY_LOOKUP = "trigram"  # "full" or "trigram"
 DEFAULT_RETAIN_ENTITY_RESOLUTION_BATCH_SIZE = 100  # Unique entity names per pg_trgm candidate lookup query
 DEFAULT_RETAIN_BATCH_ENABLED = False  # Use LLM Batch API for fact extraction (only when async=True)
+DEFAULT_LLM_PROMPT_CACHE_ENABLED = True  # Reuse the fixed system prefix via provider prompt caching
 DEFAULT_RETAIN_BATCH_POLL_INTERVAL_SECONDS = 60  # Batch API polling interval in seconds
 
 # File storage defaults
@@ -1157,6 +1168,10 @@ class HindsightConfig:
 
     # Gemini safety settings (None = use Gemini defaults; list of dicts with category/threshold)
     llm_gemini_safety_settings: list | None
+
+    # Gemini prompt caching toggle. When True, retain extraction reuses a
+    # CachedContent prefix for its system prompt + response schema.
+    llm_prompt_cache_enabled: bool
 
     # Built-in llama.cpp configuration (for provider=llamacpp)
     llamacpp_model_path: str | None  # Path to GGUF file (None = auto-download default)
@@ -1759,6 +1774,10 @@ class HindsightConfig:
             or DEFAULT_LLM_VERTEXAI_SERVICE_ACCOUNT_KEY,
             # Gemini safety settings (JSON-encoded list of {category, threshold} dicts)
             llm_gemini_safety_settings=json.loads(os.getenv(ENV_LLM_GEMINI_SAFETY_SETTINGS, "null")),
+            llm_prompt_cache_enabled=os.getenv(
+                ENV_LLM_PROMPT_CACHE_ENABLED, str(DEFAULT_LLM_PROMPT_CACHE_ENABLED)
+            ).lower()
+            in ("1", "true", "yes", "on"),
             # Built-in llama.cpp configuration
             llamacpp_model_path=os.getenv(ENV_LLAMACPP_MODEL_PATH) or None,
             llamacpp_gpu_layers=int(os.getenv(ENV_LLAMACPP_GPU_LAYERS, str(DEFAULT_LLAMACPP_GPU_LAYERS))),
