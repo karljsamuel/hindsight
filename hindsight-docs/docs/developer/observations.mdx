@@ -58,7 +58,7 @@ Consolidation can still produce two observations that say the same thing in slig
 
 When enabled, Hindsight reconciles them automatically. Whenever an observation is created **or** updated, it is compared against the existing observations it most closely resembles. If one is highly similar, a focused check decides whether to **merge** them into a single belief (folding both sets of supporting evidence together) or **keep** them separate. Because the check reads the full text of both, observations that differ in a meaningful detail — a number, a negation, a named entity or language — are correctly kept apart rather than collapsed.
 
-This is controlled by the [`HINDSIGHT_API_CONSOLIDATION_DEDUP_THRESHOLD`](/developer/configuration#observations) setting: the cosine similarity at or above which two observations are reconciled. It is **disabled by default** (`1.0`) and is available on PostgreSQL deployments. Lower it (e.g. `0.97`) to enable reconciliation; a lower value reconciles more aggressively.
+This is controlled by the [`HINDSIGHT_API_CONSOLIDATION_DEDUP_THRESHOLD`](/developer/configuration#observations) setting: the cosine similarity at or above which two observations are reconciled. It is **enabled by default** (`0.97`); a lower value reconciles more aggressively, and `1.0` disables it. Reconciliation runs on PostgreSQL deployments only — it is skipped on Oracle regardless of the threshold.
 
 ### Disabling Auto-Consolidation
 

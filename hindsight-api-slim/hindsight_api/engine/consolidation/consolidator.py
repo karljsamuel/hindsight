@@ -112,6 +112,19 @@ observation that preserves EVERY detail from both. If they differ in ANY importa
 number/quantity, a named entity or language, a negation, or a condition — respond action="keep"."""
 
 
+def _dedup_active(config: Any) -> bool:
+    """Whether create/update semantic dedup runs for this consolidation.
+
+    Enabled when the resolved threshold is < 1.0, EXCEPT on Oracle: the merge path uses
+    Postgres-only SQL (``unnest``/``array_agg``, ``UPDATE ... FROM``), so on Oracle dedup is
+    skipped — it behaves exactly as it did before this feature, regardless of the configured
+    threshold. This is why the feature can ship enabled-by-default without breaking Oracle.
+    """
+    if config is None or getattr(config, "consolidation_dedup_threshold", 1.0) >= 1.0:
+        return False
+    return get_config().database_backend != "oracle"
+
+
 @dataclass
 class _DedupOutcome:
     """Result of probing one observation against its in-scope neighbours.
@@ -1351,7 +1364,7 @@ async def _process_memory_batch(
     # observation into a twin — the create-time guard can't see this). The trace operation/scope is
     # "consolidation_dedup" (routes through the consolidation concurrency bucket via llm_wrapper's
     # "consolidation" prefix; recorded distinctly in llm_requests).
-    dedup_enabled = config is not None and getattr(config, "consolidation_dedup_threshold", 1.0) < 1.0
+    dedup_enabled = _dedup_active(config)
     dedup_llm_config = (
         memory_engine._consolidation_llm_config.with_config(config, bank_id=bank_id, operation="consolidation_dedup")
         if dedup_enabled
