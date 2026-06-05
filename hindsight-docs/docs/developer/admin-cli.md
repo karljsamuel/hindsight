@@ -102,6 +102,9 @@ The backup includes:
 - Entities and their relationships
 - Memory units (facts, experiences, observations)
 - Entity cooccurrences and memory links
+- Mental models and directives
+- Webhooks and file storage
+- Internal operational tables (async operations, audit log, graph-maintenance queue, and similar bookkeeping) so a restore reproduces a faithful full-database snapshot
 
 :::note Consistency
 Backups are created within a database transaction with `REPEATABLE READ` isolation, ensuring a consistent snapshot across all tables.
