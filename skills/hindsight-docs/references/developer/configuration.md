@@ -1398,6 +1398,15 @@ This ensures `shadow-*` banks are always consolidated before others, even if the
 | `HINDSIGHT_API_SKIP_LLM_VERIFICATION` | Skip LLM connection check on startup | `false` |
 | `HINDSIGHT_API_LAZY_RERANKER` | Lazy-load reranker model (faster startup) | `false` |
 
+#### Bank stats cache
+
+`get_bank_stats` aggregates over `memory_links` (joining `memory_units`), which can be a multi-second scan on banks with millions of rows. Because the result is intentionally approximate — it backs a UI widget and the freshness hint inside `reflect` — it is cached per `(schema, bank)` for a few tens of seconds, which also coalesces concurrent misses onto a single in-flight query. Tune it for high-concurrency or large-bank deployments:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HINDSIGHT_API_BANK_STATS_CACHE_TTL_SECONDS` | Time-to-live (seconds) for the `get_bank_stats` result cache. `0` disables caching, so every call runs the query. | `60` |
+| `HINDSIGHT_API_BANK_STATS_CACHE_MAX_ENTRIES` | Maximum number of cached `(schema, bank)` entries before LRU eviction. Bounds memory in deployments with many banks. | `1024` |
+
 #### Native thread pools
 
 When local embeddings or reranking run in-process, the underlying BLAS/ML libraries (OpenBLAS, OpenMP, MKL) each spawn a worker pool sized to the host CPU count. Because Hindsight already parallelizes across requests via its own thread-pool executors, those native pools oversubscribe the CPU — on a many-core host the process can accumulate well over 100 native threads. This inflates memory and, under contention, can degrade throughput. Hindsight therefore bounds each native pool to **16 threads** (or the number of *available* CPUs, whichever is smaller) by default, capping runaway growth on large hosts while leaving within-call parallelism intact.
