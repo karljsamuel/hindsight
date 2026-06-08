@@ -10,6 +10,12 @@ For the source code, see [`hindsight-integrations/opencode`](https://github.com/
 
 ← [Back to main changelog](../index.md)
 
+## [0.2.3](https://github.com/vectorize-io/hindsight/tree/integrations/opencode/v0.2.3)
+
+**Bug Fixes**
+
+- Improved opencode integration logging to show configuration-only debug info, log the resolved endpoint, and surface errors more clearly.<span style={{color: "var(--ifm-color-emphasis-500)", margin: "0 0.3em"}}>·</span><a href="https://github.com/nicoloboschi" target="_blank" rel="noopener noreferrer" style={{color: "var(--ifm-color-primary)", textDecoration: "none", display: "inline-flex", alignItems: "center", gap: "4px", verticalAlign: "middle"}}>@nicoloboschi</a><span style={{color: "var(--ifm-color-emphasis-500)", margin: "0 0.3em"}}>·</span><a href="https://github.com/vectorize-io/hindsight/commit/796a9eff9" target="_blank" rel="noopener noreferrer" style={{fontFamily: "var(--ifm-font-family-monospace, monospace)", fontSize: "0.85em", color: "var(--ifm-color-emphasis-600)"}}>796a9eff9</a>
+
 ## [0.2.2](https://github.com/vectorize-io/hindsight/tree/integrations/opencode/v0.2.2)
 
 **Bug Fixes**
