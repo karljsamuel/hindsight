@@ -18,6 +18,7 @@ def setup_test_env():
     # Save original environment values
     env_vars_to_save = [
         "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS",
+        "HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS",
         "HINDSIGHT_API_RETAIN_CHUNK_SIZE",
         "HINDSIGHT_API_LLM_PROVIDER",
         "HINDSIGHT_API_LLM_MODEL",
@@ -122,6 +123,28 @@ def test_semantic_min_similarity_must_be_between_zero_and_one():
 
     with pytest.raises(ValueError, match="semantic_min_similarity"):
         HindsightConfig.from_env()
+
+
+def test_consolidation_max_completion_tokens_defaults_to_unset():
+    """By default consolidation sends no explicit output budget (backwards compatible)."""
+    from hindsight_api.config import HindsightConfig
+
+    os.environ["HINDSIGHT_API_LLM_PROVIDER"] = "mock"
+    os.environ.pop("HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS", None)
+
+    config = HindsightConfig.from_env()
+    assert config.consolidation_max_completion_tokens is None
+
+
+def test_consolidation_max_completion_tokens_env_override():
+    """HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS controls consolidation LLM output budget."""
+    from hindsight_api.config import HindsightConfig
+
+    os.environ["HINDSIGHT_API_LLM_PROVIDER"] = "mock"
+    os.environ["HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS"] = "8192"
+
+    config = HindsightConfig.from_env()
+    assert config.consolidation_max_completion_tokens == 8192
 
 
 def test_log_config_masks_database_urls(caplog):
