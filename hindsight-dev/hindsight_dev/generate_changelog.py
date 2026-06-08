@@ -71,6 +71,7 @@ INTEGRATIONS: dict[str, IntegrationMeta] = {
     "superagent": IntegrationMeta("hindsight-superagent", "Superagent"),
     "haystack": IntegrationMeta("hindsight-haystack", "Haystack"),
     "roo-code": IntegrationMeta("hindsight-roo-code", "Roo Code"),
+    "omo": IntegrationMeta("hindsight-omo", "OMO"),
 }
 
 VALID_INTEGRATIONS = list(INTEGRATIONS.keys())

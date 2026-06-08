@@ -60,6 +60,7 @@ jobs:
       integrations-vapi: ${{ steps.filter.outputs.integrations-vapi }}
       integrations-flowise: ${{ steps.filter.outputs.integrations-flowise }}
       integrations-google-adk: ${{ steps.filter.outputs.integrations-google-adk }}
+      integrations-omo: ${{ steps.filter.outputs.integrations-omo }}
       integrations-haystack: ${{ steps.filter.outputs.integrations-haystack }}
       tools-agent-sdk: ${{ steps.filter.outputs.tools-agent-sdk }}
       integrations-roo-code: ${{ steps.filter.outputs.integrations-roo-code }}
@@ -181,6 +182,8 @@ jobs:
             - 'hindsight-integrations/flowise/**'
           integrations-google-adk:
             - 'hindsight-integrations/google-adk/**'
+          integrations-omo:
+            - 'hindsight-integrations/omo/**'
           tools-agent-sdk:
             - 'hindsight-tools/hindsight-agent-sdk/**'
           integrations-roo-code:
@@ -439,6 +442,32 @@ jobs:
 
     - name: Run tests
       working-directory: ./hindsight-integrations/claude-code
+      run: python -m pytest tests/ -v
+
+  test-omo-integration:
+    needs: [detect-changes]
+    if: >-
+      (github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.integrations-omo == 'true' ||
+      needs.detect-changes.outputs.ci == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: ${{ github.event.pull_request.head.sha || '' }}
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.11'
+
+    - name: Install pytest
+      run: pip install pytest
+
+    - name: Run tests
+      working-directory: ./hindsight-integrations/omo
       run: python -m pytest tests/ -v
 
   test-cline-integration:
@@ -4290,6 +4319,7 @@ jobs:
       - build-ai-sdk-integration
       - test-ai-sdk-integration-deno
       - test-opencode-integration
+      - test-omo-integration
       - test-cloudflare-oauth-proxy-integration
       - build-chat-integration
       - test-paperclip-integration
