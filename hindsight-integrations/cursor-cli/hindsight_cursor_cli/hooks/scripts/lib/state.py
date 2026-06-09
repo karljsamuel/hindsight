@@ -17,9 +17,7 @@ else:
 
 def _state_dir():
     """Get the state directory, creating it if needed."""
-    state_dir = os.path.join(
-        os.path.expanduser("~"), ".hindsight", "cursor-cli", "state"
-    )
+    state_dir = os.path.join(os.path.expanduser("~"), ".hindsight", "cursor-cli", "state")
     os.makedirs(state_dir, exist_ok=True)
     return state_dir
 

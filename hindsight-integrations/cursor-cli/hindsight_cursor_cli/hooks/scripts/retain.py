@@ -53,11 +53,7 @@ def run_retain(hook_input: dict, force: bool = False) -> None:
 
     # Common fields provide conversation_id (== session_id) and transcript_path.
     # Older or alternative payloads may use "session_id" instead.
-    session_id = (
-        hook_input.get("conversation_id")
-        or hook_input.get("session_id")
-        or "unknown"
-    )
+    session_id = hook_input.get("conversation_id") or hook_input.get("session_id") or "unknown"
     transcript_path = hook_input.get("transcript_path", "")
 
     # Read full transcript

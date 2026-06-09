@@ -60,11 +60,7 @@ def _resolve_session_id(hook_input):
     """Resolve a stable session identifier from the hook payload."""
     if not isinstance(hook_input, dict):
         return "unknown"
-    return (
-        hook_input.get("session_id")
-        or hook_input.get("conversation_id")
-        or "unknown"
-    )
+    return hook_input.get("session_id") or hook_input.get("conversation_id") or "unknown"
 
 
 def derive_bank_id(hook_input, config):
@@ -121,9 +117,7 @@ def ensure_bank_mission(client, bank_id, config, debug_fn=None):
 
     try:
         retain_mission = config.get("retainMission")
-        client.set_bank_mission(
-            bank_id, mission, retain_mission=retain_mission, timeout=10
-        )
+        client.set_bank_mission(bank_id, mission, retain_mission=retain_mission, timeout=10)
         missions_set[bank_id] = True
         if len(missions_set) > 10000:
             keys = sorted(missions_set.keys())

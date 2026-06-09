@@ -127,15 +127,11 @@ def load_config():
 
     # 1. Plugin install settings.json (shipped with the integration, in the
     #    install root — the parent of the `scripts` and `lib` directories).
-    install_root = os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    )
+    install_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     _load_settings_file(os.path.join(install_root, "settings.json"), config)
 
     # 2. User config — stable, version-independent
-    user_config_path = os.path.join(
-        os.path.expanduser("~"), ".hindsight", "cursor-cli.json"
-    )
+    user_config_path = os.path.join(os.path.expanduser("~"), ".hindsight", "cursor-cli.json")
     _load_settings_file(user_config_path, config)
 
     # 3. Environment variable overrides (highest priority)

@@ -163,9 +163,7 @@ def _ensure_daemon_running(config, port, debug_fn=None):
         if result.returncode != 0:
             if debug_fn:
                 debug_fn(f"Profile create stderr: {result.stderr.strip()}")
-            raise RuntimeError(
-                f"Profile create failed (exit {result.returncode}): {result.stderr}"
-            )
+            raise RuntimeError(f"Profile create failed (exit {result.returncode}): {result.stderr}")
         if debug_fn:
             debug_fn("Profile configured")
     except subprocess.TimeoutExpired:
@@ -259,10 +257,12 @@ def prestart_daemon_background(config, debug_fn=None):
             profile_args.extend(["--env", f"{env_name}={env_val}"])
 
     import shlex
+
     profile_str = shlex.join(embed_cmd + profile_args)
     daemon_str = shlex.join(embed_cmd + ["daemon", "--profile", PROFILE_NAME, "start"])
 
     import subprocess as _sp
+
     _sp.Popen(
         f"{profile_str} && {daemon_str}",
         shell=True,

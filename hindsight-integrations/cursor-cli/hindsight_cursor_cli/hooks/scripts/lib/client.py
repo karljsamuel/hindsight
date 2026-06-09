@@ -35,9 +35,7 @@ def _validate_api_url(url):
     """Validate and normalize the API URL. Reject non-HTTP schemes."""
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        raise ValueError(
-            f"Hindsight API URL must use http or https, got: {parsed.scheme!r}"
-        )
+        raise ValueError(f"Hindsight API URL must use http or https, got: {parsed.scheme!r}")
     if not parsed.hostname:
         raise ValueError(f"Hindsight API URL has no hostname: {url!r}")
     return url.rstrip("/")
@@ -148,9 +146,7 @@ class HindsightClient:
         }
         return self._request("POST", path, body, timeout=timeout)
 
-    def set_bank_mission(
-        self, bank_id, mission, retain_mission=None, timeout=15
-    ):
+    def set_bank_mission(self, bank_id, mission, retain_mission=None, timeout=15):
         """Set the mission/persona for a bank.
 
         Uses PATCH /banks/{id}/config with reflect_mission and retain_mission.

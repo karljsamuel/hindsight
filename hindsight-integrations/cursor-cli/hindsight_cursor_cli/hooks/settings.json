@@ -1,5 +1,4 @@
 {
-  "version": "0.1.0",
   "hindsightApiUrl": "",
   "bankId": "cursor-cli",
   "bankMission": "You are a Cursor CLI coding assistant. Focus on technical decisions, code changes, debugging sessions, and project context relevant to the user's work.",

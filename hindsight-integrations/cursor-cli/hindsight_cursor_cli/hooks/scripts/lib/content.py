@@ -173,9 +173,7 @@ def _read_transcript_rich(transcript_path):
                     msg = entry.get("message", {})
                     text = _extract_text_from_blocks(msg.get("content", []))
                     if text.strip():
-                        messages.append(
-                            {"role": "user", "content": [{"type": "text", "text": text.strip()}]}
-                        )
+                        messages.append({"role": "user", "content": [{"type": "text", "text": text.strip()}]})
 
                 elif event_type == "assistant":
                     msg = entry.get("message", {})
@@ -186,9 +184,7 @@ def _read_transcript_rich(transcript_path):
                 elif event_type == "thinking":
                     text = entry.get("text", "")
                     if text:
-                        assistant_blocks.append(
-                            {"type": "text", "text": f"[thinking] {text.strip()}"}
-                        )
+                        assistant_blocks.append({"type": "text", "text": f"[thinking] {text.strip()}"})
 
                 elif event_type == "tool_call":
                     name = entry.get("name", "unknown")
@@ -224,9 +220,7 @@ def _read_transcript_rich(transcript_path):
                 elif event_type == "task":
                     text = entry.get("text") or entry.get("summary") or ""
                     if text:
-                        assistant_blocks.append(
-                            {"type": "text", "text": f"[task] {text.strip()}"}
-                        )
+                        assistant_blocks.append({"type": "text", "text": f"[task] {text.strip()}"})
 
                 elif event_type == "request":
                     # Awaiting user input — nothing to retain.

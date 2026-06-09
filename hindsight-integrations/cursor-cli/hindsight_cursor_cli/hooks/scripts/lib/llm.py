@@ -51,8 +51,7 @@ def detect_llm_config(config):
     if override_provider:
         if not override_key and override_provider not in NO_KEY_REQUIRED:
             raise RuntimeError(
-                f'HINDSIGHT_API_LLM_PROVIDER is set to "{override_provider}" '
-                "but HINDSIGHT_API_LLM_API_KEY is not set."
+                f'HINDSIGHT_API_LLM_PROVIDER is set to "{override_provider}" but HINDSIGHT_API_LLM_API_KEY is not set.'
             )
         pinfo = _find_provider(override_provider)
         return {
@@ -77,8 +76,7 @@ def detect_llm_config(config):
         if not api_key and cfg_provider not in NO_KEY_REQUIRED:
             key_source = key_env_name or (pinfo["key_env"] if pinfo else "unknown")
             raise RuntimeError(
-                f'Plugin config llmProvider is "{cfg_provider}" but no API key found. '
-                f"Expected env var: {key_source}"
+                f'Plugin config llmProvider is "{cfg_provider}" but no API key found. Expected env var: {key_source}'
             )
         return {
             "provider": cfg_provider,
