@@ -177,7 +177,12 @@ jobs:
         EXIT_CODE=$?
         echo "$OUTPUT"
         if [ $EXIT_CODE -ne 0 ]; then
-          if echo "$OUTPUT" | grep -q "cannot publish over"; then
+          # Treat "already published" as success so re-pointed-tag re-runs stay green.
+          # "cannot publish over" = the version exists. TLOG_CREATE_ENTRY_ERROR / 409
+          # "equivalent entry already exists in the transparency log" = the identical
+          # --provenance artifact was already logged on a prior run (Sigstore tlog is
+          # idempotent); the package is published, so this is benign.
+          if echo "$OUTPUT" | grep -qE "cannot publish over|TLOG_CREATE_ENTRY_ERROR|already exists in the transparency log"; then
             echo "Package version already published, skipping..."
             exit 0
           fi
