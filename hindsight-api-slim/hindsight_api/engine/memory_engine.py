@@ -11,6 +11,8 @@ This implements a sophisticated memory architecture that combines:
 
 import asyncio
 import contextvars
+import functools
+import inspect
 import json
 import logging
 import time
@@ -18,7 +20,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, ParamSpec, TypeVar, cast, overload
 
 import asyncpg
 import httpx
@@ -67,6 +69,12 @@ from .sql import SQLDialect, create_sql_dialect
 # Context variable for current schema (async-safe, per-task isolation)
 # Note: default is None, actual default comes from config via get_current_schema()
 _current_schema: contextvars.ContextVar[str | None] = contextvars.ContextVar("current_schema", default=None)
+
+# Context variable for the bank an operation runs for (async-safe, per-task isolation).
+# Set by the engine wherever it learns the bank (recall/retain/batch/task execution) so
+# downstream provider calls can attribute spend per bank — e.g. tagging the OpenAI `user`
+# field for cost gateways. None outside a bank-scoped operation.
+_current_bank_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("current_bank_id", default=None)
 MENTAL_MODEL_PENDING_CONTENT = "Generating content..."
 
 
@@ -77,6 +85,44 @@ def get_current_schema() -> str:
         # Fall back to configured default schema
         return get_config().database_schema
     return schema
+
+
+def get_current_bank_id() -> str | None:
+    """Get the bank id of the in-flight operation, or None outside a bank-scoped context."""
+    return _current_bank_id.get()
+
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _bind_bank_id(
+    arg: str = "bank_id", key: str | None = None
+) -> Callable[[Callable[_P, Awaitable[_R]]], Callable[_P, Awaitable[_R]]]:
+    """Bind ``_current_bank_id`` to an argument of the wrapped coroutine for the call's duration.
+
+    ``arg`` names the parameter carrying the bank id; ``key`` optionally pulls it out of a
+    dict-valued argument (e.g. ``task_dict["bank_id"]``). Token-based set/reset (including on
+    exception) keeps the binding scoped to the call.
+    """
+
+    def decorate(func: Callable[_P, Awaitable[_R]]) -> Callable[_P, Awaitable[_R]]:
+        sig = inspect.signature(func)
+
+        @functools.wraps(func)
+        async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+            value = sig.bind(*args, **kwargs).arguments.get(arg)
+            if key is not None and isinstance(value, dict):
+                value = value.get(key)
+            token = _current_bank_id.set(value if isinstance(value, str) else None)
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                _current_bank_id.reset(token)
+
+        return wrapper
+
+    return decorate
 
 
 def count_tokens(text: str) -> int:
@@ -1626,6 +1672,7 @@ class MemoryEngine(MemoryEngineInterface):
 
         logger.info(f"[REFRESH_MENTAL_MODEL_TASK] Completed for bank_id={bank_id}, mental_model_id={mental_model_id}")
 
+    @_bind_bank_id("task_dict", key="bank_id")
     async def execute_task(self, task_dict: dict[str, Any]):
         """
         Execute a task by routing it to the appropriate handler.
@@ -2933,6 +2980,7 @@ class MemoryEngine(MemoryEngineInterface):
         ctx = request_context if request_context is not None else RC()
         return asyncio.run(self.retain_async(bank_id, content, context, event_date, request_context=ctx))
 
+    @_bind_bank_id()
     async def retain_async(
         self,
         bank_id: str,
@@ -2979,6 +3027,7 @@ class MemoryEngine(MemoryEngineInterface):
         # Return the first (and only) list of unit IDs
         return result[0] if result else []
 
+    @_bind_bank_id()
     async def retain_batch_async(
         self,
         bank_id: str,
@@ -3706,6 +3755,7 @@ class MemoryEngine(MemoryEngineInterface):
             )
         )
 
+    @_bind_bank_id()
     async def recall_async(
         self,
         bank_id: str,
