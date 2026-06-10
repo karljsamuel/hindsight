@@ -490,8 +490,11 @@ Converts text into dense vector representations for semantic similarity search.
 | Model | Dimensions | Use Case |
 |-------|------------|----------|
 | `gemini-embedding-001` | 768 (configurable) | Default Google, general purpose |
+| `gemini-embedding-2-preview` | 768 (configurable) | Gemini Embedding 2 family; multimodal, one vector per input |
 
 Google's `gemini-embedding-001` supports configurable output dimensionality via truncation, google recommend using: 768, 1536, 3072, via `HINDSIGHT_API_EMBEDDINGS_GEMINI_OUTPUT_DIMENSIONALITY`. Default is 768.
+
+The `gemini-embedding-2` family, including `gemini-embedding-2-preview`, is supported on both the Gemini API and Vertex AI. These models aggregate multi-input requests, so Hindsight automatically embeds one input per call to keep per-fact vectors aligned.
 
 ### Cohere Models
 
