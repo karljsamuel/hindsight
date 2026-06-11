@@ -52,7 +52,9 @@
       "empty": "Aún no hay bancos de memoria.",
       "create": "Crear nuevo banco",
       "switchTitle": "Cambiar banco de memoria",
-      "returnTo": "Volver a {bank}"
+      "returnTo": "Volver a {bank}",
+      "copyName": "Copiar nombre",
+      "copied": "Copiado al portapapeles"
     },
     "viewOnGitHub": "Ver en GitHub"
   },
@@ -422,7 +424,17 @@
     "memoryDefenseAction_redact": "Redactar",
     "memoryDefenseAction_block": "Bloquear",
     "memoryDefenseSecretLeakTitle": "Prevención de fugas de secretos",
-    "memoryDefenseSecretLeakDescription": "Analiza el contenido retenido en busca de secretos. 44 patrones que cubren claves comunes de proveedores, AWS e información personal."
+    "memoryDefenseSecretLeakDescription": "Analiza el contenido retenido en busca de secretos. 44 patrones que cubren claves comunes de proveedores, AWS e información personal.",
+    "memoryDefenseEnterpriseTitle": "Memory Defense Enterprise",
+    "memoryDefenseEnterpriseSubtitle": "Detecta más, redacta más inteligentemente y audita todo: disponible en Hindsight Cloud.",
+    "memoryDefenseEnterpriseFeatureDetectSecrets": "Detección avanzada de secretos: más de 200 patrones que cubren claves de proveedores, AWS, GitHub y tokens de CI",
+    "memoryDefenseEnterpriseFeatureBase64": "Decodificación Base64: detecta secretos ocultos en cargas útiles codificadas",
+    "memoryDefenseEnterpriseFeatureLlm": "Análisis con LLM: detecta patrones de exfiltración novedosos que las regex no pueden",
+    "memoryDefenseEnterpriseFeaturePromptInjection": "Detección de inyección de prompts: bloquea intentos de anular el comportamiento del agente",
+    "memoryDefenseEnterpriseFeatureSizeAnomaly": "Anomalía de tamaño: rechaza cargas útiles sospechosamente grandes",
+    "memoryDefenseEnterpriseFeatureProtectedKeys": "Espacios de nombres de etiquetas protegidos: aplica etiquetas de identidad inmutables",
+    "memoryDefenseEnterpriseCta": "Solicitar una demo",
+    "memoryDefenseEnterpriseMeetingNote": "Las reuniones solo están disponibles en inglés por el momento."
   },
   "bankOperations": {
     "title": "Operaciones en segundo plano",

@@ -30,8 +30,21 @@ class DefenseAction(str, Enum):
 _VALID_ACTIONS = {a.value for a in DefenseAction}
 
 # Detector identifiers valid as ``policy.rules[*].on``. The OSS extension only
-# screens for sensitive data (secrets/PII), so that's the only accepted value.
-_VALID_DETECTORS = {"sensitive_data"}
+# screens for ``sensitive_data`` itself, but the parser accepts the full known
+# vocabulary so downstream extensions (e.g. hindsight-cloud) can persist
+# policies that reference cloud-only detectors without the OSS PATCH layer
+# 422-ing the write. Each rule's actual dispatch and entitlement enforcement
+# happens in the loaded extension's ``screen()``; a rule with an on-name the
+# active extension doesn't implement is a silent no-op for that extension.
+_VALID_DETECTORS = {
+    "sensitive_data",
+    "prompt_injection",
+    "size_anomaly",
+    "protected_keys",
+    "detect_secrets",
+    "base64_decode",
+    "llm_screen",
+}
 
 
 @dataclass(frozen=True)

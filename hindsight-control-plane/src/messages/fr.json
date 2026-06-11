@@ -52,7 +52,9 @@
       "empty": "Aucune banque de mémoire pour l'instant.",
       "create": "Créer une nouvelle banque",
       "switchTitle": "Changer de banque de mémoire",
-      "returnTo": "Retourner à {bank}"
+      "returnTo": "Retourner à {bank}",
+      "copyName": "Copier le nom",
+      "copied": "Copié dans le presse-papiers"
     },
     "viewOnGitHub": "Voir sur GitHub"
   },
@@ -422,7 +424,17 @@
     "memoryDefenseAction_redact": "Censurer",
     "memoryDefenseAction_block": "Bloquer",
     "memoryDefenseSecretLeakTitle": "Prévention des fuites de secrets",
-    "memoryDefenseSecretLeakDescription": "Analyse le contenu retenu à la recherche de secrets. 44 motifs couvrant les clés de fournisseurs courants, AWS et les informations personnelles."
+    "memoryDefenseSecretLeakDescription": "Analyse le contenu retenu à la recherche de secrets. 44 motifs couvrant les clés de fournisseurs courants, AWS et les informations personnelles.",
+    "memoryDefenseEnterpriseTitle": "Memory Defense Enterprise",
+    "memoryDefenseEnterpriseSubtitle": "Détectez davantage, expurgez plus intelligemment et auditez tout — disponible dans Hindsight Cloud.",
+    "memoryDefenseEnterpriseFeatureDetectSecrets": "Détection avancée de secrets : plus de 200 motifs couvrant les clés de fournisseurs, AWS, GitHub et tokens CI",
+    "memoryDefenseEnterpriseFeatureBase64": "Décodage Base64 : détecte les secrets cachés dans les charges encodées",
+    "memoryDefenseEnterpriseFeatureLlm": "Analyse par LLM : détecte les nouveaux motifs d'exfiltration que les regex ne peuvent pas",
+    "memoryDefenseEnterpriseFeaturePromptInjection": "Détection d'injection de prompt : bloque les tentatives de modifier le comportement de l'agent",
+    "memoryDefenseEnterpriseFeatureSizeAnomaly": "Anomalie de taille : rejette les charges utiles anormalement volumineuses",
+    "memoryDefenseEnterpriseFeatureProtectedKeys": "Espaces de noms de tags protégés : applique des tags d'identité immuables",
+    "memoryDefenseEnterpriseCta": "Demander une démo",
+    "memoryDefenseEnterpriseMeetingNote": "Les réunions ne sont disponibles qu'en anglais pour le moment."
   },
   "bankOperations": {
     "title": "Opérations en arrière-plan",

@@ -52,7 +52,9 @@
       "empty": "暫時沒有記憶庫。",
       "create": "建立新記憶庫",
       "switchTitle": "切換記憶庫",
-      "returnTo": "返回 {bank}"
+      "returnTo": "返回 {bank}",
+      "copyName": "複製名稱",
+      "copied": "已複製到剪貼簿"
     },
     "viewOnGitHub": "在 GitHub 檢視"
   },
@@ -422,7 +424,17 @@
     "memoryDefenseAction_redact": "遮蔽",
     "memoryDefenseAction_block": "封鎖",
     "memoryDefenseSecretLeakTitle": "密鑰外洩防護",
-    "memoryDefenseSecretLeakDescription": "掃描保留內容嘅密鑰。44 種樣式涵蓋常見供應商金鑰、AWS 同個人資料。"
+    "memoryDefenseSecretLeakDescription": "掃描保留內容嘅密鑰。44 種樣式涵蓋常見供應商金鑰、AWS 同個人資料。",
+    "memoryDefenseEnterpriseTitle": "Memory Defense Enterprise",
+    "memoryDefenseEnterpriseSubtitle": "偵測更多、智能編輯、全面稽核 — Hindsight Cloud 提供。",
+    "memoryDefenseEnterpriseFeatureDetectSecrets": "進階密鑰偵測:200+ 種樣式,涵蓋供應商金鑰、AWS、GitHub 同 CI 權杖",
+    "memoryDefenseEnterpriseFeatureBase64": "Base64 解碼:擷取編碼負載中隱藏嘅密鑰",
+    "memoryDefenseEnterpriseFeatureLlm": "LLM 篩查:擷取正則表達式無法識別嘅新型外洩模式",
+    "memoryDefenseEnterpriseFeaturePromptInjection": "提示詞注入偵測:阻止覆寫代理行為嘅嘗試",
+    "memoryDefenseEnterpriseFeatureSizeAnomaly": "大小異常:拒絕可疑嘅過大負載",
+    "memoryDefenseEnterpriseFeatureProtectedKeys": "受保護嘅標籤命名空間:強制使用不可變嘅身份標籤",
+    "memoryDefenseEnterpriseCta": "申請示範",
+    "memoryDefenseEnterpriseMeetingNote": "目前會議只支援英文。"
   },
   "bankOperations": {
     "title": "背景作業",

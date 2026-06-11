@@ -52,7 +52,9 @@
       "empty": "メモリバンクがありません。",
       "create": "新しいバンクを作成",
       "switchTitle": "メモリバンクを切り替え",
-      "returnTo": "{bank}に戻る"
+      "returnTo": "{bank}に戻る",
+      "copyName": "名前をコピー",
+      "copied": "クリップボードにコピーしました"
     },
     "viewOnGitHub": "GitHubで表示"
   },
@@ -422,7 +424,17 @@
     "memoryDefenseAction_redact": "マスク",
     "memoryDefenseAction_block": "ブロック",
     "memoryDefenseSecretLeakTitle": "シークレット漏洩防止",
-    "memoryDefenseSecretLeakDescription": "保持されたコンテンツのシークレットをスキャンします。一般的なプロバイダーキー、AWS、個人情報をカバーする44パターン。"
+    "memoryDefenseSecretLeakDescription": "保持されたコンテンツのシークレットをスキャンします。一般的なプロバイダーキー、AWS、個人情報をカバーする44パターン。",
+    "memoryDefenseEnterpriseTitle": "Memory Defense Enterprise",
+    "memoryDefenseEnterpriseSubtitle": "より多くを検出し、よりスマートに編集し、すべてを監査 — Hindsight Cloudで利用可能。",
+    "memoryDefenseEnterpriseFeatureDetectSecrets": "高度なシークレット検出:プロバイダーキー、AWS、GitHub、CIトークンをカバーする200以上のパターン",
+    "memoryDefenseEnterpriseFeatureBase64": "Base64デコード:エンコードされたペイロード内の隠されたシークレットを検出",
+    "memoryDefenseEnterpriseFeatureLlm": "LLMスクリーニング:正規表現では捉えられない新しいエクスフィルトレーションパターンを検出",
+    "memoryDefenseEnterpriseFeaturePromptInjection": "プロンプトインジェクション検出:エージェントの動作を上書きする試みをブロック",
+    "memoryDefenseEnterpriseFeatureSizeAnomaly": "サイズ異常:疑わしく大きいペイロードを拒否",
+    "memoryDefenseEnterpriseFeatureProtectedKeys": "保護されたタグ名前空間:不変のアイデンティティタグを強制",
+    "memoryDefenseEnterpriseCta": "デモをリクエスト",
+    "memoryDefenseEnterpriseMeetingNote": "現在、ミーティングは英語のみで対応しています。"
   },
   "bankOperations": {
     "title": "バックグラウンド操作",

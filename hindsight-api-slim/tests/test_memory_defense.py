@@ -55,6 +55,29 @@ def test_parse_policy_rejects_unknown_detector() -> None:
         parse_policy({"enabled": True, "rules": [{"on": "nope", "action": "block"}]})
 
 
+@pytest.mark.parametrize(
+    "detector",
+    [
+        "sensitive_data",
+        "prompt_injection",
+        "size_anomaly",
+        "protected_keys",
+        "detect_secrets",
+        "base64_decode",
+        "llm_screen",
+    ],
+)
+def test_parse_policy_accepts_full_detector_union(detector: str) -> None:
+    """The parser accepts every known detector name so cloud-shape policies
+    pass through the OSS PATCH layer unchanged. The OSS regex extension only
+    actually screens ``sensitive_data``; the rest are silent no-ops here and
+    are dispatched by downstream extensions (e.g. hindsight-cloud)."""
+    policy = parse_policy({"enabled": True, "rules": [{"on": detector, "action": "block"}]})
+    assert len(policy.rules) == 1
+    assert policy.rules[0].on == detector
+    assert policy.rules[0].action is DefenseAction.BLOCK
+
+
 def test_disabled_policy_is_inert() -> None:
     policy = parse_policy({"enabled": False, "rules": [{"on": "sensitive_data", "action": "redact"}]})
     assert policy.enabled is False
