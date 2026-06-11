@@ -433,8 +433,7 @@
     "memoryDefenseEnterpriseFeaturePromptInjection": "Détection d'injection de prompt : bloque les tentatives de modifier le comportement de l'agent",
     "memoryDefenseEnterpriseFeatureSizeAnomaly": "Anomalie de taille : rejette les charges utiles anormalement volumineuses",
     "memoryDefenseEnterpriseFeatureProtectedKeys": "Espaces de noms de tags protégés : applique des tags d'identité immuables",
-    "memoryDefenseEnterpriseCta": "Demander une démo",
-    "memoryDefenseEnterpriseMeetingNote": "Les réunions ne sont disponibles qu'en anglais pour le moment."
+    "memoryDefenseEnterpriseCta": "Demander une démo"
   },
   "bankOperations": {
     "title": "Opérations en arrière-plan",

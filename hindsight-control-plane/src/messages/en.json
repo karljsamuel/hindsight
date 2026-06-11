@@ -433,8 +433,7 @@
     "memoryDefenseEnterpriseFeaturePromptInjection": "Prompt injection detection: block attempts to override agent behavior",
     "memoryDefenseEnterpriseFeatureSizeAnomaly": "Size anomaly: reject suspiciously large payloads",
     "memoryDefenseEnterpriseFeatureProtectedKeys": "Protected tag namespaces: enforce immutable identity tags",
-    "memoryDefenseEnterpriseCta": "Request a Demo",
-    "memoryDefenseEnterpriseMeetingNote": ""
+    "memoryDefenseEnterpriseCta": "Request a Demo"
   },
   "bankOperations": {
     "title": "Background Operations",

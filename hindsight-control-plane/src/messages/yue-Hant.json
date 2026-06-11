@@ -433,8 +433,7 @@
     "memoryDefenseEnterpriseFeaturePromptInjection": "提示詞注入偵測:阻止覆寫代理行為嘅嘗試",
     "memoryDefenseEnterpriseFeatureSizeAnomaly": "大小異常:拒絕可疑嘅過大負載",
     "memoryDefenseEnterpriseFeatureProtectedKeys": "受保護嘅標籤命名空間:強制使用不可變嘅身份標籤",
-    "memoryDefenseEnterpriseCta": "申請示範",
-    "memoryDefenseEnterpriseMeetingNote": "目前會議只支援英文。"
+    "memoryDefenseEnterpriseCta": "申請示範"
   },
   "bankOperations": {
     "title": "背景作業",

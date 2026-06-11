@@ -433,8 +433,7 @@
     "memoryDefenseEnterpriseFeaturePromptInjection": "Prompt-Injection-Erkennung: blockiert Versuche, das Verhalten des Agenten zu überschreiben",
     "memoryDefenseEnterpriseFeatureSizeAnomaly": "Größenanomalie: lehnt verdächtig große Nutzlasten ab",
     "memoryDefenseEnterpriseFeatureProtectedKeys": "Geschützte Tag-Namespaces: erzwingt unveränderliche Identitäts-Tags",
-    "memoryDefenseEnterpriseCta": "Demo anfragen",
-    "memoryDefenseEnterpriseMeetingNote": "Meetings sind derzeit nur auf Englisch verfügbar."
+    "memoryDefenseEnterpriseCta": "Demo anfragen"
   },
   "bankOperations": {
     "title": "Hintergrundoperationen",

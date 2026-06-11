@@ -433,8 +433,7 @@
     "memoryDefenseEnterpriseFeaturePromptInjection": "提示词注入检测:阻止覆盖代理行为的尝试",
     "memoryDefenseEnterpriseFeatureSizeAnomaly": "大小异常:拒绝可疑的过大负载",
     "memoryDefenseEnterpriseFeatureProtectedKeys": "受保护的标签命名空间:强制使用不可变的身份标签",
-    "memoryDefenseEnterpriseCta": "申请演示",
-    "memoryDefenseEnterpriseMeetingNote": "目前会议仅支持英语。"
+    "memoryDefenseEnterpriseCta": "申请演示"
   },
   "bankOperations": {
     "title": "后台操作",

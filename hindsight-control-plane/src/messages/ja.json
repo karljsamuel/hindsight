@@ -433,8 +433,7 @@
     "memoryDefenseEnterpriseFeaturePromptInjection": "プロンプトインジェクション検出:エージェントの動作を上書きする試みをブロック",
     "memoryDefenseEnterpriseFeatureSizeAnomaly": "サイズ異常:疑わしく大きいペイロードを拒否",
     "memoryDefenseEnterpriseFeatureProtectedKeys": "保護されたタグ名前空間:不変のアイデンティティタグを強制",
-    "memoryDefenseEnterpriseCta": "デモをリクエスト",
-    "memoryDefenseEnterpriseMeetingNote": "現在、ミーティングは英語のみで対応しています。"
+    "memoryDefenseEnterpriseCta": "デモをリクエスト"
   },
   "bankOperations": {
     "title": "バックグラウンド操作",

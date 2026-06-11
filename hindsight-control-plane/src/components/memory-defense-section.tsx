@@ -257,9 +257,6 @@ function EnterpriseDiscoveryPanel() {
     t("memoryDefenseEnterpriseFeatureSizeAnomaly"),
     t("memoryDefenseEnterpriseFeatureProtectedKeys"),
   ];
-  // English meeting-language note (sales calls are English-only for now).
-  // Empty string in en.json so no note renders for English-speaking users.
-  const meetingNote = t("memoryDefenseEnterpriseMeetingNote");
   return (
     <div className="rounded-xl border border-emerald-600/15 bg-emerald-500/[0.04] dark:bg-emerald-400/[0.06] p-6 flex flex-col gap-4">
       <div className="flex items-start gap-3">
@@ -293,7 +290,6 @@ function EnterpriseDiscoveryPanel() {
           {t("memoryDefenseEnterpriseCta")}
           <span aria-hidden>→</span>
         </a>
-        {meetingNote && <p className="text-xs text-muted-foreground italic">{meetingNote}</p>}
       </div>
     </div>
   );

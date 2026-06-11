@@ -433,8 +433,7 @@
     "memoryDefenseEnterpriseFeaturePromptInjection": "프롬프트 인젝션 감지: 에이전트 동작을 덮어쓰려는 시도 차단",
     "memoryDefenseEnterpriseFeatureSizeAnomaly": "크기 이상: 의심스럽게 큰 페이로드 거부",
     "memoryDefenseEnterpriseFeatureProtectedKeys": "보호된 태그 네임스페이스: 변경 불가능한 ID 태그 적용",
-    "memoryDefenseEnterpriseCta": "데모 요청",
-    "memoryDefenseEnterpriseMeetingNote": "현재 미팅은 영어로만 가능합니다."
+    "memoryDefenseEnterpriseCta": "데모 요청"
   },
   "bankOperations": {
     "title": "백그라운드 작업",
