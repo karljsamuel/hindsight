@@ -143,6 +143,8 @@ main();
 pip install hindsight-all -U
 ```
 
+On Intel (x86_64) Macs, install `hindsight-all-slim` instead — see [Supported Platforms](#supported-platforms).
+
 ```python
 import os
 from hindsight import HindsightServer, HindsightClient
@@ -298,6 +300,19 @@ client.reflect(bank_id="my-bank", query="What should I know about Alice?")
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=vectorize-io/hindsight&type=date&legend=top-left)](https://www.star-history.com/#vectorize-io/hindsight&type=date&legend=top-left)
+---
+
+## Supported Platforms
+
+| Platform | Docker | Bare Metal (pip) | Embedded DB (pg0) |
+|----------|--------|------------------|--------------------|
+| **Linux** (x86_64, ARM64) | ✅ | ✅ | ✅ |
+| **macOS** (Apple Silicon / arm64) | ✅ | ✅ | ✅ |
+| **macOS** (Intel / x86_64) | ✅ | ⚠️ | ✅ |
+| **Windows** (x86_64) | ✅ | ✅ | ✅ |
+
+⚠️ Intel Macs: use `hindsight-all-slim` — see the [installation guide](https://docs.hindsight.vectorize.io/docs/developer/installation#supported-platforms) for details.
+
 ---
 
 ## Contributing
