@@ -6460,9 +6460,10 @@ class MemoryEngine(MemoryEngineInterface):
                     source_memory_ids.extend(unit["source_memory_ids"])
             source_memory_ids = list(set(source_memory_ids))  # Deduplicate
 
-            # Fetch non-entity links where BOTH endpoints are in the visible set (or
-            # source memories). Entity edges are derived below from unit_entities so
-            # we don't materialize them in memory_links anymore.
+            # Fetch links where BOTH endpoints are in the visible set (or source
+            # memories). Entity edges are derived below from unit_entities so we
+            # don't materialize them in memory_links anymore (dropped in migration
+            # e9b2c7d1f3a4) — no link_type filter is needed.
             # Cap at 10k edges — the UI can't usefully render more, and uncapped queries
             # on highly-connected graphs (e.g. 1000 nodes with 500k+ edges) are too slow.
             max_edges = 10000
@@ -6476,8 +6477,7 @@ class MemoryEngine(MemoryEngineInterface):
                            ml.weight,
                            NULL::text AS entity_name
                     FROM {fq_table("memory_links")} ml
-                    WHERE ml.link_type <> 'entity'
-                      AND ml.from_unit_id = ANY($1::uuid[])
+                    WHERE ml.from_unit_id = ANY($1::uuid[])
                       AND ml.to_unit_id = ANY($1::uuid[])
                     ORDER BY ml.weight DESC NULLS LAST
                     LIMIT $2
@@ -9270,11 +9270,16 @@ class MemoryEngine(MemoryEngineInterface):
             # per-fact-type slice, and it tolerates empty maps (the section
             # prints with no rows). Response keys are kept populated below for
             # schema stability so existing SDK deserializers don't break.
+            # No link_type filter: entity edges are no longer stored in
+            # memory_links (dropped in migration e9b2c7d1f3a4 — derived on demand
+            # from unit_entities), so only temporal/semantic/caused_by rows exist
+            # here. Omitting the predicate lets the (bank_id, link_type) index
+            # serve this bank-scoped GROUP BY as an index-only scan.
             non_entity_link_rows = await conn.fetch(
                 f"""
                 SELECT link_type, COUNT(*) as count
                 FROM {fq_table("memory_links")}
-                WHERE bank_id = $1 AND link_type <> 'entity'
+                WHERE bank_id = $1
                 GROUP BY link_type
                 """,
                 bank_id,
