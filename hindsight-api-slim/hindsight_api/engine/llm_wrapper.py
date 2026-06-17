@@ -252,6 +252,7 @@ def create_llm_provider(
     gemini_safety_settings: list | None = None,
     prompt_cache_enabled: bool = False,
     litellmrouter_config: dict[str, Any] | None = None,
+    gemini_service_tier: str | None = None,
 ) -> Any:  # Returns LLMInterface
     """
     Factory function to create the appropriate LLM provider implementation.
@@ -265,6 +266,7 @@ def create_llm_provider(
         groq_service_tier: Groq service tier (for Groq provider) - "on_demand", "flex", or "auto".
         openai_service_tier: OpenAI service tier (for OpenAI provider) - None (default) or "flex" (50% cheaper).
         bedrock_service_tier: Bedrock service tier (for Bedrock provider) - None (default), "flex", "priority", or "reserved".
+        gemini_service_tier: Gemini service tier (for Gemini provider) - None (default) or "flex" (50% cheaper).
         extra_body: Extra request-body params merged into the provider's native
             call. Threaded into OpenAI-compatible, Fireworks, Anthropic, Gemini/
             VertexAI and LiteLLM providers (each merges them in its own parameter
@@ -295,6 +297,12 @@ def create_llm_provider(
     )
 
     provider_lower = provider.lower()
+    if provider_lower == "gemini":
+        from ..config import parse_gemini_service_tier
+
+        gemini_service_tier = parse_gemini_service_tier(gemini_service_tier)
+    else:
+        gemini_service_tier = None
 
     if provider_lower == "openai-codex":
         return CodexLLM(
@@ -343,6 +351,7 @@ def create_llm_provider(
             vertexai_region=vertexai_region,
             vertexai_credentials=vertexai_credentials,
             gemini_safety_settings=gemini_safety_settings,
+            gemini_service_tier=gemini_service_tier,
             prompt_cache_enabled=prompt_cache_enabled,
             extra_body=extra_body,
         )
@@ -495,6 +504,7 @@ class LLMProvider:
         extra_body: dict[str, Any] | None = None,
         default_headers: dict[str, str] | None = None,
         litellmrouter_config: dict[str, Any] | None = None,
+        gemini_service_tier: str | None = None,
     ):
         """
         Initialize LLM provider.
@@ -508,6 +518,7 @@ class LLMProvider:
             groq_service_tier: Groq service tier ("on_demand", "flex", "auto") - from config.
             openai_service_tier: OpenAI service tier (None or "flex") - from config.
             bedrock_service_tier: Bedrock service tier (None, "flex", "priority", "reserved") - from config.
+            gemini_service_tier: Gemini service tier (None or "flex") - from config.
             gemini_safety_settings: Safety settings for Gemini/VertexAI providers.
             extra_body: Extra request-body params merged into the provider's native call
                 (OpenAI-compatible, Fireworks, Anthropic, Gemini/VertexAI, LiteLLM).
@@ -531,6 +542,7 @@ class LLMProvider:
         self.groq_service_tier = groq_service_tier
         self.openai_service_tier = openai_service_tier
         self.bedrock_service_tier = bedrock_service_tier
+        self.gemini_service_tier = gemini_service_tier
         # Gemini safety settings (instance default; can be overridden per-request via context var)
         self.gemini_safety_settings = gemini_safety_settings
         # Gemini prompt caching: when True, retain extraction (and any future
@@ -659,6 +671,22 @@ class LLMProvider:
             except Exception:
                 pass  # Config may not be initialized in test environments
 
+        if self.provider == "gemini":
+            from ..config import parse_gemini_service_tier
+
+            self.gemini_service_tier = parse_gemini_service_tier(self.gemini_service_tier)
+
+        if self.provider == "gemini" and self.gemini_service_tier is None:
+            from ..config import _get_raw_config
+
+            try:
+                raw_config = _get_raw_config()
+                self.gemini_service_tier = raw_config.llm_gemini_service_tier
+            except Exception:
+                pass  # Config may not be initialized in test environments
+        elif self.provider != "gemini":
+            self.gemini_service_tier = None
+
         # Prompt-prefix caching is a provider-agnostic toggle (default on): resolve
         # it from the static server config for every provider when the caller didn't
         # pass an explicit override. Providers that don't support caching ignore the
@@ -697,6 +725,7 @@ class LLMProvider:
             groq_service_tier=self.groq_service_tier,
             openai_service_tier=self.openai_service_tier,
             bedrock_service_tier=self.bedrock_service_tier,
+            gemini_service_tier=self.gemini_service_tier,
             extra_body=self.extra_body,
             default_headers=self.default_headers,
             vertexai_project_id=vertexai_project_id,
@@ -1145,10 +1174,12 @@ class LLMProvider:
             ENV_LLM_BEDROCK_SERVICE_TIER,
             ENV_LLM_DEFAULT_HEADERS,
             ENV_LLM_EXTRA_BODY,
+            ENV_LLM_GEMINI_SERVICE_TIER,
             ENV_LLM_MODEL,
             ENV_LLM_PROVIDER,
             ENV_LLM_REASONING_EFFORT,
             _get_default_model_for_provider,
+            parse_gemini_service_tier,
         )
 
         provider = os.getenv(ENV_LLM_PROVIDER, DEFAULT_LLM_PROVIDER)
@@ -1175,6 +1206,11 @@ class LLMProvider:
             extra_body=extra_body,
             default_headers=default_headers,
             bedrock_service_tier=os.getenv(ENV_LLM_BEDROCK_SERVICE_TIER) or None,
+            gemini_service_tier=(
+                parse_gemini_service_tier(os.getenv(ENV_LLM_GEMINI_SERVICE_TIER))
+                if provider.lower() == "gemini"
+                else None
+            ),
         )
 
 
