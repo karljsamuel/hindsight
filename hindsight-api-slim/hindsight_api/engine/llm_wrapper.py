@@ -10,7 +10,6 @@ import re
 import time
 import uuid
 from contextlib import AsyncExitStack
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 # Vertex AI imports (conditional - for LLMProvider to pass credentials to GeminiLLM)
@@ -1023,7 +1022,9 @@ class LLMProvider:
 
     def _load_codex_auth(self) -> tuple[str, str]:
         """
-        Load OAuth credentials from ~/.codex/auth.json.
+        Load OAuth credentials from the Codex ``auth.json``.
+
+        Honors ``CODEX_HOME`` (falling back to ``~/.codex``).
 
         Returns:
             Tuple of (access_token, account_id).
@@ -1032,7 +1033,9 @@ class LLMProvider:
             FileNotFoundError: If auth file doesn't exist.
             ValueError: If auth file is invalid.
         """
-        auth_file = Path.home() / ".codex" / "auth.json"
+        from .providers.codex_auth import default_codex_auth_file
+
+        auth_file = default_codex_auth_file()
 
         if not auth_file.exists():
             raise FileNotFoundError(
