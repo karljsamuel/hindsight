@@ -3479,7 +3479,7 @@ def _register_routes(app: FastAPI):
     async def api_graph(
         bank_id: str,
         type: str | None = None,
-        limit: int = 1000,
+        limit: int = Query(default=1000, ge=0),
         q: str | None = None,
         tags: list[str] | None = Query(None),
         tags_match: str = "all_strict",
@@ -3527,8 +3527,8 @@ def _register_routes(app: FastAPI):
         consolidation_state: str | None = None,
         state: str | None = None,
         document_id: str | None = None,
-        limit: int = 100,
-        offset: int = 0,
+        limit: int = Query(default=100, ge=0),
+        offset: int = Query(default=0, ge=0),
         request_context: RequestContext = Depends(get_request_context),
     ):
         """
@@ -4263,8 +4263,8 @@ def _register_routes(app: FastAPI):
     )
     async def api_list_entities(
         bank_id: str,
-        limit: int = Query(default=100, description="Maximum number of entities to return"),
-        offset: int = Query(default=0, description="Offset for pagination"),
+        limit: int = Query(default=100, ge=0, description="Maximum number of entities to return"),
+        offset: int = Query(default=0, ge=0, description="Offset for pagination"),
         request_context: RequestContext = Depends(get_request_context),
     ):
         """List entities for a memory bank with pagination."""
@@ -4299,7 +4299,7 @@ def _register_routes(app: FastAPI):
     )
     async def api_entity_graph(
         bank_id: str,
-        limit: int = Query(default=1000, description="Maximum number of co-occurrence edges to return"),
+        limit: int = Query(default=1000, ge=0, description="Maximum number of co-occurrence edges to return"),
         min_count: int = Query(default=1, description="Minimum cooccurrence_count to include an edge"),
         request_context: RequestContext = Depends(get_request_context),
     ):
@@ -4926,8 +4926,8 @@ def _register_routes(app: FastAPI):
         tags_match: str = Query(
             "any_strict", description="How to match tags: 'any', 'all', 'any_strict', 'all_strict'"
         ),
-        limit: int = 100,
-        offset: int = 0,
+        limit: int = Query(default=100, ge=0),
+        offset: int = Query(default=0, ge=0),
         request_context: RequestContext = Depends(get_request_context),
     ):
         """
@@ -5111,8 +5111,8 @@ def _register_routes(app: FastAPI):
             default="memories",
             description="Where to read tags from: 'memories' (memory_units, default) or 'mental_models'.",
         ),
-        limit: int = Query(default=100, description="Maximum number of tags to return"),
-        offset: int = Query(default=0, description="Offset for pagination"),
+        limit: int = Query(default=100, ge=0, description="Maximum number of tags to return"),
+        offset: int = Query(default=0, ge=0, description="Offset for pagination"),
         request_context: RequestContext = Depends(get_request_context),
     ):
         """
