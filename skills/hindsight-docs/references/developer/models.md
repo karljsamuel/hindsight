@@ -139,7 +139,7 @@ Each provider has a recommended default model that's used when `HINDSIGHT_API_LL
 | Provider | Default Model |
 |----------|--------------|
 | `openai` | `gpt-4o-mini` |
-| `anthropic` | `claude-haiku-4-5-20251001` |
+| `anthropic` | `claude-haiku-4-5` |
 | `gemini` | `gemini-3.5-flash` |
 | `vertexai` | `google/gemini-3.1-flash-lite` |
 | `groq` | `openai/gpt-oss-120b` |
@@ -162,7 +162,7 @@ Each provider has a recommended default model that's used when `HINDSIGHT_API_LL
 
 **Example:** Setting just the provider uses its default model:
 ```bash
-# Uses claude-haiku-4-5-20251001 automatically
+# Uses claude-haiku-4-5 automatically
 export HINDSIGHT_API_LLM_PROVIDER=anthropic
 export HINDSIGHT_API_LLM_API_KEY=sk-ant-xxxxxxxxxxxx
 ```
@@ -180,7 +180,7 @@ This also applies to per-operation overrides:
 # Global: OpenAI gpt-4o-mini (default)
 export HINDSIGHT_API_LLM_PROVIDER=openai
 
-# Retain: Anthropic claude-haiku-4-5-20251001 (default)
+# Retain: Anthropic claude-haiku-4-5 (default)
 export HINDSIGHT_API_RETAIN_LLM_PROVIDER=anthropic
 ```
 
