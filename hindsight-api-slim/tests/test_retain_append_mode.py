@@ -43,7 +43,7 @@ async def test_append_mode_concatenates_content(memory, request_context):
         assert "Alice works at Google" in v1_text
 
         # Second retain with append — add new content
-        v2_units = await memory.retain_batch_async(
+        await memory.retain_batch_async(
             bank_id=bank_id,
             contents=[
                 {
