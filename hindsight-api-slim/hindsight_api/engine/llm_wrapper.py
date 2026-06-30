@@ -1168,6 +1168,8 @@ class LLMProvider:
         # does so without building the full HindsightConfig, keeping from_env() a
         # lightweight env-only loader (see test_llm_provider_from_env_keeps_lightweight_loader).
         from ..config import (
+            DEFAULT_LLM_GROQ_SERVICE_TIER,
+            DEFAULT_LLM_OPENAI_SERVICE_TIER,
             DEFAULT_LLM_PROMPT_CACHE_ENABLED,
             DEFAULT_LLM_PROVIDER,
             DEFAULT_LLM_REASONING_EFFORT,
@@ -1178,8 +1180,10 @@ class LLMProvider:
             ENV_LLM_EXTRA_BODY,
             ENV_LLM_GEMINI_SAFETY_SETTINGS,
             ENV_LLM_GEMINI_SERVICE_TIER,
+            ENV_LLM_GROQ_SERVICE_TIER,
             ENV_LLM_LITELLMROUTER_CONFIG,
             ENV_LLM_MODEL,
+            ENV_LLM_OPENAI_SERVICE_TIER,
             ENV_LLM_PROMPT_CACHE_ENABLED,
             ENV_LLM_PROVIDER,
             ENV_LLM_REASONING_EFFORT,
@@ -1222,6 +1226,8 @@ class LLMProvider:
             reasoning_effort=os.getenv(ENV_LLM_REASONING_EFFORT, DEFAULT_LLM_REASONING_EFFORT),
             extra_body=extra_body,
             default_headers=default_headers,
+            groq_service_tier=os.getenv(ENV_LLM_GROQ_SERVICE_TIER, DEFAULT_LLM_GROQ_SERVICE_TIER),
+            openai_service_tier=os.getenv(ENV_LLM_OPENAI_SERVICE_TIER, DEFAULT_LLM_OPENAI_SERVICE_TIER),
             bedrock_service_tier=os.getenv(ENV_LLM_BEDROCK_SERVICE_TIER) or None,
             gemini_service_tier=(
                 parse_gemini_service_tier(os.getenv(ENV_LLM_GEMINI_SERVICE_TIER))
