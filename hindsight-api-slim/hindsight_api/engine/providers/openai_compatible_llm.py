@@ -656,6 +656,11 @@ class OpenAICompatibleLLM(LLMInterface):
         # use the widely-supported max_tokens
         return "max_tokens"
 
+    def _apply_provider_extra_body_defaults(self, extra_body: dict[str, Any]) -> None:
+        """Apply provider-specific extra_body defaults while preserving user overrides."""
+        if self.provider == "minimax":
+            extra_body.setdefault("thinking", {"type": "disabled"})
+
     async def call(
         self,
         messages: list[dict[str, str]],
@@ -743,6 +748,7 @@ class OpenAICompatibleLLM(LLMInterface):
 
         # Provider-specific parameters
         extra_body: dict[str, Any] = {**self._config_extra_body}
+        self._apply_provider_extra_body_defaults(extra_body)
         if self.provider == "groq":
             call_params["seed"] = DEFAULT_LLM_SEED
             # Add service_tier if configured
@@ -1161,6 +1167,7 @@ class OpenAICompatibleLLM(LLMInterface):
 
         # Provider-specific parameters
         extra_body: dict[str, Any] = {**self._config_extra_body}
+        self._apply_provider_extra_body_defaults(extra_body)
         if self.provider == "groq":
             call_params["seed"] = DEFAULT_LLM_SEED
         if extra_body:
