@@ -14,7 +14,7 @@ import logging
 import time
 from typing import Any
 
-from hindsight_api.engine.llm_interface import LLMInterface
+from hindsight_api.engine.llm_interface import LLM_TOOL_CHOICE_AUTO, LLMInterface, LLMToolChoice
 from hindsight_api.engine.llm_trace import LLMResponseUsage, stash_response_usage
 from hindsight_api.engine.providers.llm_debug import dump_request_on_4xx
 from hindsight_api.engine.response_models import LLMToolCall, LLMToolCallResult, TokenUsage
@@ -423,7 +423,7 @@ class AnthropicLLM(LLMInterface):
         max_retries: int = 5,
         initial_backoff: float = 1.0,
         max_backoff: float = 30.0,
-        tool_choice: str | dict[str, Any] = "auto",
+        tool_choice: LLMToolChoice = LLM_TOOL_CHOICE_AUTO,
     ) -> LLMToolCallResult:
         """
         Make an LLM API call with tool/function calling support.
