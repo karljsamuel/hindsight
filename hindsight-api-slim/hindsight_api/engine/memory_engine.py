@@ -1248,11 +1248,17 @@ class MemoryEngine(MemoryEngineInterface):
 
         # Audit logger for feature usage tracking
         config = get_config()
+        from ..config import _get_raw_config
+
         self._audit_logger = AuditLogger(
             pool_getter=lambda: self._backend,
             schema_getter=get_current_schema,
-            enabled=config.audit_log_enabled,
+            # Deployment default only; the per-bank override is resolved per call
+            # via bank_enabled_resolver, so read it raw rather than off the proxy.
+            enabled=_get_raw_config().audit_log_enabled,
             allowed_actions=config.audit_log_actions,
+            # Late-bound: the ConfigResolver is built in initialize(), after this.
+            bank_enabled_resolver=self._resolve_bank_audit_enabled,
         )
 
         # Per-bank LLM request tracer (disabled by default). Registered as a
@@ -1347,6 +1353,29 @@ class MemoryEngine(MemoryEngineInterface):
     def audit_logger(self) -> AuditLogger:
         """The audit logger for feature usage tracking."""
         return self._audit_logger
+
+    async def _resolve_bank_audit_enabled(self, bank_id: str, context: "RequestContext | None" = None) -> bool:
+        """Resolve ``audit_log_enabled`` for one bank (env -> tenant -> bank).
+
+        Wired into the AuditLogger so the per-bank override decides whether an
+        action is audited. Before initialize() has built the resolver there is
+        no bank config to read, so the deployment default applies.
+        """
+        resolver = getattr(self, "_config_resolver", None)
+        if resolver is None:
+            # Before initialize(): _get_raw_config reads audit_log_enabled off the
+            # env layer directly (the global config proxy would raise, since the
+            # field is now bank-configurable).
+            from ..config import _get_raw_config
+
+            return _get_raw_config().audit_log_enabled
+        # resolve_full_config, NOT get_bank_config: this is an internal gating
+        # decision and must see the bank's true stored value. get_bank_config
+        # applies the tenant permission filter (get_allowed_config_fields), so an
+        # extension that makes audit_log_enabled read-only for a user would strip
+        # the field here and silently revert gating to the deployment default.
+        config = await resolver.resolve_full_config(bank_id, context)
+        return config.audit_log_enabled
 
     @property
     def tenant_extension(self) -> "TenantExtension | None":
