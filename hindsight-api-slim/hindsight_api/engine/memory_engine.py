@@ -7536,6 +7536,8 @@ class MemoryEngine(MemoryEngineInterface):
         consolidation_state: str | None = None,
         state: str | None = None,
         document_id: str | None = None,
+        tags: list[str] | None = None,
+        tags_match: TagsMatch = "any",
         limit: int = 100,
         offset: int = 0,
         request_context: "RequestContext",
@@ -7548,6 +7550,13 @@ class MemoryEngine(MemoryEngineInterface):
             fact_type: Filter by fact type (world, experience)
             search_query: Full-text search query (searches text and context fields)
             document_id: Optional filter to a single source document.
+            tags: Optional list of tag names to filter by. When omitted, no tag
+                filtering is applied (except tags_match='exact', which then selects
+                the untagged/global scope).
+            tags_match: How to combine tags (same modes as recall): 'any' (OR,
+                default) or 'all' (AND) both also include untagged units;
+                'any_strict'/'all_strict' exclude untagged units; 'exact' matches
+                units whose tag set equals the given tags exactly.
             state: Optional curation-state filter ('valid' or 'invalidated').
                 Invalidated facts live in a separate archive table; 'invalidated'
                 reads that archive. Omitted/('valid') lists live facts.
@@ -7622,6 +7631,17 @@ class MemoryEngine(MemoryEngineInterface):
                     raise ValueError(
                         f"Invalid consolidation_state '{consolidation_state}': expected 'failed', 'pending', or 'done'."
                     )
+
+            if tags:
+                tags_clause, tags_params, next_param = build_tags_where_clause(tags, param_count + 1, "", tags_match)
+                if tags_clause:
+                    query_conditions.append(tags_clause.removeprefix("AND "))
+                    query_params.extend(tags_params)
+                    param_count = next_param - 1
+            elif tags_match == "exact":
+                # Exact match with no tags is the "global" scope: rows that carry no
+                # tags at all. (Other match modes treat empty tags as "no filter".)
+                query_conditions.append("(tags IS NULL OR tags = '{}')")
 
             where_clause = "WHERE " + " AND ".join(query_conditions) if query_conditions else ""
 
