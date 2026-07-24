@@ -4370,6 +4370,10 @@ export type ListMemoriesData = {
      */
     document_id?: string | null;
     /**
+     * Entity Id
+     */
+    entity_id?: string | null;
+    /**
      * Tags
      */
     tags?: Array<string> | null;

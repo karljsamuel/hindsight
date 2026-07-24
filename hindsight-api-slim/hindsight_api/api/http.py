@@ -3643,7 +3643,7 @@ def _register_routes(app: FastAPI):
         "/v1/default/banks/{bank_id}/memories/list",
         response_model=ListMemoryUnitsResponse,
         summary="List memory units",
-        description="List memory units with pagination and optional full-text search. Supports filtering by type. Results are sorted by most recent first (mentioned_at DESC, then created_at DESC).",
+        description="List memory units with pagination and optional full-text search. Supports filtering by type, source document, and linked entity ID. Results are sorted by most recent first (mentioned_at DESC, then created_at DESC).",
         operation_id="list_memories",
         tags=["Memory"],
     )
@@ -3654,6 +3654,7 @@ def _register_routes(app: FastAPI):
         consolidation_state: str | None = None,
         state: str | None = None,
         document_id: str | None = None,
+        entity_id: str | None = None,
         tags: list[str] | None = Query(default=None),
         tags_match: TagsMatch = Query(default="any"),
         limit: int = Query(default=100, ge=0),
@@ -3672,6 +3673,10 @@ def _register_routes(app: FastAPI):
             q: Search query for full-text search (searches text and context)
             consolidation_state: Filter by consolidation state for source memories
                 (world/experience). One of 'failed', 'pending', or 'done'.
+            document_id: Filter to a single source document.
+            entity_id: Filter to memory units linked to this entity ID (via stored
+                entity links, not text/semantic match). Combining with
+                state='invalidated' returns no results (the archive has no links).
             tags: Optional list of tag names to filter by.
             tags_match: How to combine tags: 'any' (OR, default) or 'all' (AND) both
                 also include untagged memories; 'any_strict'/'all_strict' exclude
@@ -3687,6 +3692,7 @@ def _register_routes(app: FastAPI):
                 consolidation_state=consolidation_state,
                 state=state,
                 document_id=document_id,
+                entity_id=entity_id,
                 tags=tags,
                 tags_match=tags_match,
                 limit=limit,
