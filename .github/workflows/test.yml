@@ -1883,6 +1883,27 @@ jobs:
       with:
         ref: ${{ github.event.pull_request.head.sha || '' }}
 
+    # The Oracle 23ai `free` service image is large; combined with the Python ML
+    # deps (torch) it exhausts the runner's ~14 GB root disk, so uv fails to
+    # extract a wheel with "No space left on device (os error 28)".
+    # Only the cheap, high-yield reclaims are enabled — the Android/.NET/Haskell
+    # dirs plus swap are a few `rm -rf`s worth ~16-21 GB, which is ample headroom:
+    #   - large-packages runs apt-get remove and costs minutes for little gain;
+    #   - tool-cache would delete the preinstalled Python that actions/setup-python
+    #     then has to re-download, making the job slower, not faster;
+    #   - docker-images is pointless here (the Oracle service container is already
+    #     running, so its image is in use and cannot be pruned anyway).
+    - name: Free Disk Space
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: false
+        docker-images: false
+        swap-storage: true
+
     - name: Setup Oracle test user
       # The SYSTEM tablespace uses manual segment space management which
       # doesn't support VECTOR types. Create an ASSM tablespace and a
@@ -2243,6 +2264,27 @@ jobs:
       with:
         ref: ${{ github.event.pull_request.head.sha || '' }}
 
+    # The Oracle 23ai `free` service image is large; combined with the Python ML
+    # deps (torch) it exhausts the runner's ~14 GB root disk, so uv fails to
+    # extract a wheel with "No space left on device (os error 28)".
+    # Only the cheap, high-yield reclaims are enabled — the Android/.NET/Haskell
+    # dirs plus swap are a few `rm -rf`s worth ~16-21 GB, which is ample headroom:
+    #   - large-packages runs apt-get remove and costs minutes for little gain;
+    #   - tool-cache would delete the preinstalled Python that actions/setup-python
+    #     then has to re-download, making the job slower, not faster;
+    #   - docker-images is pointless here (the Oracle service container is already
+    #     running, so its image is in use and cannot be pruned anyway).
+    - name: Free Disk Space
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: false
+        docker-images: false
+        swap-storage: true
+
     - name: Setup Oracle test user
       run: |
         pip install oracledb
@@ -2402,6 +2444,27 @@ jobs:
     - uses: actions/checkout@v6
       with:
         ref: ${{ github.event.pull_request.head.sha || '' }}
+
+    # The Oracle 23ai `free` service image is large; combined with the Python ML
+    # deps (torch) it exhausts the runner's ~14 GB root disk, so uv fails to
+    # extract a wheel with "No space left on device (os error 28)".
+    # Only the cheap, high-yield reclaims are enabled — the Android/.NET/Haskell
+    # dirs plus swap are a few `rm -rf`s worth ~16-21 GB, which is ample headroom:
+    #   - large-packages runs apt-get remove and costs minutes for little gain;
+    #   - tool-cache would delete the preinstalled Python that actions/setup-python
+    #     then has to re-download, making the job slower, not faster;
+    #   - docker-images is pointless here (the Oracle service container is already
+    #     running, so its image is in use and cannot be pruned anyway).
+    - name: Free Disk Space
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: false
+        docker-images: false
+        swap-storage: true
 
     - name: Setup Oracle test user
       run: |
