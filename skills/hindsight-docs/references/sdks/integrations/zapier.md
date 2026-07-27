@@ -83,7 +83,6 @@ Instant triggers (REST Hooks) that fire when a memory event completes in a bank:
 | ---------------------------- | ------------------------------------------------------------- |
 | **Retain Completed**         | An asynchronous retain finishes processing                    |
 | **Consolidation Completed**  | Memory consolidation synthesizes observations / mental models |
-| **Memory Defense Triggered** | The memory-defense filter redacts or blocks incoming content  |
 
 ## Example Zaps
 
