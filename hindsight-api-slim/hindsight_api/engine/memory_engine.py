@@ -13096,6 +13096,7 @@ class MemoryEngine(MemoryEngineInterface):
                 WHERE operation_id = $1
                   AND bank_id = $2
                   AND status IN ('failed', 'cancelled')
+                  AND NOT (operation_type = 'batch_retain' AND task_payload IS NULL)
                 RETURNING operation_id
                 """,
                 op_uuid,
@@ -13104,12 +13105,24 @@ class MemoryEngine(MemoryEngineInterface):
 
             if updated is None:
                 row = await conn.fetchrow(
-                    f"SELECT status FROM {fq_table('async_operations')} WHERE operation_id = $1 AND bank_id = $2",
+                    f"SELECT status, operation_type, task_payload FROM {fq_table('async_operations')} "
+                    f"WHERE operation_id = $1 AND bank_id = $2",
                     op_uuid,
                     bank_id,
                 )
                 if not row:
                     raise ValueError(f"Operation {operation_id} not found for bank {bank_id}")
+                # A batch_retain parent is a payload-less status aggregator. Retrying
+                # it would only re-strand it 'pending' — no worker can claim a
+                # NULL-payload row, and its already-terminal children won't re-run.
+                # Point the caller at the supported recovery instead. See issue #2985.
+                if row["operation_type"] == "batch_retain" and row["task_payload"] is None:
+                    raise OperationValidationError(
+                        f"Operation {operation_id} is a batch_retain parent (a status aggregator with no "
+                        f"payload) and cannot be retried directly. Resubmit the source documents, then "
+                        f"delete this record via DELETE /operations/{operation_id}/delete.",
+                        409,
+                    )
                 raise OperationValidationError(
                     f"Operation {operation_id} cannot be retried: status is '{row['status']}', expected 'failed' or 'cancelled'",
                     409,
