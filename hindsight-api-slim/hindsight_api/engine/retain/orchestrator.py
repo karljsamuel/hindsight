@@ -1124,6 +1124,7 @@ async def _run_final_semantic_ann(
     pool: Any,
     bank_id: str,
     unit_ids: list[str],
+    *,
     threshold: float,
     log_buffer: list[str],
 ) -> None:
@@ -1995,8 +1996,8 @@ async def _streaming_retain_batch(
                 pool,
                 bank_id,
                 all_unit_ids,
-                config.semantic_link_min_similarity,
-                log_buffer,
+                threshold=config.semantic_link_min_similarity,
+                log_buffer=log_buffer,
             )
         except Exception:
             # ANN pass is best-effort. FK violations can occur if a concurrent
