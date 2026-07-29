@@ -2030,30 +2030,6 @@ async def _execute_delete_action(
     logger.debug(f"Deleted observation {observation_id}")
 
 
-async def _create_memory_links(
-    conn: "Connection",
-    memory_id: uuid.UUID,
-    observation_id: uuid.UUID,
-) -> None:
-    """
-    Placeholder for observation link creation.
-
-    Observations do NOT get any memory_links copied from their source facts.
-    Instead, retrieval uses source_memory_ids to traverse:
-    - Entity connections: observation → source_memory_ids → unit_entities
-    - Semantic similarity: observations have their own embeddings
-    - Temporal proximity: observations have their own temporal fields
-
-    This avoids data duplication and ensures observations are always
-    connected via their source facts' relationships.
-
-    The memory_id and observation_id parameters are kept for interface
-    compatibility but no links are created.
-    """
-    # No links are created - observations rely on source_memory_ids for traversal
-    pass
-
-
 async def _find_related_observations(
     memory_engine: "MemoryEngine",
     bank_id: str,
