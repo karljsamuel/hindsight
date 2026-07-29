@@ -1,5 +1,23 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap');
 @import "tailwindcss";
+
+/* Bind the `dark:` variant to the `.dark` class this app actually toggles.
+ *
+ * Tailwind v4 changed the default: `dark:` now compiles to
+ * `@media (prefers-color-scheme: dark)`. Themes here are switched by toggling
+ * a `.dark` class on <html> (lib/theme-context.tsx), so without this every
+ * `dark:` utility in the codebase was keyed to the OS setting instead of the
+ * in-app toggle — it fired only when the two happened to agree, and never at
+ * all for a user on a light OS.
+ *
+ * The CSS-variable half of theming always worked (the `.dark` block below
+ * overrides the tokens), which is why this was easy to miss: backgrounds and
+ * foregrounds flipped correctly while the ~145 literal `dark:` utilities —
+ * mostly `dark:text-*-400` lightened text, plus `dark:prose-invert` for
+ * rendered markdown — silently did nothing.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
   --background: oklch(0.9911 0 0);
   --foreground: oklch(0.2046 0 0);
