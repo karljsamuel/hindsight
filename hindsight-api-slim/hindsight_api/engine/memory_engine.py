@@ -12129,6 +12129,500 @@ class MemoryEngine(MemoryEngineInterface):
 
         return _MentalModelScopeFilter(where=where, params=params)
 
+    # =====================================================================
+    # KNOWLEDGE BASE (folders + pages over mental models)
+    # =====================================================================
+    # The knowledge base is a tree of folders and pages stored in
+    # ``knowledge_pages``. A page references the mental model holding its content
+    # (``mental_model_id``); a folder is a container (``mental_model_id`` NULL).
+    # Content lives in ``mental_models`` — this layer owns only tree structure.
+
+    # Default trigger for a knowledge page: a living document synthesized from the
+    # bank's consolidated **observations** (not raw facts), refreshed incrementally
+    # (delta) after each consolidation, and excluding other mental models so a page
+    # never reflects on sibling pages. Applied when the client doesn't pass its own
+    # ``trigger`` on create; a client can override any of these.
+    KNOWLEDGE_PAGE_DEFAULT_TRIGGER = {
+        "mode": "delta",
+        "fact_types": ["observation"],
+        "exclude_mental_models": True,
+        "refresh_after_consolidation": True,
+    }
+
+    # Knowledge pages default to a larger budget than a plain mental model (2048)
+    # since they're meant to read as full documents. Applied when the client
+    # doesn't pass ``max_tokens`` on create.
+    KNOWLEDGE_PAGE_DEFAULT_MAX_TOKENS = 4096
+
+    @staticmethod
+    def _row_to_knowledge_node(row) -> dict[str, Any]:
+        """Project a knowledge_pages row (optionally joined to its mental model)."""
+        node: dict[str, Any] = {
+            "id": row["id"],
+            "bank_id": row["bank_id"],
+            "parent_id": row["parent_id"],
+            "kind": row["kind"],
+            "name": row["name"],
+            "mental_model_id": row["mental_model_id"],
+            "sort_order": row["sort_order"],
+            "managed": (row["managed"] if "managed" in row else False),
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+        }
+        # Page rows are returned LEFT JOINed to mental_models so the markdown
+        # projection (type/tags/description) needs no second round-trip.
+        if "mm_tags" in row:
+            node["tags"] = list(row["mm_tags"] or [])
+            node["source_query"] = row["mm_source_query"]
+            node["last_refreshed_at"] = row["mm_last_refreshed_at"].isoformat() if row["mm_last_refreshed_at"] else None
+        return node
+
+    # Column list for plain (non-joined) knowledge_pages reads/RETURNING.
+    _KP_COLUMNS = "id, bank_id, parent_id, kind, name, mental_model_id, sort_order, managed, created_at, updated_at"
+
+    _KP_PAGE_SELECT = (
+        "kp.id, kp.bank_id, kp.parent_id, kp.kind, kp.name, kp.mental_model_id, "
+        "kp.sort_order, kp.managed, kp.created_at, kp.updated_at, "
+        "mm.tags AS mm_tags, mm.source_query AS mm_source_query, "
+        "mm.last_refreshed_at AS mm_last_refreshed_at, mm.trigger AS mm_trigger"
+    )
+
+    def _kp_join(self) -> str:
+        kp = fq_table("knowledge_pages")
+        mm = fq_table("mental_models")
+        return f"{kp} kp LEFT JOIN {mm} mm ON mm.id = kp.mental_model_id AND mm.bank_id = kp.bank_id"
+
+    async def _kp_assert_folder_parent(self, conn, bank_id: str, parent_id: str | None) -> None:
+        """A non-null parent must be an existing folder in this bank."""
+        if parent_id is None:
+            return
+        row = await conn.fetchrow(
+            f"SELECT kind FROM {fq_table('knowledge_pages')} WHERE bank_id = $1 AND id = $2",
+            bank_id,
+            parent_id,
+        )
+        if row is None:
+            raise ValueError(f"Parent folder '{parent_id}' not found")
+        if row["kind"] != "folder":
+            raise ValueError(f"Parent '{parent_id}' is not a folder")
+
+    async def create_knowledge_folder(
+        self,
+        bank_id: str,
+        name: str,
+        *,
+        parent_id: str | None = None,
+        managed: bool = False,
+        request_context: "RequestContext",
+    ) -> dict[str, Any]:
+        """Create a folder (a container node) in the knowledge base.
+
+        The knowledge base is managed by clients (CRUD over folders/pages);
+        ``managed`` lets a client tag a node as system-owned vs. hand-authored.
+        """
+        await self._authenticate_tenant(request_context)
+        backend = await self._get_backend()
+        folder_id = f"kf-{uuid.uuid4().hex}"
+        async with acquire_with_retry(backend) as conn:
+            async with conn.transaction():
+                await self._ensure_bank_exists(bank_id, request_context, conn=conn)
+                await self._kp_assert_folder_parent(conn, bank_id, parent_id)
+                row = await conn.fetchrow(
+                    f"""
+                    INSERT INTO {fq_table("knowledge_pages")} (id, bank_id, parent_id, kind, name, managed)
+                    VALUES ($1, $2, $3, 'folder', $4, $5)
+                    RETURNING {self._KP_COLUMNS}
+                    """,
+                    folder_id,
+                    bank_id,
+                    parent_id,
+                    name,
+                    managed,
+                )
+        return self._row_to_knowledge_node(row)
+
+    async def create_knowledge_page(
+        self,
+        bank_id: str,
+        name: str,
+        source_query: str,
+        content: str,
+        *,
+        parent_id: str | None = None,
+        tags: list[str] | None = None,
+        max_tokens: int | None = None,
+        trigger: dict[str, Any] | None = None,
+        mental_model_id: str | None = None,
+        managed: bool = False,
+        request_context: "RequestContext",
+    ) -> dict[str, Any] | None:
+        """Create a page: a backing mental model plus the tree node that refs it.
+
+        ``managed`` lets a client tag the page as system-owned vs. hand-authored.
+        When ``trigger`` is omitted the page uses ``KNOWLEDGE_PAGE_DEFAULT_TRIGGER``
+        (observation-only, delta, auto-refresh) so a knowledge page is a living
+        document by default.
+
+        Returns ``None`` when a page with the same name already exists in the same
+        folder (a uniqueness violation) — the caller should treat that as
+        "already exists" (surfaced by the API as a 409).
+        """
+        await self._authenticate_tenant(request_context)
+        # The mental model carries the content (and is created+validated by the
+        # existing path, including lazy bank creation); the node only refs it.
+        mm = await self.create_mental_model(
+            bank_id=bank_id,
+            name=name,
+            source_query=source_query,
+            content=content,
+            mental_model_id=mental_model_id,
+            tags=tags,
+            max_tokens=max_tokens if max_tokens is not None else self.KNOWLEDGE_PAGE_DEFAULT_MAX_TOKENS,
+            trigger=trigger if trigger is not None else dict(self.KNOWLEDGE_PAGE_DEFAULT_TRIGGER),
+            request_context=request_context,
+        )
+        backend = await self._get_backend()
+        page_id = f"kp-{uuid.uuid4().hex}"
+        try:
+            async with acquire_with_retry(backend) as conn:
+                async with conn.transaction():
+                    await self._kp_assert_folder_parent(conn, bank_id, parent_id)
+                    row = await conn.fetchrow(
+                        f"""
+                        INSERT INTO {fq_table("knowledge_pages")}
+                            (id, bank_id, parent_id, kind, name, mental_model_id, managed)
+                        VALUES ($1, $2, $3, 'page', $4, $5, $6)
+                        RETURNING {self._KP_COLUMNS}
+                        """,
+                        page_id,
+                        bank_id,
+                        parent_id,
+                        name,
+                        mm["id"],
+                        managed,
+                    )
+        except asyncpg.UniqueViolationError:
+            # Duplicate page name in this folder (uq_kp_folder_pagename). Roll back
+            # by deleting the orphan mental model we just created, then signal the
+            # caller that the page already exists.
+            await self.delete_mental_model(bank_id, mm["id"], request_context=request_context)
+            return None
+        node = self._row_to_knowledge_node(row)
+        # Surface the mental-model metadata so the caller can render markdown or
+        # schedule a content refresh without a second fetch.
+        node["tags"] = list(mm.get("tags") or [])
+        node["source_query"] = mm.get("source_query")
+        node["last_refreshed_at"] = mm.get("last_refreshed_at")
+        return node
+
+    async def list_knowledge_nodes(
+        self, bank_id: str, *, with_staleness: bool = False, request_context: "RequestContext"
+    ) -> list[dict[str, Any]]:
+        """Return every folder/page node in the bank (flat; caller builds the tree).
+
+        When ``with_staleness`` is set, each page node also carries ``is_stale`` —
+        whether its backing mental model has memories in scope newer than its last
+        refresh. Off by default since it costs a stale check per page; the tree
+        view opts in, graph/export don't.
+        """
+        await self._authenticate_tenant(request_context)
+        backend = await self._get_backend()
+        async with acquire_with_retry(backend) as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT {self._KP_PAGE_SELECT}
+                FROM {self._kp_join()}
+                WHERE kp.bank_id = $1
+                ORDER BY kp.sort_order, kp.name
+                """,
+                bank_id,
+            )
+            nodes = [self._row_to_knowledge_node(r) for r in rows]
+            if with_staleness:
+                by_id = {n["id"]: n for n in nodes}
+                for r in rows:
+                    if r["kind"] != "page":
+                        continue
+                    # compute_mental_model_is_stale reads last_refreshed_at/tags/trigger
+                    # from a dict; feed it the joined mental-model columns.
+                    mm_row = {
+                        "last_refreshed_at": r["mm_last_refreshed_at"],
+                        "tags": r["mm_tags"],
+                        "trigger": r["mm_trigger"],
+                    }
+                    by_id[r["id"]]["is_stale"] = await self.compute_mental_model_is_stale(conn, bank_id, mm_row)
+        return nodes
+
+    async def get_knowledge_page(
+        self, bank_id: str, page_id: str, *, request_context: "RequestContext"
+    ) -> dict[str, Any] | None:
+        """Return a page node merged with its mental model's content (for markdown rendering)."""
+        await self._authenticate_tenant(request_context)
+        backend = await self._get_backend()
+        async with acquire_with_retry(backend) as conn:
+            row = await conn.fetchrow(
+                f"""
+                SELECT {self._KP_PAGE_SELECT}, mm.content AS mm_content
+                FROM {self._kp_join()}
+                WHERE kp.bank_id = $1 AND kp.id = $2 AND kp.kind = 'page'
+                """,
+                bank_id,
+                page_id,
+            )
+        if row is None:
+            return None
+        node = self._row_to_knowledge_node(row)
+        node["content"] = row["mm_content"]
+        return node
+
+    async def search_knowledge_pages(
+        self, bank_id: str, query: str, *, limit: int = 10, request_context: "RequestContext"
+    ) -> list[dict[str, Any]]:
+        """Doc-level hybrid search over a bank's knowledge pages.
+
+        Fuses a full-text match (``mm.search_vector``, a generated tsvector over the
+        page name + content) with vector similarity (``mm.embedding``) using
+        Reciprocal Rank Fusion, in a single round trip. No reranker — this path is
+        tuned for latency. Returns pages ranked by fused score, each with a short
+        content snippet. Folders are excluded.
+        """
+        await self._authenticate_tenant(request_context)
+        query = (query or "").strip()
+        if not query:
+            return []
+        limit = max(1, min(limit, 50))
+        # Over-fetch each arm so RRF has room to reorder before the final cut.
+        fetch = min(max(limit * 4, 40), 200)
+
+        from .retain import embedding_utils
+
+        # Embed with the query input type (asymmetric models prefix queries).
+        emb = await embedding_utils.generate_embeddings_batch(self.embeddings, [query], input_type="query")
+        emb_str = str(emb[0]) if emb and emb[0] else None
+
+        kp = fq_table("knowledge_pages")
+        mm = fq_table("mental_models")
+        join = self._kp_join()
+
+        backend = await self._get_backend()
+        async with acquire_with_retry(backend) as conn:
+            if emb_str is not None:
+                # Vector arm (ANN over mm.embedding) + BM25 arm (mm.search_vector),
+                # each ranked independently, then RRF-fused (k=60) in SQL.
+                sql = f"""
+                    WITH vec AS (
+                        SELECT kp.id AS page_id,
+                               ROW_NUMBER() OVER (ORDER BY mm.embedding <=> $1::vector) AS rnk
+                        FROM {join}
+                        WHERE kp.bank_id = $2 AND kp.kind = 'page' AND mm.embedding IS NOT NULL
+                        ORDER BY mm.embedding <=> $1::vector
+                        LIMIT {fetch}
+                    ),
+                    bm AS (
+                        SELECT kp.id AS page_id,
+                               ROW_NUMBER() OVER (
+                                   ORDER BY ts_rank_cd(mm.search_vector, websearch_to_tsquery('english', $3)) DESC
+                               ) AS rnk
+                        FROM {join}
+                        WHERE kp.bank_id = $2 AND kp.kind = 'page'
+                              AND mm.search_vector @@ websearch_to_tsquery('english', $3)
+                        ORDER BY ts_rank_cd(mm.search_vector, websearch_to_tsquery('english', $3)) DESC
+                        LIMIT {fetch}
+                    ),
+                    fused AS (
+                        SELECT COALESCE(vec.page_id, bm.page_id) AS page_id,
+                               COALESCE(1.0 / (60 + vec.rnk), 0) + COALESCE(1.0 / (60 + bm.rnk), 0) AS score
+                        FROM vec FULL OUTER JOIN bm ON vec.page_id = bm.page_id
+                    )
+                    SELECT kp.id, kp.name, kp.mental_model_id,
+                           LEFT(mm.content, 280) AS snippet, mm.last_refreshed_at AS updated_at, f.score
+                    FROM fused f
+                    JOIN {kp} kp ON kp.id = f.page_id AND kp.bank_id = $2
+                    LEFT JOIN {mm} mm ON mm.id = kp.mental_model_id AND mm.bank_id = kp.bank_id
+                    ORDER BY f.score DESC
+                    LIMIT {limit}
+                """
+                rows = await conn.fetch(sql, emb_str, bank_id, query)
+            else:
+                # Embedding unavailable → BM25-only fallback (still useful).
+                sql = f"""
+                    SELECT kp.id, kp.name, kp.mental_model_id,
+                           LEFT(mm.content, 280) AS snippet, mm.last_refreshed_at AS updated_at,
+                           ts_rank_cd(mm.search_vector, websearch_to_tsquery('english', $2)) AS score
+                    FROM {join}
+                    WHERE kp.bank_id = $1 AND kp.kind = 'page'
+                          AND mm.search_vector @@ websearch_to_tsquery('english', $2)
+                    ORDER BY score DESC
+                    LIMIT {limit}
+                """
+                rows = await conn.fetch(sql, bank_id, query)
+
+        return [
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "mental_model_id": r["mental_model_id"],
+                "snippet": (r["snippet"] or "").strip(),
+                "score": float(r["score"]) if r["score"] is not None else 0.0,
+                "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+            }
+            for r in rows
+        ]
+
+    async def rename_knowledge_node(
+        self, bank_id: str, node_id: str, name: str, *, request_context: "RequestContext"
+    ) -> dict[str, Any] | None:
+        """Rename a folder or page node."""
+        await self._authenticate_tenant(request_context)
+        backend = await self._get_backend()
+        async with acquire_with_retry(backend) as conn:
+            row = await conn.fetchrow(
+                f"""
+                UPDATE {fq_table("knowledge_pages")}
+                SET name = $3, updated_at = now()
+                WHERE bank_id = $1 AND id = $2
+                RETURNING {self._KP_COLUMNS}
+                """,
+                bank_id,
+                node_id,
+                name,
+            )
+        return self._row_to_knowledge_node(row) if row else None
+
+    async def update_knowledge_page(
+        self,
+        bank_id: str,
+        page_id: str,
+        *,
+        source_query: str | None = None,
+        tags: list[str] | None = None,
+        max_tokens: int | None = None,
+        trigger: dict[str, Any] | None = None,
+        request_context: "RequestContext",
+    ) -> dict[str, Any] | None:
+        """Update a page's editable options on its backing mental model.
+
+        Covers the source query (the question that rebuilds the page), tags,
+        token budget, and refresh trigger — each applied only when provided.
+        Returns the refreshed node (carrying ``mental_model_id``) or ``None`` when
+        the page doesn't exist. Changing the source query does not rebuild content
+        here; the API layer schedules an async refresh so the page re-synthesizes
+        against the new question.
+        """
+        await self._authenticate_tenant(request_context)
+        backend = await self._get_backend()
+        async with acquire_with_retry(backend) as conn:
+            row = await conn.fetchrow(
+                f"SELECT mental_model_id FROM {fq_table('knowledge_pages')} "
+                f"WHERE bank_id = $1 AND id = $2 AND kind = 'page'",
+                bank_id,
+                page_id,
+            )
+        if row is None or row["mental_model_id"] is None:
+            return None
+        await self.update_mental_model(
+            bank_id=bank_id,
+            mental_model_id=row["mental_model_id"],
+            source_query=source_query,
+            tags=tags,
+            max_tokens=max_tokens,
+            trigger=trigger,
+            request_context=request_context,
+        )
+        async with acquire_with_retry(backend) as conn:
+            node_row = await conn.fetchrow(
+                f"SELECT {self._KP_PAGE_SELECT} FROM {self._kp_join()} "
+                f"WHERE kp.bank_id = $1 AND kp.id = $2 AND kp.kind = 'page'",
+                bank_id,
+                page_id,
+            )
+        return self._row_to_knowledge_node(node_row) if node_row else None
+
+    async def move_knowledge_node(
+        self, bank_id: str, node_id: str, new_parent_id: str | None, *, request_context: "RequestContext"
+    ) -> dict[str, Any] | None:
+        """Re-parent a node, rejecting self-parenting and cycles."""
+        await self._authenticate_tenant(request_context)
+        if new_parent_id == node_id:
+            raise ValueError("A node cannot be its own parent")
+        backend = await self._get_backend()
+        async with acquire_with_retry(backend) as conn:
+            async with conn.transaction():
+                await self._kp_assert_folder_parent(conn, bank_id, new_parent_id)
+                # Cycle guard: walk up from the new parent; if we reach node_id,
+                # the move would create a loop. Done in Python so the check stays
+                # dialect-agnostic (no recursive CTE).
+                if new_parent_id is not None:
+                    parents = {
+                        r["id"]: r["parent_id"]
+                        for r in await conn.fetch(
+                            f"SELECT id, parent_id FROM {fq_table('knowledge_pages')} WHERE bank_id = $1",
+                            bank_id,
+                        )
+                    }
+                    cursor: str | None = new_parent_id
+                    while cursor is not None:
+                        if cursor == node_id:
+                            raise ValueError("Cannot move a node into its own subtree")
+                        cursor = parents.get(cursor)
+                row = await conn.fetchrow(
+                    f"""
+                    UPDATE {fq_table("knowledge_pages")}
+                    SET parent_id = $3, updated_at = now()
+                    WHERE bank_id = $1 AND id = $2
+                    RETURNING {self._KP_COLUMNS}
+                    """,
+                    bank_id,
+                    node_id,
+                    new_parent_id,
+                )
+        return self._row_to_knowledge_node(row) if row else None
+
+    async def delete_knowledge_node(self, bank_id: str, node_id: str, *, request_context: "RequestContext") -> bool:
+        """Delete a node and its whole subtree, including each page's mental model.
+
+        Deleting the mental models cascades their page rows away (FK ON DELETE
+        CASCADE); deleting the node then cascades any remaining descendant folder
+        rows. The subtree is gathered in Python so the logic is dialect-agnostic.
+        """
+        await self._authenticate_tenant(request_context)
+        backend = await self._get_backend()
+        async with acquire_with_retry(backend) as conn:
+            async with conn.transaction():
+                all_rows = await conn.fetch(
+                    f"SELECT id, parent_id, mental_model_id FROM {fq_table('knowledge_pages')} WHERE bank_id = $1",
+                    bank_id,
+                )
+                by_parent: dict[str | None, list] = {}
+                for r in all_rows:
+                    by_parent.setdefault(r["parent_id"], []).append(r)
+                if not any(r["id"] == node_id for r in all_rows):
+                    return False
+                # BFS the subtree rooted at node_id, collecting page mental models.
+                stack = [node_id]
+                mm_ids: list[str] = []
+                while stack:
+                    current = stack.pop()
+                    for child in by_parent.get(current, []):
+                        stack.append(child["id"])
+                    node_row = next((r for r in all_rows if r["id"] == current), None)
+                    if node_row and node_row["mental_model_id"]:
+                        mm_ids.append(node_row["mental_model_id"])
+                # Delete each backing mental model individually (the subtree is
+                # small) to keep the SQL dialect-neutral — no PG array casts.
+                for mm_id in mm_ids:
+                    await conn.execute(
+                        f"DELETE FROM {fq_table('mental_models')} WHERE bank_id = $1 AND id = $2",
+                        bank_id,
+                        mm_id,
+                    )
+                await conn.execute(
+                    f"DELETE FROM {fq_table('knowledge_pages')} WHERE bank_id = $1 AND id = $2",
+                    bank_id,
+                    node_id,
+                )
+        return True
+
     async def compute_mental_model_is_stale(
         self,
         conn,
