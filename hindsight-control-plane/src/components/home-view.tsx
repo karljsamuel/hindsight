@@ -8,7 +8,8 @@ import { bankRoute } from "@/lib/bank-url";
 import { Constellation } from "./constellation";
 import type { GraphData, GraphNode, GraphLink } from "./graph-data";
 import { Button } from "@/components/ui/button";
-import { Loader2, Network, FileText, Layers, FilePlus, ArrowRight } from "lucide-react";
+import { Network, FileText, Layers, FilePlus, ArrowRight } from "lucide-react";
+import { Spinner } from "@/components/ui/spinner";
 import { formatRelativeTime, formatAbsoluteDateTime } from "@/lib/relative-time";
 import { MemoryStoreCard, MemoriesActivityChart, type BankStats } from "./bank-stats-view";
 import { TreeRow } from "./knowledge-base-view";
@@ -174,7 +175,7 @@ export function HomeView({
   if (loading) {
     return (
       <div className="flex items-center justify-center py-32">
-        <Loader2 className="w-7 h-7 text-muted-foreground animate-spin" />
+        <Spinner size="lg" variant="jump" />
       </div>
     );
   }
@@ -213,7 +214,7 @@ export function HomeView({
             />
           ) : graphLoading ? (
             <div className="flex flex-1 items-center justify-center">
-              <Loader2 className="w-7 h-7 text-muted-foreground animate-spin" />
+              <Spinner size="lg" variant="jump" />
             </div>
           ) : (
             <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">

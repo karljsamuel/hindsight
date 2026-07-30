@@ -49,13 +49,13 @@ import {
   Brain,
   Download,
   Trash2,
-  Loader2,
   MoreVertical,
   Pencil,
   RotateCcw,
   Activity,
   FlaskConical,
 } from "lucide-react";
+import { Spinner } from "@/components/ui/spinner";
 import { LlmHealthDialog } from "@/components/llm-health-dialog";
 import { ExtractDialog } from "@/components/extract-dialog";
 
@@ -304,7 +304,7 @@ export default function BankPage() {
                         }
                       >
                         {isConsolidating ? (
-                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          <Spinner size="sm" className="mr-2" />
                         ) : (
                           <Brain className="w-4 h-4 mr-2" />
                         )}
@@ -321,7 +321,7 @@ export default function BankPage() {
                         }
                       >
                         {isRecoveringConsolidation ? (
-                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          <Spinner size="sm" className="mr-2" />
                         ) : (
                           <RotateCcw className="w-4 h-4 mr-2" />
                         )}
@@ -770,7 +770,7 @@ export default function BankPage() {
             >
               {isDeleting ? (
                 <>
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  <Spinner size="sm" className="mr-2" />
                   {t("deleting")}
                 </>
               ) : (
@@ -807,7 +807,7 @@ export default function BankPage() {
             <AlertDialogAction onClick={handleResetConfig} disabled={isResettingConfig}>
               {isResettingConfig ? (
                 <>
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  <Spinner size="sm" className="mr-2" />
                   {t("resetting")}
                 </>
               ) : (
@@ -850,7 +850,7 @@ export default function BankPage() {
             >
               {isClearingObservations ? (
                 <>
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  <Spinner size="sm" className="mr-2" />
                   {t("clearing")}
                 </>
               ) : (
