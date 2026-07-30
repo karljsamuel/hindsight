@@ -123,7 +123,7 @@ local-onnx = [
     "numpy>=1.26.0",
 ]
 embedded-db = [
-    "pg0-embedded>=0.14.2",
+    "pg0-embedded>=0.15.0",
 ]
 oracle = [
     "oracledb>=2.5.0",
