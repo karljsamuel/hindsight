@@ -134,7 +134,7 @@ export interface PluginConfig {
   recallTimeoutMs?: number; // Timeout for auto-recall in milliseconds. Default: 10000
   recallMaxQueryChars?: number; // Max chars for composed recall query. Default: 800
   recallPromptPreamble?: string; // Prompt preamble placed above recalled memories. Default: built-in guidance text.
-  recallInjectionPosition?: "prepend" | "append" | "user"; // Where to inject recalled memories. 'prepend' = start of system prompt (default), 'append' = end of system prompt (preserves prompt cache), 'user' = before user message.
+  recallInjectionPosition?: "prepend" | "append" | "user"; // Where to inject recalled memories. 'user' = before user message (default, preserves system prompt cache), 'prepend' = start of system prompt, 'append' = end of system prompt.
   ignoreSessionPatterns?: string[]; // Session key glob patterns to skip entirely (no recall, no retain). E.g. ["agent:main:**", "agent:*:cron:**"]
   statelessSessionPatterns?: string[]; // Session key glob patterns for read-only sessions (recall allowed, retain skipped). E.g. ["agent:*:subagent:**"]
   skipStatelessSessions?: boolean; // When true (default), stateless sessions also skip recall. When false, they recall but never retain.

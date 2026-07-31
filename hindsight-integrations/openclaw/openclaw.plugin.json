@@ -277,8 +277,8 @@
       "recallInjectionPosition": {
         "type": "string",
         "enum": ["prepend", "append", "user"],
-        "description": "Where to inject recalled memories. 'prepend' = start of system prompt (default), 'append' = end of system prompt (preserves prompt cache), 'user' = before user message.",
-        "default": "prepend"
+        "description": "Where to inject recalled memories. 'user' = before the user message (default, preserves system prompt cache), 'prepend' = start of system prompt, 'append' = end of system prompt.",
+        "default": "user"
       },
       "debug": {
         "type": "boolean",

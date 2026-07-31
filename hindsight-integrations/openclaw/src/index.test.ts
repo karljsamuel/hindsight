@@ -1683,6 +1683,21 @@ describe("getPluginConfig — debugPerfTiming flag (#1406)", () => {
   });
 });
 
+describe("getPluginConfig — recall injection position", () => {
+  it("defaults missing or invalid values to user context", () => {
+    expect(getPluginConfig(makeApi({})).recallInjectionPosition).toBe("user");
+    expect(
+      getPluginConfig(makeApi({ recallInjectionPosition: "invalid" })).recallInjectionPosition
+    ).toBe("user");
+  });
+
+  it.each(["prepend", "append", "user"] as const)("preserves an explicit %s value", (position) => {
+    expect(
+      getPluginConfig(makeApi({ recallInjectionPosition: position })).recallInjectionPosition
+    ).toBe(position);
+  });
+});
+
 describe("getPluginConfig — mission semantics (#1270, #1353)", () => {
   it("does not substitute a default mission when bankMission is unset", () => {
     const cfg = getPluginConfig(makeApi({}));

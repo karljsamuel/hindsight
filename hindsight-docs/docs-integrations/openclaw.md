@@ -146,7 +146,7 @@ Optional settings in `~/.openclaw/openclaw.json`:
 - `recallContextTurns` - Number of prior user turns to include in the recall query (default: `1`).
 - `recallMaxQueryChars` - Max characters for the composed recall query (default: `800`).
 - `recallPromptPreamble` - Custom preamble text placed above recalled memories. Overrides the built-in guidance text.
-- `recallInjectionPosition` - Where to inject recalled memories: `"prepend"` (default), `"append"`, or `"user"`. Use `"append"` to preserve prompt caching with large static system prompts. Use `"user"` to inject before the user message instead of in the system prompt.
+- `recallInjectionPosition` - Where to inject recalled memories: `"user"` (default), `"prepend"`, or `"append"`. The default injects before the user message and preserves the system prompt cache. Use `"prepend"` or `"append"` when memories need system-level context.
 - `recallRoles` - Which message roles to include when composing the contextual recall query (default: `["user", "assistant"]`).
 - `retainEveryNTurns` - Retain every Nth turn (default: `1` = every turn). Values > 1 enable chunked retention.
 - `retainOverlapTurns` - Extra prior turns included when chunked retention fires (default: `0`).

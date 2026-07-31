@@ -1651,7 +1651,7 @@ export function getPluginConfig(api: MoltbotPluginAPI): PluginConfig {
       typeof config.recallInjectionPosition === "string" &&
       ["prepend", "append", "user"].includes(config.recallInjectionPosition)
         ? (config.recallInjectionPosition as PluginConfig["recallInjectionPosition"])
-        : undefined,
+        : "user",
     recallTimeoutMs:
       typeof config.recallTimeoutMs === "number" && config.recallTimeoutMs >= 1000
         ? config.recallTimeoutMs
@@ -2339,9 +2339,10 @@ ${memoriesFormatted}
           );
         }
 
-        // Inject recalled memories. Position is configurable to preserve prompt caching
-        // when agents have large static system prompts.
-        const position = pluginConfig.recallInjectionPosition || "prepend";
+        // Keep recalled memories outside the system prompt by default so the
+        // provider can reuse its stable prompt prefix across turns. Users who
+        // need system-level memory context can still opt into prepend or append.
+        const position = pluginConfig.recallInjectionPosition ?? "user";
         switch (position) {
           case "append":
             return { appendSystemContext: contextMessage };
