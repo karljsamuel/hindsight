@@ -144,6 +144,8 @@ jobs:
             - 'hindsight-integrations/chat/**'
           integrations-claude-code:
             - 'hindsight-integrations/claude-code/**'
+          integrations-coding-agents:
+            - 'hindsight-integrations/coding-agents/**'
           integrations-cline:
             - 'hindsight-integrations/cline/**'
           integrations-codex:
@@ -471,6 +473,42 @@ jobs:
     - name: Run openclaw install smoke test
       working-directory: ./hindsight-integrations/openclaw
       run: ./scripts/smoke-test.sh
+
+  test-coding-agents:
+    needs: [detect-changes]
+    if: >-
+      (github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.integrations-coding-agents == 'true' ||
+      needs.detect-changes.outputs.ci == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: ${{ github.event.pull_request.head.sha || '' }}
+
+    - uses: actions/setup-node@v6
+      with:
+        node-version: '22'
+        cache: npm
+        cache-dependency-path: hindsight-integrations/coding-agents/package-lock.json
+
+    - name: Install dependencies
+      working-directory: ./hindsight-integrations/coding-agents
+      run: npm ci
+
+    - name: Typecheck
+      working-directory: ./hindsight-integrations/coding-agents
+      run: npx tsc --noEmit
+
+    - name: Unit tests
+      working-directory: ./hindsight-integrations/coding-agents
+      run: npm test
+
+    - name: Build
+      working-directory: ./hindsight-integrations/coding-agents
+      run: npm run build
 
   test-claude-code-integration:
     needs: [detect-changes]
