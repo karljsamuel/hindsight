@@ -8378,6 +8378,9 @@ class MemoryEngine(MemoryEngineInterface):
         """
         List documents with optional search and pagination.
 
+        Ordered by ``updated_at`` DESC so a long-lived document that keeps receiving
+        appends stays on the first page instead of sinking to its creation position.
+
         Args:
             bank_id: bank ID (required)
             search_query: Search in document ID
@@ -8457,7 +8460,7 @@ class MemoryEngine(MemoryEngineInterface):
                     tags
                 FROM {fq_table("documents")}
                 {where_clause}
-                ORDER BY created_at DESC
+                ORDER BY updated_at DESC, created_at DESC, id
                 LIMIT {limit_param} OFFSET {offset_param}
             """,
                 *query_params,
