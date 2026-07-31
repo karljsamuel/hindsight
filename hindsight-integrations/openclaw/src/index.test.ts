@@ -1636,6 +1636,19 @@ describe("getPluginConfig — enableKnowledgeTools whitelist", () => {
   });
 });
 
+describe("getPluginConfig — preferObservations (#2977)", () => {
+  it("passes preferObservations=true through when set", () => {
+    expect(getPluginConfig(makeApi({ preferObservations: true })).preferObservations).toBe(true);
+  });
+
+  it("defaults to false when not set or set to a non-boolean truthy value", () => {
+    expect(getPluginConfig(makeApi({})).preferObservations).toBe(false);
+    expect(getPluginConfig(makeApi({ preferObservations: false })).preferObservations).toBe(false);
+    expect(getPluginConfig(makeApi({ preferObservations: "true" })).preferObservations).toBe(false);
+    expect(getPluginConfig(makeApi({ preferObservations: 1 })).preferObservations).toBe(false);
+  });
+});
+
 describe("formatHookPerf (#1406)", () => {
   it("emits the hook name, total ms, and field key=value pairs", () => {
     const line = formatHookPerf("before_prompt_build", 4200, {

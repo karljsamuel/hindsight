@@ -362,7 +362,7 @@ describe("before_prompt_build hook", () => {
     expect(options?.maxTokens).toBeGreaterThan(0);
   });
 
-  it("includes recalled memories in the prependSystemContext block", async () => {
+  it("includes recalled memories in the default prependContext block", async () => {
     if (!apiReachable) return;
     recallSpy.mockResolvedValue({
       results: [makeMemoryResult("User loves hiking")],
@@ -375,11 +375,11 @@ describe("before_prompt_build hook", () => {
       "before_prompt_build",
       { rawMessage: "What outdoor activities do I enjoy?", prompt: "", messages: [] },
       { messageProvider: "telegram", senderId: "U007" }
-    )) as { prependSystemContext: string; prependContext?: string };
+    )) as { prependContext: string; prependSystemContext?: string };
 
-    expect(result.prependContext).toBeUndefined();
-    expect(result.prependSystemContext).toContain("User loves hiking");
-    expect(result.prependSystemContext).toContain("<hindsight_memories>");
+    expect(result.prependSystemContext).toBeUndefined();
+    expect(result.prependContext).toContain("User loves hiking");
+    expect(result.prependContext).toContain("<hindsight_memories>");
   });
 
   it("uses identity cached in before_dispatch when later hooks lack sender metadata", async () => {
