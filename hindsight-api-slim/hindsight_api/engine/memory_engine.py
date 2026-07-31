@@ -11825,6 +11825,16 @@ class MemoryEngine(MemoryEngineInterface):
                 await self._validate_operation(self._operation_validator.validate_bank_write(ctx))
         backend = await self._get_backend()
 
+        # Compute the new embedding BEFORE acquiring a pooled connection: a slow
+        # embedder must never pin a DB connection. The embedding text depends only
+        # on the incoming name/content, never on DB state, so it can be done here.
+        new_embedding_str: str | None = None
+        if content is not None:
+            embedding_text = f"{name or ''} {content}"
+            embedding = await embedding_utils.generate_embeddings_batch(self.embeddings, [embedding_text])
+            if embedding:
+                new_embedding_str = str(embedding[0])
+
         async with acquire_with_retry(backend) as conn:
             # If content is changing, fetch current content + reflect_response to record history
             previous_content: str | None = None
@@ -11880,12 +11890,10 @@ class MemoryEngine(MemoryEngineInterface):
                         if based_on is not None:
                             slim_reflect_response = {"based_on": based_on}
                     record_mm_history = True
-                # Also update embedding (convert to string for asyncpg vector type)
-                embedding_text = f"{name or ''} {content}"
-                embedding = await embedding_utils.generate_embeddings_batch(self.embeddings, [embedding_text])
-                if embedding:
+                # Apply the embedding computed above (off-connection).
+                if new_embedding_str is not None:
                     updates.append(f"embedding = ${param_idx}")
-                    params.append(str(embedding[0]))
+                    params.append(new_embedding_str)
                     param_idx += 1
             elif refresh_watermark is not None:
                 # A successful delta refresh can find no topic-relevant facts even though
