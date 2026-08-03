@@ -68,7 +68,7 @@ One-command install (detects the coding agents on the machine, wires each native
 idempotent, with `uninstall` removing exactly what it added):
 
 ```bash
-npm install -g @vectorize-io/hindsight-coding-agents && hindsight-coding-agents install
+npm install -g @vectorize-io/hindsight-coding-agents && hindsight-coding-agents install all
 ```
 
 On Claude Code the install also ships a companion skill (`hindsight-coding-agent`) so the agent

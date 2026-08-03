@@ -112,10 +112,33 @@ Cline IDE extensions are not currently supported by this CLI integration.
 
 ```bash
 npm install -g @vectorize-io/hindsight-coding-agents
-hindsight-coding-agents install            # detects your agents, wires each natively
-hindsight-coding-agents install codex      # or pick specific harnesses
-hindsight-coding-agents uninstall          # removes exactly what install added
+hindsight-coding-agents install all          # every detected agent, wired natively
+hindsight-coding-agents install claude-code  # or just one
+hindsight-coding-agents uninstall all        # removes exactly what install added
 ```
+
+`install` takes an explicit target — `all`, or one or more harness names. A bare
+`hindsight-coding-agents install` changes nothing and prints the choice, so wiring every agent on
+the machine is never something that happens by accident.
+
+#### Per agent
+
+Same command, only the harness name changes. Run after installing the package globally.
+
+| agent              | command                                       | what it wires                                                                                    |
+| ------------------ | --------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Claude Code        | `hindsight-coding-agents install claude-code` | 3 hooks in `~/.claude/settings.json` + MCP (`claude mcp add`, user scope) + companion skill      |
+| opencode           | `hindsight-coding-agents install opencode`    | plugin entry in `~/.config/opencode/opencode.json` (native tools, no MCP needed)                 |
+| Kilo CLI           | `hindsight-coding-agents install kilo`        | plugin entry in `~/.config/kilo/kilo.json[c]`                                                    |
+| Codex CLI          | `hindsight-coding-agents install codex`       | 3 hooks in `~/.codex/hooks.json` + `[mcp_servers]` in `config.toml` (needs `codex_hooks = true`) |
+| Cursor CLI         | `hindsight-coding-agents install cursor-cli`  | hooks in `~/.cursor/hooks.json` + `~/.cursor/mcp.json` + skill                                   |
+| GitHub Copilot CLI | `hindsight-coding-agents install copilot-cli` | `~/.copilot/hooks/` + `mcp-config.json` + skill                                                  |
+| Grok Build         | `hindsight-coding-agents install grok-build`  | native hooks + MCP in `~/.grok/config.toml` + skill                                              |
+| Antigravity CLI    | `hindsight-coding-agents install agy`         | lifecycle hooks + MCP + the `Hindsight · <bank>` status line                                     |
+| Devin CLI          | `hindsight-coding-agents install devin-cli`   | hooks in `~/.config/devin/config.json` + MCP                                                     |
+| Cline CLI          | `hindsight-coding-agents install cline-cli`   | native plugin via `cline plugin install` + MCP + skill                                           |
+
+Uninstall the same way: `hindsight-coding-agents uninstall claude-code` (or `uninstall all`).
 
 Install globally (not `npx`): the wiring points at this package's files, so it must live at a
 stable path — the installer refuses to run from an npx cache. **Updating** is just

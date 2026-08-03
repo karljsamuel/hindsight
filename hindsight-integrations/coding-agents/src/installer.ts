@@ -767,31 +767,43 @@ export function run(argv: string[], ctx: InstallCtx): number {
   }
   if (command !== "install" && command !== "uninstall") {
     ctx.log?.(
-      `usage: hindsight-coding-agents <install|uninstall> [harness...]\n` +
-        `harnesses: ${INSTALLERS.map((i) => i.name).join(", ")} (agy is an alias for antigravity-cli; default: every one detected on this machine)`
+      `usage: hindsight-coding-agents <install|uninstall> <all|harness...>\n` +
+        `  all      every agent detected on this machine\n` +
+        `  harness  ${INSTALLERS.map((i) => i.name).join(", ")} (agy aliases antigravity-cli)`
     );
     return command ? 1 : 0;
   }
   let targets: HarnessInstaller[];
-  if (names.length) {
+  // `all` is spelled out rather than implied by a bare command: this rewrites the config of EVERY
+  // detected agent — hooks, MCP registration and the companion skill — which is too much of a
+  // machine to change by accident from `install` alone.
+  if (names.includes("all")) {
+    targets = INSTALLERS.filter((i) => i.detect(ctx));
+    if (!targets.length) {
+      ctx.log?.("no supported coding agents detected — name one explicitly to wire it anyway");
+      return 1;
+    }
+    ctx.log?.(`detected: ${targets.map((t) => t.name).join(", ")}`);
+  } else if (names.length) {
     targets = [];
     for (const n of names) {
       const hit = INSTALLERS.find((i) => i.name === (HARNESS_ALIASES[n] ?? n));
       if (!hit) {
         ctx.log?.(
-          `unknown harness "${n}" — expected one of: ${INSTALLERS.map((i) => i.name).join(", ")} (agy aliases antigravity-cli)`
+          `unknown harness "${n}" — expected "all" or one of: ${INSTALLERS.map((i) => i.name).join(", ")} (agy aliases antigravity-cli)`
         );
         return 1;
       }
       targets.push(hit);
     }
   } else {
-    targets = INSTALLERS.filter((i) => i.detect(ctx));
-    if (!targets.length) {
-      ctx.log?.("no supported coding agents detected — pass harness names explicitly");
-      return 1;
-    }
-    ctx.log?.(`detected: ${targets.map((t) => t.name).join(", ")}`);
+    ctx.log?.(
+      `${command}: name a harness, or "all" for every agent detected on this machine.\n` +
+        `  hindsight-coding-agents ${command} claude-code\n` +
+        `  hindsight-coding-agents ${command} all\n` +
+        `harnesses: ${INSTALLERS.map((i) => i.name).join(", ")} (agy aliases antigravity-cli)`
+    );
+    return 1;
   }
   for (const t of targets) t[command](ctx);
   ctx.log?.(
