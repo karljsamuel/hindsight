@@ -960,6 +960,14 @@ export function MentalModelDetailModal({
                     </div>
                     <CompactMarkdown className="p-4">{mentalModel.content}</CompactMarkdown>
                   </div>
+                  {mentalModel.reflect_response?.structured_output && (
+                    <div>
+                      <SectionLabel>{t("structuredOutput")}</SectionLabel>
+                      <pre className="rounded-lg border border-border bg-muted/30 p-4 text-xs font-mono overflow-auto max-h-[400px] whitespace-pre-wrap break-words">
+                        {JSON.stringify(mentalModel.reflect_response.structured_output, null, 2)}
+                      </pre>
+                    </div>
+                  )}
                   <div>
                     <SectionLabel>
                       {basedOnCount > 0
@@ -1271,6 +1279,16 @@ function ConfigurationTab({ mentalModel }: { mentalModel: MentalModel }) {
           <InfoCard title={t("tagGroupsTitle")} icon={<Settings className="w-3.5 h-3.5" />}>
             <pre className="text-xs font-mono bg-muted/40 rounded p-3 overflow-x-auto border border-border/60">
               {JSON.stringify(tagGroups, null, 2)}
+            </pre>
+          </InfoCard>
+        </div>
+      )}
+
+      {trigger.response_schema && (
+        <div className="md:col-span-2">
+          <InfoCard title={t("responseSchemaTitle")} icon={<Settings className="w-3.5 h-3.5" />}>
+            <pre className="text-xs font-mono bg-muted/40 rounded p-3 overflow-x-auto border border-border/60">
+              {JSON.stringify(trigger.response_schema, null, 2)}
             </pre>
           </InfoCard>
         </div>

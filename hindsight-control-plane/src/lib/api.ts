@@ -210,6 +210,7 @@ export interface MentalModel {
     include_chunks?: boolean;
     recall_max_tokens?: number;
     recall_chunks_max_tokens?: number;
+    response_schema?: Record<string, unknown>;
     keep_trace?: boolean;
   };
   last_refreshed_at: string;
@@ -492,6 +493,7 @@ export class ControlPlaneClient {
     fact_types?: Array<"world" | "experience" | "observation">;
     exclude_mental_models?: boolean;
     exclude_mental_model_ids?: string[];
+    response_schema?: Record<string, unknown>;
   }) {
     return this.fetchApi("/api/reflect", {
       method: "POST",
@@ -1420,6 +1422,7 @@ export class ControlPlaneClient {
           include_chunks?: boolean;
           recall_max_tokens?: number;
           recall_chunks_max_tokens?: number;
+          response_schema?: Record<string, unknown>;
           keep_trace?: boolean;
         };
         last_refreshed_at: string;
@@ -1456,6 +1459,7 @@ export class ControlPlaneClient {
         include_chunks?: boolean;
         recall_max_tokens?: number;
         recall_chunks_max_tokens?: number;
+        response_schema?: Record<string, unknown>;
         keep_trace?: boolean;
       };
     }
@@ -1500,6 +1504,7 @@ export class ControlPlaneClient {
         include_chunks?: boolean;
         recall_max_tokens?: number;
         recall_chunks_max_tokens?: number;
+        response_schema?: Record<string, unknown>;
         keep_trace?: boolean;
       };
     }
@@ -1523,6 +1528,7 @@ export class ControlPlaneClient {
         include_chunks?: boolean;
         recall_max_tokens?: number;
         recall_chunks_max_tokens?: number;
+        response_schema?: Record<string, unknown>;
         keep_trace?: boolean;
       };
       last_refreshed_at: string;

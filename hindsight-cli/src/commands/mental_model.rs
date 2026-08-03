@@ -148,6 +148,7 @@ pub fn create(
             include_chunks: None,
             recall_max_tokens: None,
             recall_chunks_max_tokens: None,
+            response_schema: None,
             keep_trace: false,
         })
     } else {
@@ -228,6 +229,7 @@ pub fn update(
         include_chunks: None,
         recall_max_tokens: None,
         recall_chunks_max_tokens: None,
+        response_schema: None,
         keep_trace: false,
     });
 

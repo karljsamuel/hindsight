@@ -169,6 +169,7 @@ from hindsight_api.engine.response_models import (
     TokenUsage,
 )
 from hindsight_api.engine.search.tags import TagGroup, TagsMatch
+from hindsight_api.engine.structured_output import validate_response_schema
 from hindsight_api.extensions import HttpExtension, OperationValidationError, load_extension
 from hindsight_api.metrics import (
     create_metrics_collector,
@@ -982,6 +983,13 @@ class ReflectRequest(BaseModel):
     def validate_reflect_fact_types(cls, v: list[str] | None) -> list[str] | None:
         if v is not None and len(v) == 0:
             raise ValueError("fact_types must not be empty. Use null to include all fact types.")
+        return v
+
+    @field_validator("response_schema")
+    @classmethod
+    def validate_reflect_response_schema(cls, v: dict | None) -> dict | None:
+        if v is not None:
+            validate_response_schema(v)
         return v
 
     @model_validator(mode="after")
@@ -2112,6 +2120,14 @@ class MentalModelTrigger(BaseModel):
             "None means use the bank/global config default (recall_chunks_max_tokens)."
         ),
     )
+    response_schema: dict | None = Field(
+        default=None,
+        description=(
+            "Optional JSON Schema for structured output. When set, each refresh runs the same "
+            "structured-output extraction as reflect's response_schema and stores the parsed result "
+            "under reflect_response.structured_output alongside the markdown content."
+        ),
+    )
     keep_trace: bool = Field(
         default=False,
         description=(
@@ -2130,6 +2146,13 @@ class MentalModelTrigger(BaseModel):
     def validate_fact_types(cls, v: list[str] | None) -> list[str] | None:
         if v is not None and len(v) == 0:
             raise ValueError("fact_types must not be empty. Use null to include all fact types.")
+        return v
+
+    @field_validator("response_schema")
+    @classmethod
+    def validate_trigger_response_schema(cls, v: dict | None) -> dict | None:
+        if v is not None:
+            validate_response_schema(v)
         return v
 
     @field_validator("refresh_cron")

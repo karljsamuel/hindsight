@@ -99,7 +99,7 @@ a `hookAdapter` in `src/harness/registry.ts`; persistent-plugin → implement `H
 **Guarantees**
 
 - A failed reflect or page fetch degrades to a no-memory turn; it never breaks the agent.
-- It never fails *silently* either: every outcome is written to a diagnostics file, so a memory-less session can't pass for a memory session.
+- It never fails _silently_ either: every outcome is written to a diagnostics file, so a memory-less session can't pass for a memory session.
 - When two memories conflict on the same rule, the later decision wins and the superseded one is reported as no longer in effect.
 - Against a Hindsight server that predates knowledge pages, page features are skipped (recorded as `knowledge_pages_unavailable`) and everything else continues.
 

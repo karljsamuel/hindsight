@@ -838,9 +838,6 @@
     "optionsRecallChunksMaxTokensLabel": "Máximo de tokens de chunks do Recall",
     "optionsRecallChunksMaxTokensPlaceholder": "Padrão (herdar)",
     "optionsRecallChunksMaxTokensDescription": "Orçamento de tokens para texto bruto de chunk retornado pelo Recall.",
-    "optionsSectionTroubleshooting": "Diagnóstico",
-    "optionsKeepTraceLabel": "Manter rastros de atualização",
-    "optionsKeepTraceDescription": "Registra como cada atualização chegou ao seu resultado: modo, escopo, janela de tempo, fatos recuperados versus usados e operações delta. A única forma de diagnosticar atualizações agendadas depois que elas rodam.",
     "optionsSectionOtherModels": "Outros Modelos Mentais",
     "optionsExcludeAllLabel": "Excluir todos os modelos mentais",
     "optionsExcludeIdsLabel": "Excluir IDs de Modelos Mentais",
@@ -853,7 +850,10 @@
     "clearDialogConfirm": "Limpar",
     "actionClearContent": "Limpar conteúdo",
     "emptyContent": "Ainda não há conteúdo. Atualize este modelo mental para gerar conteúdo.",
-    "selectModelPrompt": "Selecione um modelo mental para ver seu conteúdo."
+    "selectModelPrompt": "Selecione um modelo mental para ver seu conteúdo.",
+    "optionsSectionTroubleshooting": "Diagnóstico",
+    "optionsKeepTraceLabel": "Manter rastros de atualização",
+    "optionsKeepTraceDescription": "Registra como cada atualização chegou ao seu resultado: modo, escopo, janela de tempo, fatos recuperados versus usados e operações delta. A única forma de diagnosticar atualizações agendadas depois que elas rodam."
   },
   "cronPreview": {
     "invalid": "Expressão cron inválida",
@@ -939,7 +939,8 @@
     "observationTextField": "Texto",
     "observationTagsField": "Tags",
     "observationSourceMemoriesField": "Memórias de Origem ({count})",
-    "observationIdField": "ID"
+    "observationIdField": "ID",
+    "structuredOutputTitle": "Saída estruturada"
   },
   "searchDebug": {
     "noBankSelected": "Nenhum Banco Selecionado",
@@ -1462,32 +1463,12 @@
     "factTypeExperience": "experiência",
     "factTypeObservation": "observação",
     "actionClearContent": "Limpar conteúdo",
+    "structuredOutput": "Saída estruturada",
+    "responseSchemaTitle": "Esquema de saída estruturada",
     "refreshTrace": "Rastro da atualização",
     "traceNotCaptured": "Nenhum rastro registrado para esta atualização. Ative “Manter rastros de atualização” nas configurações do modelo.",
     "actionDryRun": "Executar simulação",
     "actionDryRunRunning": "Executando simulação…"
-  },
-  "mentalModelDiagnostics": {
-    "fallbackNoBaseline": "Nenhum conteúdo existente para editar",
-    "fallbackQueryChanged": "A consulta de origem mudou",
-    "fallbackDocUnreadable": "Não foi possível ler o documento armazenado",
-    "fallbackOpsFailed": "A chamada de operações delta falhou",
-    "outcomeWritten": "Novo conteúdo gravado",
-    "outcomePreserved": "Sem fatos novos, conteúdo mantido",
-    "outcomeFailed": "Resultado vazio, a atualização falha",
-    "warningsTitle": "Avisos",
-    "traceResults": "{count} resultados",
-    "executionTraceTitle": "Rastro de Execução",
-    "noOperations": "Sem operações",
-    "responseGenerated": "Resposta gerada",
-    "agentDecided": "Agente decidiu",
-    "toolInputLabel": "Entrada:",
-    "executionTraceDescription": "{iterations} chamadas de LLM • {totalMs}ms no total",
-    "executingTools": "Ferramentas chamadas: {count}",
-    "resultTitle": "Simulação — {name}",
-    "toolOutputLabel": "Saída:",
-    "toolWindowBound": "janela: apenas memórias atualizadas após {time}",
-    "toolWindowUnbounded": "janela: nenhuma — esta ferramenta não é limitada no tempo"
   },
   "constellation": {
     "instructions": "Scroll para zoom · Arraste para mover · Passe o mouse para explorar · Clique para selecionar",
@@ -1683,10 +1664,10 @@
         "update": "Falha ao atualizar modelo mental",
         "delete": "Falha ao excluir modelo mental",
         "refresh": "Falha ao atualizar modelo mental",
-        "dryRunRefresh": "Falha ao simular a atualização do modelo mental",
         "history": "Falha ao buscar histórico do modelo mental",
         "notFound": "Modelo mental não encontrado",
-        "clear": "Falha ao limpar modelo mental"
+        "clear": "Falha ao limpar modelo mental",
+        "dryRunRefresh": "Falha ao simular a atualização do modelo mental"
       },
       "observations": {
         "list": "Falha ao listar observações",
@@ -1816,5 +1797,51 @@
     "pagesEmptyCta": "Create your first page",
     "recentDocsTitle": "Recent documents",
     "recentDocsEmpty": "No documents yet"
+  },
+  "schemaBuilder": {
+    "title": "Esquema de saída estruturada",
+    "subtitle": "Adicione campos visualmente ou edite o JSON diretamente. O modelo retorna um objeto com esse formato.",
+    "visualTab": "Visual",
+    "codeTab": "Código",
+    "addField": "Adicionar campo",
+    "namePlaceholder": "nome do campo",
+    "descriptionPlaceholder": "descrição (opcional)",
+    "required": "Obrigatório",
+    "removeField": "Remover campo",
+    "emptyState": "Adicione pelo menos um campo para definir a saída.",
+    "duplicateNames": "Os nomes dos campos devem ser únicos.",
+    "visualUnavailable": "Este esquema é avançado demais para o editor visual — edite-o como código.",
+    "invalidJson": "Sintaxe JSON inválida.",
+    "cancel": "Cancelar",
+    "apply": "Aplicar",
+    "openBuilder": "Criar esquema",
+    "edit": "Editar",
+    "clear": "Remover esquema",
+    "fieldsSummary": "{count, plural, one {# campo} other {# campos}}",
+    "invalidSchema": "Esquema inválido — abra o construtor para corrigi-lo.",
+    "fieldDescription": "Quando definido, a resposta também é retornada como structured_output conforme este esquema.",
+    "itemsLabel": "cada item"
+  },
+  "mentalModelDiagnostics": {
+    "fallbackNoBaseline": "Nenhum conteúdo existente para editar",
+    "fallbackQueryChanged": "A consulta de origem mudou",
+    "fallbackDocUnreadable": "Não foi possível ler o documento armazenado",
+    "fallbackOpsFailed": "A chamada de operações delta falhou",
+    "outcomeWritten": "Novo conteúdo gravado",
+    "outcomePreserved": "Sem fatos novos, conteúdo mantido",
+    "outcomeFailed": "Resultado vazio, a atualização falha",
+    "warningsTitle": "Avisos",
+    "traceResults": "{count} resultados",
+    "executionTraceTitle": "Rastro de Execução",
+    "noOperations": "Sem operações",
+    "responseGenerated": "Resposta gerada",
+    "agentDecided": "Agente decidiu",
+    "toolInputLabel": "Entrada:",
+    "executionTraceDescription": "{iterations} chamadas de LLM • {totalMs}ms no total",
+    "executingTools": "Ferramentas chamadas: {count}",
+    "resultTitle": "Simulação — {name}",
+    "toolOutputLabel": "Saída:",
+    "toolWindowBound": "janela: apenas memórias atualizadas após {time}",
+    "toolWindowUnbounded": "janela: nenhuma — esta ferramenta não é limitada no tempo"
   }
 }

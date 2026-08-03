@@ -10162,7 +10162,8 @@ class MemoryEngine(MemoryEngineInterface):
             budget: Budget level (currently unused, reserved for future)
             context: Additional context string to include in agent prompt
             max_tokens: Max tokens (currently unused, reserved for future)
-            response_schema: Optional JSON Schema for structured output (not yet supported)
+            response_schema: Optional JSON Schema for structured output. When provided, a
+                follow-up extraction call parses the final answer into ``structured_output``.
             tags: Optional tags to filter memories
             tags_match: How to match tags - "any" (OR), "all" (AND)
             apply_all_directives: When True, apply every active directive regardless of
@@ -10177,7 +10178,8 @@ class MemoryEngine(MemoryEngineInterface):
             ReflectResult containing:
                 - text: Plain text answer
                 - based_on: Empty dict (agent retrieves facts dynamically)
-                - structured_output: None (not yet supported for agentic reflect)
+                - structured_output: Parsed structured output when response_schema was
+                  provided, else None
         """
         # Sanitize at ingress so lone UTF-16 surrogates in the question/context cannot
         # crash logging, recall's embedder, or the reflect LLM call (see issue #1875).
@@ -12221,10 +12223,36 @@ class MemoryEngine(MemoryEngineInterface):
             if (mental_model.get("trigger") or {}).get("keep_trace"):
                 reflect_response_payload["trace"] = run.to_trace().model_dump(mode="json")
 
+            # Structured output: when the trigger carries a response_schema, attach a
+            # machine-readable projection parsed from the FINAL stored content (below).
+            # Extracting from the stored content — not reflect's answer — keeps it
+            # consistent with the markdown in both full and delta modes. This lives in
+            # the persist path (not the shared executor), so dry-run previews stay free
+            # of the extra call and the fail-loud behaviour.
+            response_schema = (mental_model.get("trigger") or {}).get("response_schema")
+            prev_structured_output = (mental_model.get("reflect_response") or {}).get("structured_output")
+
+            async def _structured_output_for(content_text: str) -> dict[str, Any] | None:
+                if not response_schema or not content_text.strip():
+                    return None
+                from .reflect.agent import _generate_structured_output
+
+                result = await _generate_structured_output(
+                    content_text,
+                    response_schema,
+                    self._reflect_llm_config,
+                    f"mm-{mental_model_id[:8]}",
+                    mental_model.get("max_tokens"),
+                )
+                return result.structured_output
+
             if run.outcome == "content_preserved_no_new_facts":
                 logger.info(
                     f"[MENTAL_MODELS] Delta refresh for {mental_model_id}: no new facts found, preserving content"
                 )
+                # Content is preserved unchanged, so the structured view must be too.
+                if prev_structured_output is not None:
+                    reflect_response_payload["structured_output"] = prev_structured_output
                 return await self.update_mental_model(
                     bank_id,
                     mental_model_id,
@@ -12253,6 +12281,25 @@ class MemoryEngine(MemoryEngineInterface):
                     "(likely an upstream LLM failure). Previous content preserved in DB; "
                     "reflect_response.refresh_skipped == 'empty_candidate' for audit."
                 )
+
+            # Parse the final stored content into structured_output when a schema is
+            # configured. If extraction fails, fail the refresh loudly rather than
+            # persisting content with no structured view (which would also clobber the
+            # previously-stored value); raising here skips update_mental_model, so the
+            # prior content and structured_output are preserved for retry.
+            if response_schema:
+                structured_output = await _structured_output_for(run.final_content)
+                if structured_output is None:
+                    logger.warning(
+                        f"[MENTAL_MODELS] Structured output extraction failed for {mental_model_id}; "
+                        "failing the refresh (prior content and structured_output preserved)."
+                    )
+                    raise MentalModelRefreshError(
+                        f"Structured output extraction failed for mental_model_id={mental_model_id} "
+                        "(a response_schema is configured). Prior content and structured_output preserved; "
+                        "the refresh can be retried."
+                    )
+                reflect_response_payload["structured_output"] = structured_output
 
             # Update the mental model with new content and reflect_response.
             # Passing last_refreshed_source_query records the query used for this

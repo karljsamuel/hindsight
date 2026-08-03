@@ -176,11 +176,39 @@ Mental models can be configured to **automatically refresh** when observations a
 | `include_chunks` | bool \| null | null | Override whether the refresh's internal recall returns raw chunk text. `null` uses the bank/global `recall_include_chunks` default. |
 | `recall_max_tokens` | int \| null | null | Override the token budget for facts retrieved during refresh. `null` uses the bank/global default. |
 | `recall_chunks_max_tokens` | int \| null | null | Override the token budget for raw chunks retrieved during refresh. `null` uses the bank/global default. |
+| `response_schema` | object \| null | null | JSON Schema for structured output. When set, each refresh also stores a `structured_output` alongside the markdown content. See [Structured Output](#structured-output) below. |
 | `keep_trace` | bool | false | Record how each refresh reached its result under `reflect_response.trace`. See [Troubleshoot a Refresh](#troubleshoot-a-refresh). |
 
 When `refresh_after_consolidation` is enabled, the mental model will be re-generated every time the bank's observations are consolidated — ensuring it always reflects the latest synthesized knowledge.
 
 When `refresh_cron` is set, Hindsight checks the schedule on the server's mental-model refresh tick and refreshes the model only if memories in its scope have changed since the last refresh. `refresh_cron` and `refresh_after_consolidation` are mutually exclusive, so a model refreshes either after consolidation or on a fixed UTC schedule, not both.
+
+### Structured Output
+
+A mental model's content is always markdown. Set `trigger.response_schema` to *also* attach a machine-readable view: a [JSON Schema](https://json-schema.org/) **object** with a non-empty `properties` map (nested objects and arrays are supported). Each refresh then stores a `structured_output` on the model's `reflect_response`, next to the markdown — you get both the prose and a typed object.
+
+```json
+{
+  "trigger": {
+    "response_schema": {
+      "type": "object",
+      "properties": {
+        "risk_level": { "type": "string" },
+        "open_questions": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["risk_level"]
+    }
+  }
+}
+```
+
+Key behaviours:
+
+- **Extracted from the final document.** The structured output is parsed from the content that is actually stored — so in `delta` mode it reflects the whole merged document, not just the facts that changed in that refresh.
+- **Fails loudly.** If a `response_schema` is configured but the structured extraction cannot be produced, the refresh **fails** rather than silently persisting content with no structured view. The model's previous content and `structured_output` are preserved, and the refresh can be retried.
+- **Invalid schemas are rejected** at request time: the schema must be an object with at least one property, and each property's `type` must be one of `string`, `number`, `integer`, `boolean`, `array`, or `object`.
+
+See [Reflect → `response_schema`](./reflect#response_schema) for how the same schema works on the `reflect` endpoint. The `structured_output` value appears on the model's `reflect_response` (see [Response Fields](#response-fields)).
 
 ### Staleness Gating
 

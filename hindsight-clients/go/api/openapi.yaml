@@ -5708,8 +5708,6 @@ components:
         parent_id: parent_id
         name: name
         trigger:
-          mode: full
-          refresh_after_consolidation: false
           recall_chunks_max_tokens: 1
           refresh_cron: refresh_cron
           tag_groups:
@@ -5721,16 +5719,20 @@ components:
             tags:
             - tags
             - tags
+          exclude_mental_models: false
+          mode: full
+          refresh_after_consolidation: false
           fact_types:
           - world
           - world
+          response_schema:
+            key: ""
           exclude_mental_model_ids:
           - exclude_mental_model_ids
           - exclude_mental_model_ids
           include_chunks: true
           tags_match: any
           keep_trace: false
-          exclude_mental_models: false
           recall_max_tokens: 6
         tags:
         - tags
@@ -7650,8 +7652,6 @@ components:
           created_at: created_at
           id: id
           trigger:
-            mode: full
-            refresh_after_consolidation: false
             recall_chunks_max_tokens: 1
             refresh_cron: refresh_cron
             tag_groups:
@@ -7663,16 +7663,20 @@ components:
               tags:
               - tags
               - tags
+            exclude_mental_models: false
+            mode: full
+            refresh_after_consolidation: false
             fact_types:
             - world
             - world
+            response_schema:
+              key: ""
             exclude_mental_model_ids:
             - exclude_mental_model_ids
             - exclude_mental_model_ids
             include_chunks: true
             tags_match: any
             keep_trace: false
-            exclude_mental_models: false
             recall_max_tokens: 6
           last_refreshed_at: last_refreshed_at
           is_stale: true
@@ -7689,8 +7693,6 @@ components:
           created_at: created_at
           id: id
           trigger:
-            mode: full
-            refresh_after_consolidation: false
             recall_chunks_max_tokens: 1
             refresh_cron: refresh_cron
             tag_groups:
@@ -7702,16 +7704,20 @@ components:
               tags:
               - tags
               - tags
+            exclude_mental_models: false
+            mode: full
+            refresh_after_consolidation: false
             fact_types:
             - world
             - world
+            response_schema:
+              key: ""
             exclude_mental_model_ids:
             - exclude_mental_model_ids
             - exclude_mental_model_ids
             include_chunks: true
             tags_match: any
             keep_trace: false
-            exclude_mental_models: false
             recall_max_tokens: 6
           last_refreshed_at: last_refreshed_at
           is_stale: true
@@ -7873,8 +7879,6 @@ components:
         created_at: created_at
         id: id
         trigger:
-          mode: full
-          refresh_after_consolidation: false
           recall_chunks_max_tokens: 1
           refresh_cron: refresh_cron
           tag_groups:
@@ -7886,16 +7890,20 @@ components:
             tags:
             - tags
             - tags
+          exclude_mental_models: false
+          mode: full
+          refresh_after_consolidation: false
           fact_types:
           - world
           - world
+          response_schema:
+            key: ""
           exclude_mental_model_ids:
           - exclude_mental_model_ids
           - exclude_mental_model_ids
           include_chunks: true
           tags_match: any
           keep_trace: false
-          exclude_mental_models: false
           recall_max_tokens: 6
         last_refreshed_at: last_refreshed_at
         is_stale: true
@@ -7994,8 +8002,6 @@ components:
     MentalModelTrigger-Input:
       description: Trigger settings for a mental model.
       example:
-        mode: full
-        refresh_after_consolidation: false
         recall_chunks_max_tokens: 1
         refresh_cron: refresh_cron
         tag_groups:
@@ -8007,16 +8013,20 @@ components:
           tags:
           - tags
           - tags
+        exclude_mental_models: false
+        mode: full
+        refresh_after_consolidation: false
         fact_types:
         - world
         - world
+        response_schema:
+          key: ""
         exclude_mental_model_ids:
         - exclude_mental_model_ids
         - exclude_mental_model_ids
         include_chunks: true
         tags_match: any
         keep_trace: false
-        exclude_mental_models: false
         recall_max_tokens: 6
       properties:
         mode:
@@ -8084,6 +8094,9 @@ components:
         recall_chunks_max_tokens:
           nullable: true
           type: integer
+        response_schema:
+          additionalProperties: {}
+          nullable: true
         keep_trace:
           default: false
           description: "If true, every refresh of this mental model records how it\
@@ -8101,8 +8114,6 @@ components:
     MentalModelTrigger-Output:
       description: Trigger settings for a mental model.
       example:
-        mode: full
-        refresh_after_consolidation: false
         recall_chunks_max_tokens: 1
         refresh_cron: refresh_cron
         tag_groups:
@@ -8114,16 +8125,20 @@ components:
           tags:
           - tags
           - tags
+        exclude_mental_models: false
+        mode: full
+        refresh_after_consolidation: false
         fact_types:
         - world
         - world
+        response_schema:
+          key: ""
         exclude_mental_model_ids:
         - exclude_mental_model_ids
         - exclude_mental_model_ids
         include_chunks: true
         tags_match: any
         keep_trace: false
-        exclude_mental_models: false
         recall_max_tokens: 6
       properties:
         mode:
@@ -8191,6 +8206,9 @@ components:
         recall_chunks_max_tokens:
           nullable: true
           type: integer
+        response_schema:
+          additionalProperties: {}
+          nullable: true
         keep_trace:
           default: false
           description: "If true, every refresh of this mental model records how it\

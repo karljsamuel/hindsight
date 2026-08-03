@@ -3305,6 +3305,14 @@ export type MentalModelTriggerInput = {
    */
   recall_chunks_max_tokens?: number | null;
   /**
+   * Response Schema
+   *
+   * Optional JSON Schema for structured output. When set, each refresh runs the same structured-output extraction as reflect's response_schema and stores the parsed result under reflect_response.structured_output alongside the markdown content.
+   */
+  response_schema?: {
+    [key: string]: unknown;
+  } | null;
+  /**
    * Keep Trace
    *
    * If true, every refresh of this mental model records how it reached its result under reflect_response.trace: the mode it ran in and why, the resolved scope and time window, how many facts retrieval returned versus how many the agent used, the tool and LLM calls, and any delta operations. Only the latest refresh's trace is kept. This is the only way to diagnose a cron- or consolidation-driven refresh after the fact, since no human sees those run. Tool outputs are reduced to result counts to keep the stored trace bounded; use LLM request tracing for raw prompts and responses.
@@ -3386,6 +3394,14 @@ export type MentalModelTriggerOutput = {
    * Override the token budget for raw chunks returned by the internal recall during refresh. None means use the bank/global config default (recall_chunks_max_tokens).
    */
   recall_chunks_max_tokens?: number | null;
+  /**
+   * Response Schema
+   *
+   * Optional JSON Schema for structured output. When set, each refresh runs the same structured-output extraction as reflect's response_schema and stores the parsed result under reflect_response.structured_output alongside the markdown content.
+   */
+  response_schema?: {
+    [key: string]: unknown;
+  } | null;
   /**
    * Keep Trace
    *
