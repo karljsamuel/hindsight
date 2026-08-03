@@ -14,8 +14,12 @@ function newHome(): string {
   return home;
 }
 
-const claudeLine = (role: string, text: string) =>
-  JSON.stringify({ type: role, message: { role, content: [{ type: "text", text }] } });
+const claudeLine = (role: string, text: string, cwd?: string) =>
+  JSON.stringify({
+    type: role,
+    ...(cwd ? { cwd } : {}),
+    message: { role, content: [{ type: "text", text }] },
+  });
 
 describe("local history import", () => {
   it("reads Claude sessions from the project directory for THIS repo only", () => {
@@ -25,12 +29,15 @@ describe("local history import", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       join(dir, "s1.jsonl"),
-      `${claudeLine("user", "why retry 429?")}\n${claudeLine("assistant", "because backpressure")}\n`
+      `${claudeLine("user", "why retry 429?", repo)}\n${claudeLine("assistant", "because backpressure")}\n`
     );
     // A different project must not leak into this repo's import.
     const other = claudeProjectDir("/Users/x/dev/otherrepo", h);
     mkdirSync(other, { recursive: true });
-    writeFileSync(join(other, "s2.jsonl"), `${claudeLine("user", "unrelated")}\n`);
+    writeFileSync(
+      join(other, "s2.jsonl"),
+      `${claudeLine("user", "unrelated", "/Users/x/dev/otherrepo")}\n`
+    );
 
     const r = importLocalHistory("claude-code", repo, h);
     expect(r.supported).toBe(true);
@@ -86,9 +93,52 @@ describe("local history import", () => {
 
   it("returns empty (not an error) when a supported harness has no history", () => {
     const h = newHome();
-    expect(importLocalHistory("claude-code", "/repo/none", h)).toEqual({
-      supported: true,
-      sessions: [],
-    });
+    const r = importLocalHistory("claude-code", "/repo/none", h);
+    expect(r.supported).toBe(true);
+    expect(r.sessions).toEqual([]);
+  });
+});
+
+describe("attribution must be proven, never guessed", () => {
+  it("skips a Claude session that records no cwd instead of trusting the directory name", () => {
+    const h = newHome();
+    const repo = "/Users/x/dev/myrepo";
+    const dir = claudeProjectDir(repo, h);
+    mkdirSync(dir, { recursive: true });
+    // Sits in this repo's project directory but proves nothing about where it ran.
+    writeFileSync(join(dir, "nocwd.jsonl"), `${claudeLine("user", "ambiguous")}\n`);
+
+    const r = importLocalHistory("claude-code", repo, h);
+    expect(r.sessions).toEqual([]);
+    expect(r.unattributed).toBe(1);
+  });
+
+  it("does not pull a SIBLING repo's sessions in via the ambiguous name encoding", () => {
+    const h = newHome();
+    // "/Users/x/dev/repo-sub" and "/Users/x/dev/repo/sub" both encode to the same prefix shape,
+    // so only the recorded cwd can tell them apart.
+    const sibling = claudeProjectDir("/Users/x/dev/repo-sub", h);
+    mkdirSync(sibling, { recursive: true });
+    writeFileSync(
+      join(sibling, "s.jsonl"),
+      `${claudeLine("user", "sibling repo work", "/Users/x/dev/repo-sub")}\n`
+    );
+
+    const r = importLocalHistory("claude-code", "/Users/x/dev/repo", h);
+    expect(JSON.stringify(r.sessions)).not.toContain("sibling repo work");
+  });
+
+  it("includes a session run in a SUBDIRECTORY of the repo", () => {
+    const h = newHome();
+    const repo = "/Users/x/dev/repo";
+    const sub = claudeProjectDir("/Users/x/dev/repo/packages/api", h);
+    mkdirSync(sub, { recursive: true });
+    writeFileSync(
+      join(sub, "s.jsonl"),
+      `${claudeLine("user", "work in a subpackage", "/Users/x/dev/repo/packages/api")}\n`
+    );
+
+    const r = importLocalHistory("claude-code", repo, h);
+    expect(JSON.stringify(r.sessions)).toContain("work in a subpackage");
   });
 });

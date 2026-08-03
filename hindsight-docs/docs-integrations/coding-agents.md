@@ -98,7 +98,8 @@ hindsight-coding-agents install claude-code --import-conversations
 - Scoped to the **current repo**, since history is per-repo and a machine can hold thousands of unrelated sessions.
 - Safe to re-run: ingestion dedups by document id.
 - It runs extraction, so it costs tokens roughly in proportion to the history imported.
-- Supported for **Claude Code** and **Codex**, which store transcripts as files. opencode, Kilo, Cursor, Cline, Copilot and Devin keep history in internal SQLite databases with unversioned schemas; those report as skipped rather than importing nothing silently.
+- Supported for **Claude Code** and **Codex**, which store transcripts as files _and_ record the directory each session ran in. Sessions are matched on that recorded directory — never on a filename or folder name — because a wrong guess would file another repo's conversation into this bank. Anything that can't be attributed is skipped and reported.
+- opencode, Kilo, Cursor, Cline, Copilot and Devin keep history in internal SQLite databases with unversioned schemas; those report as skipped rather than importing nothing silently.
 
 Prefer to keep the old bank instead? Point this package at it — no data moves:
 

@@ -19,7 +19,15 @@
  * reading them would break on any upstream change, so they report as unsupported rather than
  * silently importing nothing.
  */
-import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  statSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ChatSession } from "./types";
@@ -32,11 +40,34 @@ export interface HistoryImport {
   /** Why, when unsupported — surfaced to the user rather than failing silently. */
   reason?: string;
   sessions: ChatSession[];
+  /** Sessions skipped because nothing in them proves which repo they belong to. */
+  unattributed?: number;
 }
 
 /** Claude encodes a project directory as its absolute path with separators replaced by `-`. */
 export function claudeProjectDir(repoDir: string, home = homedir()): string {
   return join(home, ".claude", "projects", repoDir.replace(/[/.]/g, "-"));
+}
+
+/** Is `dir` the repo itself or somewhere inside it? */
+export function withinRepo(dir: string | undefined, repoDir: string): boolean {
+  return (
+    !!dir && (dir === repoDir || dir.startsWith(repoDir.endsWith("/") ? repoDir : repoDir + "/"))
+  );
+}
+
+/** First `cwd` recorded in a Claude transcript, i.e. where that session was working. */
+function claudeSessionCwd(file: string): string | undefined {
+  try {
+    for (const line of readFileSync(file, "utf8").split("\n", 400)) {
+      if (!line.includes('"cwd"')) continue;
+      const cwd = (JSON.parse(line) as { cwd?: string }).cwd;
+      if (cwd) return cwd;
+    }
+  } catch {
+    /* unreadable or truncated transcript */
+  }
+  return undefined;
 }
 
 function toSession(id: string, turns: TransportTurn[]): ChatSession | undefined {
@@ -84,11 +115,39 @@ function jsonlFiles(dir: string): string[] {
     .map((f) => join(dir, f));
 }
 
-/** Claude Code: one directory per project, one .jsonl per session — no scanning needed. */
+/**
+ * Claude Code: one directory per LAUNCH directory, one .jsonl per session.
+ *
+ * Running Claude from a subdirectory creates its own project dir, so an exact match on the repo
+ * root silently misses that history (on a real machine, 64 of 107 project dirs were nested under
+ * another). Candidate dirs are prefiltered by encoded-name prefix — cheap, since the encoding is
+ * order-preserving — and then confirmed against the `cwd` recorded INSIDE each session, because the
+ * name alone is ambiguous: `/` and `.` both encode to `-`, so `repo-sub` may be the subdirectory
+ * `repo/sub` or an unrelated sibling repo called `repo-sub`.
+ */
 function claudeHistory(repoDir: string, home: string): HistoryImport {
-  const dir = claudeProjectDir(repoDir, home);
+  const root = join(home, ".claude", "projects");
+  const exact = claudeProjectDir(repoDir, home);
+  const prefix = exact + "-";
+  const dirs = existsSync(root)
+    ? readdirSync(root)
+        .map((d) => join(root, d))
+        .filter((d) => d === exact || d.startsWith(prefix))
+    : [];
   const sessions: ChatSession[] = [];
-  for (const file of jsonlFiles(dir)) {
+  let unattributed = 0;
+  for (const file of dirs.flatMap(jsonlFiles)) {
+    // ONLY the cwd recorded inside the session may attribute it to a repo. Falling back to the
+    // directory name would be a guess: `/` and `.` both encode to `-`, so `repo-sub` is either the
+    // subdirectory `repo/sub` or an unrelated sibling repo — and a wrong guess files someone
+    // else's conversation into this repo's memory, which is worse than importing nothing.
+    // (Measured: 400/400 sampled sessions record a cwd, so this skips ~nothing in practice.)
+    const cwd = claudeSessionCwd(file);
+    if (!cwd) {
+      unattributed++;
+      continue;
+    }
+    if (!withinRepo(cwd, repoDir)) continue;
     try {
       const id = file
         .split("/")
@@ -100,7 +159,7 @@ function claudeHistory(repoDir: string, home: string): HistoryImport {
       /* a single unreadable transcript must not abort the import */
     }
   }
-  return { supported: true, sessions };
+  return { supported: true, sessions, unattributed };
 }
 
 /**
@@ -130,8 +189,8 @@ function codexHistory(repoDir: string, home: string): HistoryImport {
       const head = firstLine(file);
       if (!head) continue;
       const meta = JSON.parse(head) as { payload?: { cwd?: string; id?: string } };
-      if (meta?.payload?.cwd !== repoDir) continue;
-      const s = toSession(meta.payload.id ?? file, readCodexTranscript(file));
+      if (!withinRepo(meta?.payload?.cwd, repoDir)) continue;
+      const s = toSession(meta.payload?.id ?? file, readCodexTranscript(file));
       if (s) sessions.push(s);
     } catch {
       /* skip unreadable/short files */

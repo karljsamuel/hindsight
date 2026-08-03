@@ -769,6 +769,13 @@ function importConversations(harness: string, ctx: InstallCtx): void {
     ctx.log?.(`${harness}: --import-conversations skipped — ${found.reason}`);
     return;
   }
+  if (found.unattributed) {
+    // Never silently: a session we cannot attribute is one the user might expect to see imported.
+    ctx.log?.(
+      `${harness}: skipped ${found.unattributed} session(s) that do not record which directory ` +
+        `they ran in — importing them could file another repo's conversation into this bank`
+    );
+  }
   if (!found.sessions.length) {
     ctx.log?.(`${harness}: no past sessions found on disk for ${repo}`);
     return;
