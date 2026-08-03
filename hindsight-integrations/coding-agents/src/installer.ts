@@ -761,7 +761,8 @@ export function run(argv: string[], ctx: InstallCtx): number {
     ctx.log?.(
       "refusing to install from an npx/dlx cache: the hook wiring would point into a cache npm can " +
         "evict, silently breaking every session.\nInstall the package permanently, then re-run:\n" +
-        "  npm install -g hindsight-coding-agents && hindsight-coding-agents install"
+        "  npm install -g @vectorize-io/hindsight-coding-agents\n" +
+        "  hindsight-coding-agents install all"
     );
     return 1;
   }
