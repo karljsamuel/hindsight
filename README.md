@@ -298,7 +298,7 @@ client.reflect(bank_id="my-bank", query="What should I know about Alice?")
 ---
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=vectorize-io/hindsight&type=date&legend=top-left)](https://www.star-history.com/#vectorize-io/hindsight&type=date&legend=top-left)
+[![Star history](https://raw.githubusercontent.com/vectorize-io/hindsight/main/.github/star-history/chart.svg)](https://github.com/vectorize-io/hindsight/stargazers)
 ---
 
 ## Supported Platforms
