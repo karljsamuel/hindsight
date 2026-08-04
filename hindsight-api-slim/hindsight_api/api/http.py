@@ -54,6 +54,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from hindsight_api import MemoryEngine
 from hindsight_api.config import RETAIN_EXTRACTION_MODES
+from hindsight_api.config_resolver import BankConfigPersistenceConflictError
 
 
 def _annotation_is_nullable(annotation: Any) -> bool:
@@ -6815,6 +6816,11 @@ def _register_routes(app: FastAPI):
                 bank_id=bank_id,
                 manifest=body,
                 request_context=request_context,
+            )
+        except BankConfigPersistenceConflictError as e:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Bank '{e.bank_id}' changed or was deleted during template import; retry the import.",
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))

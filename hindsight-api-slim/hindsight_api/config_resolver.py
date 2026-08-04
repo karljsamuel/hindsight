@@ -32,6 +32,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class BankConfigPersistenceConflictError(ValueError):
+    """Raised when a validated bank config update can no longer be persisted."""
+
+    def __init__(self, bank_id: str):
+        self.bank_id = bank_id
+        super().__init__(f"Cannot update config for bank '{bank_id}': the bank does not exist")
+
+
 def _validate_retain_strategy_chunking(base_config: HindsightConfig, strategies: Any) -> None:
     """Validate retain strategy chunking with the same semantics as apply_strategy()."""
     if not isinstance(strategies, dict):
@@ -496,7 +504,7 @@ class ConfigResolver:
         # (The Oracle wrapper reshapes rowcount into the same "UPDATE <n>" form.)
         updated = int(result.split()[-1]) if isinstance(result, str) and result.startswith("UPDATE") else 0
         if updated == 0:
-            raise ValueError(f"Cannot update config for bank '{bank_id}': the bank does not exist")
+            raise BankConfigPersistenceConflictError(bank_id)
 
         logger.info(f"Updated bank config for {bank_id}: {list(normalized_updates.keys())}")
 
