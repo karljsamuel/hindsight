@@ -2578,13 +2578,20 @@ async def _try_delta_retain(
                     f"in {time.time() - step_start:.3f}s"
                 )
 
-                # Update tags on unchanged chunks' memory units
+                # Changed/removed units were deleted above. Sync unchanged
+                # survivors; new/changed units inserted below already carry
+                # the current metadata and tags.
                 step_start = time.time()
-                updated_count = await fact_storage.update_memory_units_tags(
-                    conn, bank_id, effective_doc_id, merged_tags
+                updated_count = await fact_storage.update_memory_units_metadata_and_tags(
+                    conn,
+                    bank_id,
+                    effective_doc_id,
+                    merged_tags,
+                    retain_params.get("metadata", {}),
                 )
                 log_buffer.append(
-                    f"  Updated tags on {updated_count} existing memory units in {time.time() - step_start:.3f}s"
+                    f"  Updated tags and metadata on {updated_count} existing memory units "
+                    f"in {time.time() - step_start:.3f}s"
                 )
 
                 # Store new/changed chunks
@@ -2726,7 +2733,13 @@ async def _delta_metadata_only(
                 retain_params,
                 merged_tags,
             )
-            await fact_storage.update_memory_units_tags(conn, bank_id, document_id, merged_tags)
+            await fact_storage.update_memory_units_metadata_and_tags(
+                conn,
+                bank_id,
+                document_id,
+                merged_tags,
+                retain_params.get("metadata", {}),
+            )
             if outbox_callback is not None:
                 await outbox_callback(conn)
 
