@@ -7138,7 +7138,7 @@ class MemoryEngine(MemoryEngineInterface):
                             f"DELETE FROM {fq_table('invalidated_memory_units')} WHERE bank_id = $1", bank_id
                         )
 
-                        # Delete entities (cascades to unit_entities, entity_cooccurrences, memory_links with entity_id)
+                        # Delete entities (cascades to unit_entities, entity_cooccurrences)
                         await conn.execute(f"DELETE FROM {fq_table('entities')} WHERE bank_id = $1", bank_id)
 
                         # Sweep extension-owned bank-scoped tables (audit receipts,
