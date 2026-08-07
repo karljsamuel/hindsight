@@ -70,8 +70,8 @@ export interface InstallCtx {
   hasUvx?: () => boolean;
   detectLlm?: () => LlmChoice | undefined;
   hasRust?: () => boolean;
-  /** Reads the old per-agent plugin's endpoint; injectable for tests. */
-  readLegacy?: (home: string) => ReturnType<typeof readLegacyEndpoint>;
+  /** Reads an old per-agent plugin's endpoint; injectable for tests. */
+  readLegacy?: (home: string, prefer: readonly string[]) => ReturnType<typeof readLegacyEndpoint>;
   log?: (m: string) => void;
 }
 
@@ -624,7 +624,7 @@ function readLineSync(prompt: string): string {
  * prerequisites are missing is still worth configuring, because `uv` or an API key can be
  * installed right after — unlike the harness preflights, which gate wiring that could never work.
  */
-function configureServer(c: InstallCtx, args: string[]): boolean {
+function configureServer(c: InstallCtx, args: string[], installing: readonly string[]): boolean {
   const explicit = flagValue(args, "server");
   if (explicit && !SERVER_MODES.includes(explicit as ServerMode)) {
     c.log?.(`unknown --server "${explicit}" — expected one of: ${SERVER_MODES.join(", ")}`);
@@ -640,7 +640,7 @@ function configureServer(c: InstallCtx, args: string[]): boolean {
     // Someone coming from the old per-agent plugin already chose where their memory lives.
     // Adopt it rather than asking again — and above all rather than defaulting to Cloud, which
     // would quietly redirect their prompts and transcripts to a different server.
-    const legacy = (c.readLegacy ?? readLegacyEndpoint)(c.home);
+    const legacy = (c.readLegacy ?? readLegacyEndpoint)(c.home, installing);
     if (legacy) {
       const carried: Record<string, unknown> = { ...existing, serverMode: legacy.serverMode };
       if (legacy.apiUrl) carried.apiUrl = legacy.apiUrl;
@@ -649,7 +649,7 @@ function configureServer(c: InstallCtx, args: string[]): boolean {
       writeJson(configPath, carried);
       c.log?.(
         `server: ${legacy.serverMode}${legacy.apiUrl ? ` (${legacy.apiUrl})` : ""} — carried over ` +
-          `from ${legacy.source}\n` +
+          `from the ${legacy.harness} plugin (${legacy.source})\n` +
           `        Only the endpoint moves; conversations do not. To bring this repo's history\n` +
           `        across, re-run here with --import-conversations.`
       );
@@ -1102,7 +1102,15 @@ export function run(argv: string[], ctx: InstallCtx): number {
   }
   // Which server the agents will talk to. Resolved BEFORE any harness is wired so the very first
   // session already has a config to read.
-  if (command === "install" && !configureServer(ctx, rawArgs)) return 1;
+  if (
+    command === "install" &&
+    !configureServer(
+      ctx,
+      rawArgs,
+      targets.map((t) => t.name)
+    )
+  )
+    return 1;
 
   // Preflight runs BEFORE any config is written, and only blocks the harness that failed: on
   // `install all` the other agents are still worth wiring. The non-zero exit keeps the failure

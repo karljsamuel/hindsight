@@ -86,16 +86,19 @@ a `hookAdapter` in `src/harness/registry.ts`; persistent-plugin → implement `H
 
 The older per-agent integrations (`hindsight-claude-code`, `hindsight-cursor-cli`, `hindsight-codex`, …) are superseded by this package. Two things move; nothing else does.
 
-**Your server moves automatically.** If `~/.hindsight/claude-code.json` exists, `install` adopts its
-endpoint — `hindsightApiUrl` → `apiUrl`, `hindsightApiToken` → `apiToken`, and an empty URL means
-the local daemon, as it did there. You already chose where your memory lives; defaulting to Cloud
-instead would quietly send your prompts somewhere else. Pass `--server` to override.
+**Your server moves automatically.** If `~/.hindsight/claude-code.json` or `~/.hindsight/codex.json`
+exists, `install` adopts its endpoint — `hindsightApiUrl` → `apiUrl`, `hindsightApiToken` →
+`apiToken`, and an empty URL means the local daemon, as it did there. The agent you are installing
+is checked first, so wiring Codex takes Codex's server even if an old `claude-code.json` is still
+lying around. You already chose where your memory lives; defaulting to Cloud instead would quietly
+send your prompts somewhere else. Pass `--server` to override. (Those two are the only old plugins
+that shipped a user config — Cursor CLI, Copilot CLI, opencode and Cline have no endpoint to carry.)
 
 **Your conversations are re-imported from local disk**, as new documents:
 
 ```bash
 cd /path/to/your/repo
-hindsight-coding-agents install claude-code --import-conversations
+hindsight-coding-agents install claude-code --import-conversations   # or: install codex --import-conversations
 ```
 
 This re-extracts the transcripts the agent already wrote, so it costs tokens roughly in proportion

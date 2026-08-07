@@ -810,6 +810,7 @@ describe("server setup", () => {
   it("adopts the old plugin's endpoint instead of asking or defaulting to Cloud", () => {
     const ctx = makeCtx();
     ctx.readLegacy = () => ({
+      harness: "claude-code",
       serverMode: "self-hosted" as const,
       apiUrl: "http://legacy:8888",
       apiToken: "tok",
@@ -829,6 +830,7 @@ describe("server setup", () => {
   it("an explicit --server still overrides what the old plugin used", () => {
     const ctx = makeCtx();
     ctx.readLegacy = () => ({
+      harness: "claude-code",
       serverMode: "self-hosted" as const,
       apiUrl: "http://legacy:8888",
       source: "/x",
