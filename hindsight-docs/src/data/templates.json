@@ -86,6 +86,21 @@
         "hermes"
       ],
       "manifest_file": "templates/research-assistant.json"
+    },
+    {
+      "id": "plain-retrieval",
+      "name": "Plain Retrieval",
+      "description": "Use Hindsight as a conventional vector store: chunks in, hybrid search out, no LLM on retain or recall. Trades facts, entities, graph and temporal structure for the lowest cost and latency.",
+      "category": "retrieval",
+      "integrations": [
+        "litellm",
+        "langgraph",
+        "pydantic-ai",
+        "ai-sdk",
+        "llamaindex",
+        "local-mcp"
+      ],
+      "manifest_file": "templates/plain-retrieval.json"
     }
   ]
 }

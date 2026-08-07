@@ -1365,6 +1365,27 @@ class CreateBankRequest(BaseModel):
         default=None,
         description="Controls what gets synthesised into observations. Replaces built-in consolidation rules entirely.",
     )
+    enable_temporal_retrieval: bool | None = Field(
+        default=None,
+        description=(
+            "Toggle the temporal retrieval arm during recall, together with the date-aware query "
+            "analysis that feeds it. Useful for banks whose content carries no meaningful dates."
+        ),
+    )
+    enable_graph_retrieval: bool | None = Field(
+        default=None,
+        description=(
+            "Toggle the entity/link graph traversal arm during recall. Disabling trades relational "
+            "recall for latency on banks whose content has little entity structure."
+        ),
+    )
+    enable_reranking: bool | None = Field(
+        default=None,
+        description=(
+            "Toggle cross-encoder reranking during recall. Disabling returns the RRF-fused ordering "
+            "directly, which is faster but less precise."
+        ),
+    )
 
     def get_config_updates(self) -> dict[str, Any]:
         """Return only the config fields that were explicitly set.
@@ -1398,6 +1419,9 @@ class CreateBankRequest(BaseModel):
             "retain_structured_chunk_size",
             "enable_observations",
             "observations_mission",
+            "enable_temporal_retrieval",
+            "enable_graph_retrieval",
+            "enable_reranking",
         ):
             value = getattr(self, field_name)
             if value is not None:
@@ -2534,6 +2558,13 @@ class BankTemplateConfig(BaseModel):
     )
     enable_observations: bool | None = Field(default=None, description="Toggle observation consolidation")
     observations_mission: str | None = Field(default=None, description="Controls what gets synthesised")
+    enable_temporal_retrieval: bool | None = Field(
+        default=None, description="Toggle the temporal arm (and its date-aware query analysis) during recall"
+    )
+    enable_graph_retrieval: bool | None = Field(
+        default=None, description="Toggle the entity/link graph arm during recall"
+    )
+    enable_reranking: bool | None = Field(default=None, description="Toggle cross-encoder reranking during recall")
     disposition_skepticism: int | None = Field(default=None, ge=1, le=5, description="Skepticism trait (1-5)")
     disposition_literalism: int | None = Field(default=None, ge=1, le=5, description="Literalism trait (1-5)")
     disposition_empathy: int | None = Field(default=None, ge=1, le=5, description="Empathy trait (1-5)")

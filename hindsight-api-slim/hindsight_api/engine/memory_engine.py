@@ -812,6 +812,18 @@ def _resolve_reranker_max_candidates(config: HindsightConfig, budget: "Budget | 
     return int(override) if override > 0 else config.reranker_max_candidates
 
 
+def _resolve_reranking(config_dict: dict, reranking: "RecallReranking") -> "RecallReranking":
+    """Apply the bank's enable_reranking setting to the requested ranking strategy.
+
+    Only "cross_encoder" is downgraded, and only to "rrf" — the fused ordering without
+    the cross-encoder pass. "interleave" is an explicit caller choice (consolidation
+    dedup relies on it) and "rrf" is already rerank-free, so neither is overridden.
+    """
+    if reranking == "cross_encoder" and not config_dict.get("enable_reranking", True):
+        return "rrf"
+    return reranking
+
+
 def utcnow():
     """Get current UTC time with timezone info."""
     return datetime.now(UTC)
@@ -4783,6 +4795,12 @@ class MemoryEngine(MemoryEngineInterface):
         # 0/unset → flat reranker_max_candidates). Static config, so read from get_config().
         reranker_max_candidates = _resolve_reranker_max_candidates(get_config(), budget)
 
+        # Recall pipeline stages, resolved per bank. A bank can switch off arms its
+        # content cannot use, trading recall breadth for latency.
+        enable_temporal_retrieval = bool(budget_config_dict.get("enable_temporal_retrieval", True))
+        enable_graph_retrieval = bool(budget_config_dict.get("enable_graph_retrieval", True))
+        reranking = _resolve_reranking(budget_config_dict, reranking)
+
         # Log recall start with tags if present (skip if quiet mode for internal operations)
         if not _quiet:
             tags_info = f", tags={tags} ({tags_match})" if tags else ""
@@ -4840,6 +4858,8 @@ class MemoryEngine(MemoryEngineInterface):
                             max_source_facts_tokens_per_observation=max_source_facts_tokens_per_observation,
                             reranking=reranking,
                             reranker_max_candidates=reranker_max_candidates,
+                            enable_temporal_retrieval=enable_temporal_retrieval,
+                            enable_graph_retrieval=enable_graph_retrieval,
                         )
                         break  # Success - exit retry loop
                     except OperationCancelledError:
@@ -4979,6 +4999,8 @@ class MemoryEngine(MemoryEngineInterface):
         max_source_facts_tokens_per_observation: int = -1,
         reranking: RecallReranking = "cross_encoder",
         reranker_max_candidates: int | None = None,
+        enable_temporal_retrieval: bool = True,
+        enable_graph_retrieval: bool = True,
     ) -> RecallResultModel:
         """
         Search implementation with modular retrieval and reranking.
@@ -5111,6 +5133,8 @@ class MemoryEngine(MemoryEngineInterface):
                         created_before=created_before,
                         min_semantic=min_scores.semantic if min_scores else None,
                         min_keyword=min_scores.keyword if min_scores else None,
+                        enable_temporal_retrieval=enable_temporal_retrieval,
+                        enable_graph_retrieval=enable_graph_retrieval,
                     )
                     parallel_duration = time.time() - parallel_start
             finally:
@@ -5272,15 +5296,21 @@ class MemoryEngine(MemoryEngineInterface):
                         fact_type=ft_name,
                     )
 
-                    # Add graph retrieval results for this fact type
-                    tracer.add_retrieval_results(
-                        method_name="graph",
-                        results=to_tuple_format(rr.graph),
-                        duration_seconds=rr.timings.get("graph", 0.0),
-                        score_field="activation",
-                        metadata={"budget": thinking_budget},
-                        fact_type=ft_name,
-                    )
+                    # Add graph retrieval results for this fact type.
+                    # Skipped entirely when the arm is off: an empty graph entry is
+                    # indistinguishable from "ran and matched nothing", which would
+                    # read as the arm being free rather than absent — the opposite of
+                    # what someone comparing traces to tune latency needs to see.
+                    # Mirrors the temporal guard below.
+                    if enable_graph_retrieval:
+                        tracer.add_retrieval_results(
+                            method_name="graph",
+                            results=to_tuple_format(rr.graph),
+                            duration_seconds=rr.timings.get("graph", 0.0),
+                            score_field="activation",
+                            metadata={"budget": thinking_budget},
+                            fact_type=ft_name,
+                        )
 
                     # Add temporal retrieval results for this fact type
                     # Show temporal even with 0 results if constraint was detected

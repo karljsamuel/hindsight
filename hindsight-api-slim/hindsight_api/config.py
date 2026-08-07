@@ -773,6 +773,15 @@ ENV_RECALL_INCLUDE_CHUNKS = "HINDSIGHT_API_RECALL_INCLUDE_CHUNKS"
 ENV_RECALL_MAX_TOKENS = "HINDSIGHT_API_RECALL_MAX_TOKENS"
 ENV_RECALL_CHUNKS_MAX_TOKENS = "HINDSIGHT_API_RECALL_CHUNKS_MAX_TOKENS"
 
+# Recall pipeline stages. Each arm of recall costs latency, and a bank whose
+# content has no temporal or relational structure pays for stages it cannot use
+# (e.g. a chunk-extraction bank used as plain retrieval). These switch the
+# individual stages off; per-bank, so one bank can run lean without changing how
+# the rest of the deployment recalls.
+ENV_ENABLE_TEMPORAL_RETRIEVAL = "HINDSIGHT_API_ENABLE_TEMPORAL_RETRIEVAL"
+ENV_ENABLE_GRAPH_RETRIEVAL = "HINDSIGHT_API_ENABLE_GRAPH_RETRIEVAL"
+ENV_ENABLE_RERANKING = "HINDSIGHT_API_ENABLE_RERANKING"
+
 # Recall budget mapping (budget enum -> thinking_budget integer)
 ENV_RECALL_BUDGET_FUNCTION = "HINDSIGHT_API_RECALL_BUDGET_FUNCTION"
 ENV_RECALL_BUDGET_FIXED_LOW = "HINDSIGHT_API_RECALL_BUDGET_FIXED_LOW"
@@ -1282,6 +1291,12 @@ DEFAULT_REFLECT_SOURCE_FACTS_MAX_TOKENS = -1  # Token budget for source facts in
 DEFAULT_RECALL_INCLUDE_CHUNKS = True  # Whether internal recall (e.g. mental model refresh) returns raw chunks
 DEFAULT_RECALL_MAX_TOKENS = 2048  # Token budget for facts returned by internal recall
 DEFAULT_RECALL_CHUNKS_MAX_TOKENS = 1000  # Token budget for raw chunks returned by internal recall
+
+# Recall pipeline stages — all on by default, so recall behaviour is unchanged
+# unless a bank opts out.
+DEFAULT_ENABLE_TEMPORAL_RETRIEVAL = True  # Temporal retrieval arm + the date-aware query analysis feeding it
+DEFAULT_ENABLE_GRAPH_RETRIEVAL = True  # Entity/link graph traversal arm
+DEFAULT_ENABLE_RERANKING = True  # Cross-encoder rerank of the fused candidates
 
 # Recall budget mapping
 # "fixed": thinking_budget = recall_budget_fixed_<level> (preserves legacy behavior)
@@ -2388,6 +2403,11 @@ class HindsightConfig:
     reflect_mission: str | None
     reflect_source_facts_max_tokens: int
 
+    # Recall pipeline stages (per-bank; all default True)
+    enable_temporal_retrieval: bool
+    enable_graph_retrieval: bool
+    enable_reranking: bool
+
     # Recall settings (used by internal recall, e.g. during mental model refresh)
     recall_include_chunks: bool
     recall_max_tokens: int
@@ -2621,6 +2641,10 @@ class HindsightConfig:
         # Entity labels (controlled vocabulary for entity classification)
         "entity_labels",
         "entities_allow_free_form",
+        # Recall pipeline stages
+        "enable_temporal_retrieval",
+        "enable_graph_retrieval",
+        "enable_reranking",
         # Consolidation settings
         "enable_observations",
         "enable_auto_consolidation",
@@ -3703,6 +3727,14 @@ class HindsightConfig:
             reflect_source_facts_max_tokens=int(
                 os.getenv(ENV_REFLECT_SOURCE_FACTS_MAX_TOKENS, str(DEFAULT_REFLECT_SOURCE_FACTS_MAX_TOKENS))
             ),
+            enable_temporal_retrieval=os.getenv(
+                ENV_ENABLE_TEMPORAL_RETRIEVAL, str(DEFAULT_ENABLE_TEMPORAL_RETRIEVAL)
+            ).lower()
+            in ("true", "1", "yes"),
+            enable_graph_retrieval=os.getenv(ENV_ENABLE_GRAPH_RETRIEVAL, str(DEFAULT_ENABLE_GRAPH_RETRIEVAL)).lower()
+            in ("true", "1", "yes"),
+            enable_reranking=os.getenv(ENV_ENABLE_RERANKING, str(DEFAULT_ENABLE_RERANKING)).lower()
+            in ("true", "1", "yes"),
             recall_include_chunks=os.getenv(ENV_RECALL_INCLUDE_CHUNKS, str(DEFAULT_RECALL_INCLUDE_CHUNKS)).lower()
             in ("true", "1", "yes"),
             recall_max_tokens=int(os.getenv(ENV_RECALL_MAX_TOKENS, str(DEFAULT_RECALL_MAX_TOKENS))),

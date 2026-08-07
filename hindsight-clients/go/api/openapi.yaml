@@ -5042,6 +5042,15 @@ components:
         observations_mission:
           nullable: true
           type: string
+        enable_temporal_retrieval:
+          nullable: true
+          type: boolean
+        enable_graph_retrieval:
+          nullable: true
+          type: boolean
+        enable_reranking:
+          nullable: true
+          type: boolean
         disposition_skepticism:
           maximum: 5.0
           minimum: 1.0
@@ -5569,6 +5578,15 @@ components:
         observations_mission:
           nullable: true
           type: string
+        enable_temporal_retrieval:
+          nullable: true
+          type: boolean
+        enable_graph_retrieval:
+          nullable: true
+          type: boolean
+        enable_reranking:
+          nullable: true
+          type: boolean
       title: CreateBankRequest
     CreateDirectiveRequest:
       description: Request model for creating a directive.
