@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -41,7 +41,14 @@ function writeJsonAt(path: string, value: unknown): void {
   writeFileSync(path, JSON.stringify(value, null, 2) + "\n");
 }
 
+// configureServer honors HINDSIGHT_CONFIG — a developer shell exporting it must not leak the
+// suite's --server writes into their real config file ("" is falsy → the per-test home is used).
+beforeEach(() => {
+  vi.stubEnv("HINDSIGHT_CONFIG", "");
+});
+
 afterEach(() => {
+  vi.unstubAllEnvs();
   while (homes.length) rmSync(homes.pop()!, { recursive: true, force: true });
   vi.clearAllMocks();
 });
@@ -830,6 +837,42 @@ describe("devin-cli preflight", () => {
 describe("server setup", () => {
   const configPath = (ctx: InstallCtx) => join(ctx.home, ".hindsight", "coding-agent.json");
 
+  // The runtime reads HINDSIGHT_CONFIG first (core/config.ts CONFIG_PATH); the wizard must write
+  // that same file, or a user with the var set is configured into a file sessions never read.
+  it("honors HINDSIGHT_CONFIG for both the already-configured check and the write", () => {
+    const ctx = makeCtx();
+    const override = join(ctx.home, "elsewhere", "config.json");
+    vi.stubEnv("HINDSIGHT_CONFIG", override);
+    try {
+      expect(run(["install", "claude-code", "--server", "daemon"], ctx)).toBe(0);
+      expect(readJson(override).serverMode).toBe("daemon");
+      expect(existsSync(configPath(ctx))).toBe(false); // the default path stays untouched
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("uses the injected arrow-key picker when interactive, mapping index → mode", () => {
+    const ctx = makeCtx();
+    ctx.interactive = true;
+    ctx.hasUvx = () => true;
+    ctx.hasRust = () => true;
+    ctx.detectLlm = () => ({ provider: "openai", apiKey: "sk", source: "OPENAI_API_KEY" });
+    ctx.selectPrompt = vi.fn(() => 2); // third row = daemon
+    expect(run(["install", "claude-code"], ctx)).toBe(0);
+    expect(ctx.selectPrompt).toHaveBeenCalledOnce();
+    expect(readJson(configPath(ctx)).serverMode).toBe("daemon");
+  });
+
+  it("a cancelled picker leaves the server config untouched but still installs", () => {
+    const ctx = makeCtx();
+    ctx.interactive = true;
+    ctx.selectPrompt = () => null;
+    expect(run(["install", "claude-code"], ctx)).toBe(0);
+    expect(existsSync(configPath(ctx))).toBe(false);
+    expect(existsSync(join(ctx.home, ".claude", "settings.json"))).toBe(true);
+  });
+
   it("--server daemon records the mode and leaves apiUrl to the port", () => {
     const ctx = makeCtx();
     ctx.hasUvx = () => true;
@@ -932,10 +975,32 @@ describe("server setup", () => {
       apiUrl: "http://legacy:8888",
       source: "/x",
     });
-    expect(run(["install", "claude-code", "--server", "cloud"], ctx)).toBe(0);
+    expect(run(["install", "claude-code", "--server", "cloud", "--api-token", "tok"], ctx)).toBe(0);
     const cfg = readJson(configPath(ctx));
     expect(cfg.serverMode).toBe("cloud");
     expect(cfg.apiUrl).toBeUndefined();
+  });
+
+  it("--server cloud stores the required token", () => {
+    const ctx = makeCtx();
+    expect(
+      run(["install", "claude-code", "--server", "cloud", "--api-token", "sk-cloud"], ctx)
+    ).toBe(0);
+    const cfg = readJson(configPath(ctx));
+    expect(cfg.serverMode).toBe("cloud");
+    expect(cfg.apiToken).toBe("sk-cloud");
+  });
+
+  // A Cloud config without a token only surfaces later as 401s on the first session — refuse
+  // up front instead, like self-hosted without a URL.
+  it("--server cloud without a token fails instead of writing a config that 401s", () => {
+    const ctx = makeCtx();
+    const logs: string[] = [];
+    ctx.log = (m) => logs.push(m);
+    expect(run(["install", "claude-code", "--server", "cloud"], ctx)).toBe(1);
+    expect(logs.join("\n")).toContain("--api-token");
+    expect(existsSync(configPath(ctx))).toBe(false);
+    expect(existsSync(join(ctx.home, ".claude", "settings.json"))).toBe(false);
   });
 
   // litellm publishes no macOS wheel, so a Mac compiles it from source and needs cargo. Without

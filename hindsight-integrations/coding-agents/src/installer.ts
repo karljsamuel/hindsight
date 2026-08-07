@@ -34,12 +34,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
+import { isatty } from "node:tty";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { HOOK_HARNESSES, type HookHarnessName } from "./harness/hook-lifecycle";
 import { importLocalHistory } from "./core/history";
 import { detectLlm, hasRustToolchain, hasUvx, type LlmChoice } from "./core/daemon";
 import { readLegacyEndpoint } from "./core/legacy";
+import { createInstallerUi, type SelectOption } from "./install-ui";
 
 /**
  * Substring that identifies OUR entries in a host's config, so a re-install replaces them and
@@ -73,6 +75,15 @@ export interface InstallCtx {
   /** Reads an old per-agent plugin's endpoint; injectable for tests. */
   readLegacy?: (home: string, prefer: readonly string[]) => ReturnType<typeof readLegacyEndpoint>;
   log?: (m: string) => void;
+  /** Styles an interactive readLineSync prompt (the CLI passes the InstallerUi rail style). */
+  promptStyle?: (q: string) => string;
+  /** Arrow-key picker (the CLI passes InstallerUi.select). Chosen index; null = cancelled;
+   *  undefined = raw TTY unavailable, fall back to the numeric prompt. */
+  selectPrompt?: (
+    question: string,
+    options: SelectOption[],
+    defaultIndex: number
+  ) => number | null | undefined;
 }
 
 function readJson(path: string): Record<string, any> {
@@ -166,14 +177,17 @@ function stripHarnessHooks(hooks: Record<string, any>, harness: HookHarnessName)
   }
 }
 
-/** Copy the packaged companion SKILL into a host's skills directory (idempotent overwrite). */
-function installSkill(c: InstallCtx, skillsBase: string): void {
+/** Copy the packaged companion SKILL into a host's skills directory (idempotent overwrite).
+ * The log line carries the harness prefix like every adapter message: several adapters install
+ * the skill before their first own log, and an unprefixed line would render under the PREVIOUS
+ * harness's group in the CLI output. */
+function installSkill(c: InstallCtx, harness: string, skillsBase: string): void {
   const src = join(c.pkgRoot, "skill");
   if (!existsSync(join(src, "SKILL.md"))) return;
   const dst = join(skillsBase, "hindsight-coding-agent");
   mkdirSync(skillsBase, { recursive: true });
   cpSync(src, dst, { recursive: true });
-  c.log?.(`skill installed at ${dst}`);
+  c.log?.(`${harness}: skill installed at ${dst}`);
 }
 
 function uninstallSkill(c: InstallCtx, skillsBase: string): void {
@@ -307,7 +321,7 @@ const claudeCode: HarnessInstaller = {
     c.log?.(`claude-code: hooks merged into ${path}`);
     // Companion SKILL: every skills-capable host gets it (claude/antigravity/cursor native dirs;
     // codex via the ~/.agents/skills standard).
-    installSkill(c, join(c.home, ".claude", "skills"));
+    installSkill(c, "claude-code", join(c.home, ".claude", "skills"));
     const mcp = c.claudeMcp ?? defaultClaudeMcp;
     // `claude mcp add` REFUSES when the name is taken ("MCP server hindsight already exists in
     // user config") — so on a machine that already had Hindsight, a re-install could never
@@ -401,7 +415,7 @@ const codex: HarnessInstaller = {
       writeFileSync(tomlPath, `${toml.replace(/\n*$/, "\n\n")}${additions.join("\n\n")}\n`);
       c.log?.(`codex: appended ${additions.length} section(s) to ${tomlPath}`);
     }
-    installSkill(c, join(c.home, ".agents", "skills")); // agentskills-standard shared dir
+    installSkill(c, "codex", join(c.home, ".agents", "skills")); // agentskills-standard shared dir
   },
   uninstall(c) {
     const hooksPath = join(c.home, ".codex", "hooks.json");
@@ -489,7 +503,7 @@ const antigravity: HarnessInstaller = {
       );
     }
     c.log?.(`antigravity-cli: hooks merged into ${hooksPath}, MCP into ${mcpPath}`);
-    installSkill(c, join(c.home, ".gemini", "config", "skills"));
+    installSkill(c, "antigravity-cli", join(c.home, ".gemini", "config", "skills"));
   },
   uninstall(c) {
     const hooksPath = join(c.home, ".gemini", "config", "hooks.json");
@@ -643,17 +657,41 @@ const CONFIG_RELATIVE = [".hindsight", "coding-agent.json"];
  * then would be noise — worse, it would silently rewrite a working setup in CI, where there is no
  * one to answer. Non-interactive callers pass `--server`.
  */
+const SERVER_CHOICES: { mode: ServerMode; label: string; hint: string }[] = [
+  { mode: "cloud", label: "Hindsight Cloud", hint: "hosted, needs an API token" },
+  { mode: "self-hosted", label: "Self-hosted server", hint: "a Hindsight server you already run" },
+  {
+    mode: "daemon",
+    label: "Local daemon (on-device)",
+    hint: "runs hindsight-embed here; no account, needs uv + an LLM key",
+  },
+];
+
 function promptServerMode(c: InstallCtx): ServerMode | undefined {
+  // Preferred UX: arrow-key picker (digits still submit directly). It reports undefined when a
+  // raw TTY isn't available (no stty, exotic shell) — then the plain numbered menu below still
+  // works everywhere a line can be read.
+  if (c.selectPrompt) {
+    const picked = c.selectPrompt(
+      "Where should memory live?",
+      SERVER_CHOICES.map(({ label, hint }) => ({ label, hint })),
+      0
+    );
+    if (picked === null) {
+      c.log?.("no server chosen — leaving the server config unchanged");
+      return undefined;
+    }
+    if (picked !== undefined) return SERVER_CHOICES[picked].mode;
+  }
   c.log?.(
     `\nWhere should memory live?\n` +
-      `  1) Hindsight Cloud            — hosted, needs an API token\n` +
-      `  2) Self-hosted server         — a Hindsight server you already run\n` +
-      `  3) Local daemon (on-device)   — runs hindsight-embed here; no account, needs uv + an LLM key\n`
+      SERVER_CHOICES.map((o, i) => `  ${i + 1}) ${o.label.padEnd(28)}— ${o.hint}`).join("\n") +
+      `\n`
   );
-  const answer = readLineSync("Choose [1-3] (default 1): ").trim();
-  if (answer === "" || answer === "1") return "cloud";
-  if (answer === "2") return "self-hosted";
-  if (answer === "3") return "daemon";
+  const answer = readLineSync(c, "Choose [1-3] (default 1): ").trim();
+  if (answer === "") return "cloud";
+  const digit = Number.parseInt(answer, 10);
+  if (digit >= 1 && digit <= SERVER_CHOICES.length) return SERVER_CHOICES[digit - 1].mode;
   c.log?.(`unrecognised choice "${answer}" — leaving the server config unchanged`);
   return undefined;
 }
@@ -665,14 +703,25 @@ function promptServerMode(c: InstallCtx): ServerMode | undefined {
  * async readline would mean making the whole installer async. readSync on the TTY blocks until
  * Enter, which is exactly the semantics wanted here.
  */
-function readLineSync(prompt: string): string {
-  process.stdout.write(prompt);
+function readLineSync(c: InstallCtx, prompt: string): string {
+  process.stdout.write((c.promptStyle ?? ((s: string) => s))(prompt));
   const buf = Buffer.alloc(1024);
-  try {
-    const n = readSync(0, buf, 0, buf.length, null);
-    return buf.subarray(0, n).toString("utf8");
-  } catch {
-    return ""; // no readable stdin — treated as the default
+  // Touching process.stdin ANYWHERE flips a TTY fd 0 to non-blocking (its getter initializes the
+  // TTY stream), after which readSync throws EAGAIN instead of waiting for Enter. The old
+  // blanket catch treated that as "no stdin" — so the picker printed its menu and every answer
+  // silently became the default. The CLI entry now probes the TTY with tty.isatty (no stream
+  // init), and EAGAIN here waits for input rather than fabricating an empty answer.
+  for (;;) {
+    try {
+      const n = readSync(0, buf, 0, buf.length, null);
+      return buf.subarray(0, n).toString("utf8");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EAGAIN") {
+        return ""; // genuinely no readable stdin — treated as the default
+      }
+      // Sleep 50ms without spinning; Atomics.wait is allowed on Node's main thread.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
   }
 }
 
@@ -689,7 +738,10 @@ function configureServer(c: InstallCtx, args: string[], installing: readonly str
     c.log?.(`unknown --server "${explicit}" — expected one of: ${SERVER_MODES.join(", ")}`);
     return false;
   }
-  const configPath = join(c.home, ...CONFIG_RELATIVE);
+  // The runtime resolves its config as HINDSIGHT_CONFIG || ~/.hindsight/coding-agent.json
+  // (core/config.ts CONFIG_PATH). The wizard must honor the same override, or a user with that
+  // var set would be configured into a file their sessions never read.
+  const configPath = process.env.HINDSIGHT_CONFIG || join(c.home, ...CONFIG_RELATIVE);
   const existing = readJson(configPath);
   const alreadyConfigured = !!(existing.serverMode || existing.apiUrl);
 
@@ -729,13 +781,21 @@ function configureServer(c: InstallCtx, args: string[], installing: readonly str
   const next: Record<string, unknown> = { ...existing, serverMode: mode };
   if (mode === "cloud") {
     delete next.apiUrl; // fall back to the built-in Cloud URL rather than pinning a stale one
+    // Cloud always authenticates — a config without a token only surfaces later as 401s on the
+    // first session, so the token is REQUIRED here (it used to be "blank to set later").
     const token = flagValue(args, "api-token") ?? (c.interactive ? askToken(c) : undefined);
-    if (token) next.apiToken = token;
+    if (!token) {
+      c.log?.(
+        `❌ Hindsight Cloud needs an API token — pass --api-token <token> (or set apiToken in ${configPath}).`
+      );
+      return false;
+    }
+    next.apiToken = token;
   } else if (mode === "self-hosted") {
     const url =
       flagValue(args, "api-url") ??
       (c.interactive
-        ? readLineSync("Server URL (e.g. http://localhost:8888): ").trim()
+        ? readLineSync(c, "Server URL (e.g. http://localhost:8888): ").trim()
         : undefined);
     if (!url) {
       c.log?.(
@@ -756,10 +816,16 @@ function configureServer(c: InstallCtx, args: string[], installing: readonly str
   return true;
 }
 
+/** Cloud tokens are mandatory: re-ask a couple of times rather than writing a config that 401s
+ *  on the first session. Three blank answers mean the user doesn't have one at hand — give up
+ *  and let the cloud branch abort with the actionable message. */
 function askToken(c: InstallCtx): string | undefined {
-  const token = readLineSync("API token (blank to set later): ").trim();
-  if (!token) c.log?.("  no token set — add apiToken later if the server needs one");
-  return token || undefined;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const token = readLineSync(c, "API token (required for Hindsight Cloud): ").trim();
+    if (token) return token;
+    c.log?.("  a token is required — find yours in the Hindsight Cloud dashboard");
+  }
+  return undefined;
 }
 
 /**
@@ -865,7 +931,7 @@ const cursor: HarnessInstaller = {
     };
     writeJson(mcpPath, mcp);
     c.log?.(`cursor-cli: hooks merged into ${hooksPath}, MCP into ${mcpPath}`);
-    installSkill(c, join(c.home, ".cursor", "skills"));
+    installSkill(c, "cursor-cli", join(c.home, ".cursor", "skills"));
   },
   uninstall(c) {
     const hooksPath = join(c.home, ".cursor", "hooks.json");
@@ -906,7 +972,7 @@ const copilot: HarnessInstaller = {
       hindsight: { command: "node", args: [join(c.dist, "mcp-server.js")] },
     };
     writeJson(mcpPath, mcp);
-    installSkill(c, join(c.home, ".copilot", "skills"));
+    installSkill(c, "copilot-cli", join(c.home, ".copilot", "skills"));
     c.log?.(`copilot-cli: hooks installed at ${hooksPath}, MCP into ${mcpPath}`);
   },
   uninstall(c) {
@@ -955,7 +1021,7 @@ const grok: HarnessInstaller = {
       copyFileSync(path, `${path}.hindsight-backup`);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, `${withoutOurs.replace(/\n*$/, "\n")}${block}`);
-    installSkill(c, join(c.home, ".grok", "skills"));
+    installSkill(c, "grok-build", join(c.home, ".grok", "skills"));
     c.log?.(`grok-build: native hooks + MCP installed in ${path}`);
   },
   uninstall(c) {
@@ -1008,7 +1074,7 @@ const cline: HarnessInstaller = {
       },
     };
     writeJson(mcpPath, mcp);
-    installSkill(c, join(c.home, ".cline", "data", "settings", "skills"));
+    installSkill(c, "cline-cli", join(c.home, ".cline", "data", "settings", "skills"));
     c.log?.(
       installed
         ? "cline-cli: native plugin + MCP + skill installed"
@@ -1119,7 +1185,8 @@ export function run(argv: string[], ctxIn: InstallCtx): number {
         `       [--server cloud|self-hosted|daemon] [--api-url <url>] [--api-token <token>]\n` +
         `       [--import-conversations]\n` +
         `  all      every agent detected on this machine\n` +
-        `  harness  ${INSTALLERS.map((i) => i.name).join(", ")} (agy aliases antigravity-cli)`
+        `  harness  ${INSTALLERS.map((i) => i.name).join(", ")} (agy aliases antigravity-cli)\n` +
+        `  agents/CI: without a TTY nothing ever prompts — pass --server (and --api-url/--api-token) to choose`
     );
     return command ? 1 : 0;
   }
@@ -1190,11 +1257,8 @@ export function run(argv: string[], ctxIn: InstallCtx): number {
     );
     return 1;
   }
-  ctx.log?.(
-    command === "install"
-      ? `\n✅ installed. Start a session — settings live in ~/.hindsight/coding-agent.json.`
-      : `\n✅ uninstalled.`
-  );
+  // No completion message here: the CLI entry's InstallerUi outro reports success (and where the
+  // settings live), so run() stays a silent-on-success engine for programmatic use.
   return 0;
 }
 
@@ -1214,15 +1278,36 @@ const mainPath = process.argv[1]
 const isMain = mainPath && import.meta.url === pathToFileURL(mainPath).href;
 if (isMain || mainPath?.endsWith("installer.js")) {
   const dist = dirname(fileURLToPath(import.meta.url));
-  process.exit(
-    run(process.argv.slice(2), {
-      home: homedir(),
-      pkgRoot: dirname(dist),
-      dist,
-      // Only a real terminal gets prompted; piped/CI installs take the documented default.
-      interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
-      log: (m) => console.log(m),
-    })
-  );
+  const pkgRoot = dirname(dist);
+  let version: string | undefined;
+  try {
+    version = JSON.parse(readFileSync(join(pkgRoot, "package.json"), "utf8")).version;
+  } catch {
+    version = undefined; // cosmetic only — a header without a version beats a crashed installer
+  }
+  const ui = createInstallerUi({
+    home: homedir(),
+    command: process.argv[2],
+    version,
+    harnessNames: INSTALLERS.map((i) => i.name),
+    // configureServer's messages render as their own "server" group, but don't count as an agent.
+    auxNames: ["server"],
+    configPath: process.env.HINDSIGHT_CONFIG || undefined,
+  });
+  ui.intro();
+  const code = run(process.argv.slice(2), {
+    home: homedir(),
+    pkgRoot,
+    dist,
+    // Only a real terminal gets prompted; piped/CI installs take the documented default.
+    // tty.isatty, NOT process.stdin.isTTY: the process.stdin getter initializes the stdin TTY
+    // stream, which puts fd 0 in non-blocking mode and breaks readLineSync (see there).
+    interactive: Boolean(isatty(0) && isatty(1)),
+    log: ui.log,
+    promptStyle: ui.prompt,
+    selectPrompt: ui.select,
+  });
+  ui.outro(code);
+  process.exit(code);
 }
 /* c8 ignore stop */
