@@ -10,6 +10,16 @@ For the source code, see [`hindsight-integrations/coding-agents`](https://github
 
 ← [Back to main changelog](../index.md)
 
+## [0.0.5](https://github.com/vectorize-io/hindsight/tree/integrations/coding-agents/v0.0.5)
+
+**Features**
+
+- Added a local daemon mode for the coding-agents integration and allow choosing which Hindsight server to connect to during installation.<span style={{color: "var(--ifm-color-emphasis-500)", margin: "0 0.3em"}}>·</span><a href="https://github.com/nicoloboschi" target="_blank" rel="noopener noreferrer" style={{color: "var(--ifm-color-primary)", textDecoration: "none", display: "inline-flex", alignItems: "center", gap: "4px", verticalAlign: "middle"}}>@nicoloboschi</a><span style={{color: "var(--ifm-color-emphasis-500)", margin: "0 0.3em"}}>·</span><a href="https://github.com/vectorize-io/hindsight/commit/e1b3d438e" target="_blank" rel="noopener noreferrer" style={{fontFamily: "var(--ifm-font-family-monospace, monospace)", fontSize: "0.85em", color: "var(--ifm-color-emphasis-600)"}}>e1b3d438e</a>
+
+**Improvements**
+
+- Improved Codex plugin migration by carrying over the existing endpoint when switching to the coding-agents integration.<span style={{color: "var(--ifm-color-emphasis-500)", margin: "0 0.3em"}}>·</span><a href="https://github.com/nicoloboschi" target="_blank" rel="noopener noreferrer" style={{color: "var(--ifm-color-primary)", textDecoration: "none", display: "inline-flex", alignItems: "center", gap: "4px", verticalAlign: "middle"}}>@nicoloboschi</a><span style={{color: "var(--ifm-color-emphasis-500)", margin: "0 0.3em"}}>·</span><a href="https://github.com/vectorize-io/hindsight/commit/18a58ef3a" target="_blank" rel="noopener noreferrer" style={{fontFamily: "var(--ifm-font-family-monospace, monospace)", fontSize: "0.85em", color: "var(--ifm-color-emphasis-600)"}}>18a58ef3a</a>
+
 ## [0.0.4](https://github.com/vectorize-io/hindsight/tree/integrations/coding-agents/v0.0.4)
 
 **Features**
