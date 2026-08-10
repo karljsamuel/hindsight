@@ -1990,6 +1990,119 @@ class MemoryEngine(MemoryEngineInterface):
         except Exception:
             logger.warning("Failed to delete import archive %s", storage_key, exc_info=True)
 
+    async def _handle_export_documents(self, task_dict: dict[str, Any]):
+        """Handler for async document-export tasks.
+
+        Builds the transfer ZIP for the bank (heavy load + compression, kept off
+        the request path — issue #3321), stores it in file storage, and records
+        the storage key, download URL, and archive size in the operation's
+        ``result_metadata``. ``execute_task`` marks the operation completed. The
+        client retrieves the archive later via GET /v1/default/files/download/{key}.
+        """
+        import json
+
+        bank_id = task_dict.get("bank_id")
+        operation_id = task_dict.get("operation_id")
+        document_ids = task_dict.get("document_ids")
+        include_observations = task_dict.get("include_observations", False)
+        if not bank_id:
+            raise ValueError("bank_id is required for export_documents task")
+
+        from hindsight_api.models import RequestContext
+
+        context = RequestContext(
+            internal=True,
+            user_initiated=True,
+            tenant_id=task_dict.get("_tenant_id"),
+            api_key_id=task_dict.get("_api_key_id"),
+            retry_count=task_dict.get("_retry_count", 0),
+        )
+
+        archive_bytes = await self.export_documents_async(
+            bank_id, context, document_ids, include_observations=include_observations
+        )
+
+        # A fresh uuid per export keeps concurrent/repeat exports of the same bank
+        # from clobbering each other's archive.
+        storage_key = f"banks/{bank_id}/exports/{uuid.uuid4()}/transfer.zip"
+        await self._file_storage.store(
+            file_data=archive_bytes,
+            key=storage_key,
+            metadata={"content_type": "application/zip", "bank_id": bank_id},
+        )
+        download_url = await self._file_storage.get_download_url(storage_key)
+
+        if operation_id:
+            result = {
+                "storage_key": storage_key,
+                "download_url": download_url,
+                "byte_size": len(archive_bytes),
+                "filename": f"{bank_id}-documents.zip",
+            }
+            backend = await self._get_backend()
+            async with acquire_with_retry(backend) as conn:
+                await conn.execute(
+                    f"UPDATE {fq_table('async_operations')} "
+                    f"SET result_metadata = COALESCE(result_metadata, '{{}}'::jsonb) || $1::jsonb "
+                    f"WHERE operation_id = $2",
+                    json.dumps(result, default=_json_default),
+                    uuid.UUID(operation_id),
+                )
+
+    async def _delete_operation_export_archive(self, result_metadata: Any) -> None:
+        """Best-effort delete of an export operation's stored archive.
+
+        Export archives live in file storage keyed by ``result_metadata.storage_key``
+        and the operation row is their only handle, so they must be removed whenever
+        that row is (user delete or retention prune). A no-op for non-export ops
+        (no storage_key) and swallowing failures so cleanup never blocks the delete.
+        """
+        if not result_metadata:
+            return
+        if isinstance(result_metadata, str):
+            try:
+                result_metadata = json.loads(result_metadata)
+            except (json.JSONDecodeError, TypeError):
+                return
+        if not isinstance(result_metadata, dict):
+            return
+        storage_key = result_metadata.get("storage_key")
+        if not storage_key:
+            return
+        try:
+            await self._file_storage.delete(storage_key)
+        except Exception:
+            logger.warning("Failed to delete export archive %s", storage_key, exc_info=True)
+
+    async def purge_expired_export_archives(self, conn: Any, table: str, cutoff: Any) -> int:
+        """Delete stored archives of export operations retention is about to prune.
+
+        Mirrors ``prune_terminal_operations``' predicate (terminal status +
+        ``updated_at < cutoff``) so an export's archive is removed in step with its
+        operation row, instead of being orphaned in file storage when the row is
+        pruned. Called by the maintenance sweep before the row prune, on the same
+        (schema-scoped) connection. Returns the number of archives deleted.
+        """
+        rows = await conn.fetch(
+            f"""SELECT result_metadata FROM {table}
+                WHERE operation_type = 'export_documents'
+                  AND status IN ('completed', 'failed', 'cancelled')
+                  AND updated_at < $1""",
+            cutoff,
+        )
+        purged = 0
+        for row in rows:
+            meta = row["result_metadata"]
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            if isinstance(meta, dict) and meta.get("storage_key"):
+                await self._delete_operation_export_archive(meta)
+                purged += 1
+        return purged
+
     async def _handle_batch_retain(self, task_dict: dict[str, Any]):
         """
         Handler for batch retain tasks.
@@ -2457,6 +2570,8 @@ class MemoryEngine(MemoryEngineInterface):
                     await self._handle_file_convert_retain(task_dict)
                 elif task_type == "import_documents":
                     await self._handle_import_documents(task_dict)
+                elif task_type == "export_documents":
+                    await self._handle_export_documents(task_dict)
                 elif task_type == "consolidation":
                     consolidation_result = await self._handle_consolidation(task_dict)
                 elif task_type == "graph_maintenance":
@@ -4590,6 +4705,70 @@ class MemoryEngine(MemoryEngineInterface):
 
         await self._get_backend()
         return await export_documents(self._backend, bank_id, document_ids, include_observations=include_observations)
+
+    async def submit_export_documents_async(
+        self,
+        bank_id: str,
+        request_context: "RequestContext",
+        document_ids: list[str] | None = None,
+        include_observations: bool = False,
+    ) -> dict[str, Any]:
+        """Submit an async document-export operation and return its ``operation_id``.
+
+        Building a whole-bank archive loads every unit into memory, holds a
+        connection, and blocks the event loop while the ZIP is compressed — enough
+        to take down the shared API on a large bank (issue #3321). So the work runs
+        in a worker (or inline under a ``SyncTaskBackend`` in tests) instead of on
+        the request. Poll GET /operations/{operation_id}; on completion the
+        operation's ``result_metadata`` carries ``download_url`` / ``storage_key``
+        / ``byte_size`` for the archive, served by GET /v1/default/files/download/{key}.
+        """
+        # Reject the incoherent combination up front — same guard export_documents
+        # raises — so the caller gets an immediate 400 rather than a failed task.
+        if include_observations and document_ids is not None:
+            raise ValueError("include_observations is only supported when exporting the whole bank (omit document_id)")
+
+        await self._authenticate_tenant(request_context)
+        await self._get_backend()
+
+        task_payload: dict[str, Any] = {
+            "document_ids": list(document_ids) if document_ids else None,
+            "include_observations": include_observations,
+        }
+        if request_context.tenant_id:
+            task_payload["_tenant_id"] = request_context.tenant_id
+        if request_context.api_key_id:
+            task_payload["_api_key_id"] = request_context.api_key_id
+
+        return await self._submit_async_operation(
+            bank_id,
+            operation_type="export_documents",
+            task_type="export_documents",
+            task_payload=task_payload,
+        )
+
+    async def retrieve_bank_file(
+        self,
+        bank_id: str,
+        storage_key: str,
+        request_context: "RequestContext",
+    ) -> bytes | None:
+        """Retrieve a bank-scoped stored file (e.g. an async export archive).
+
+        Authorizes the caller against ``bank_id`` first (via ``get_bank_profile``,
+        which authenticates the tenant), so a caller can't read another tenant's or
+        bank's file even if they guess the key. Returns ``None`` when the bank is
+        not visible to the caller or the file does not exist — the handler maps
+        both to 404 (indistinguishable on purpose, so keys can't be probed).
+        """
+        profile = await self.get_bank_profile(bank_id, request_context=request_context, create_if_missing=False)
+        if profile is None:
+            return None
+        await self._get_backend()
+        try:
+            return await self._file_storage.retrieve(storage_key)
+        except FileNotFoundError:
+            return None
 
     async def import_bank_async(
         self,
@@ -14893,15 +15072,18 @@ class MemoryEngine(MemoryEngineInterface):
             # can finalize as completed even though a failed child was deleted mid-batch.
             # Parent linkage lives in JSON result_metadata (no FK), so this is documented
             # rather than guarded; block child deletion here if that trade-off changes.
-            deleted = await conn.fetchval(
+            deleted = await conn.fetchrow(
                 f"""DELETE FROM {fq_table("async_operations")}
                     WHERE operation_id = $1 AND bank_id = $2
                       AND status IN ('failed', 'cancelled', 'completed')
-                    RETURNING operation_id""",
+                    RETURNING operation_id, result_metadata""",
                 op_uuid,
                 bank_id,
             )
             if deleted:
+                # An export operation owns a stored archive keyed in result_metadata;
+                # delete it with the row so the blob doesn't outlive its only handle.
+                await self._delete_operation_export_archive(deleted["result_metadata"])
                 return {
                     "success": True,
                     "message": f"Operation {operation_id} deleted",
