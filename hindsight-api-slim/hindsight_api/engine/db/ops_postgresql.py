@@ -8,7 +8,13 @@ import asyncio
 from datetime import datetime
 
 from .base import DatabaseConnection
-from .ops import DataAccessOps, LinkExpansionRows, TagListingParts, UpdatedWindow
+from .ops import (
+    DataAccessOps,
+    LinkExpansionRows,
+    TagListingParts,
+    UpdatedWindow,
+    graph_maintenance_bank_serialization_sql,
+)
 from .result import ResultRow
 
 
@@ -1411,13 +1417,14 @@ class PostgreSQLOps(DataAccessOps):
             else:
                 rows = await conn.fetch(
                     f"""
-                    SELECT operation_id, operation_type, task_payload, retry_count
-                    FROM {table}
-                    WHERE status = 'pending'
-                      AND task_payload IS NOT NULL
-                      AND operation_type = $1
-                      AND (next_retry_at IS NULL OR next_retry_at <= NOW())
-                    ORDER BY created_at
+                    SELECT o.operation_id, o.operation_type, o.task_payload, o.retry_count
+                    FROM {table} o
+                    WHERE o.status = 'pending'
+                      AND o.task_payload IS NOT NULL
+                      AND o.operation_type = $1
+                      AND (o.next_retry_at IS NULL OR o.next_retry_at <= NOW())
+                      AND {graph_maintenance_bank_serialization_sql(table, "o")}
+                    ORDER BY o.created_at
                     LIMIT $2
                     FOR UPDATE SKIP LOCKED
                     """,
@@ -1432,18 +1439,21 @@ class PostgreSQLOps(DataAccessOps):
         # --- Phase 2: claim from shared pool ---
         remaining_shared = shared_limit
         if remaining_shared > 0:
-            # 2a. Non-consolidation tasks
+            # 2a. Non-consolidation tasks. graph_maintenance stays in this
+            # created_at-ordered query — see graph_maintenance_bank_serialization_sql
+            # for why it is a predicate rather than a phase of its own.
             if claimed_ids:
                 rows = await conn.fetch(
                     f"""
-                    SELECT operation_id, operation_type, task_payload, retry_count
-                    FROM {table}
-                    WHERE status = 'pending'
-                      AND task_payload IS NOT NULL
-                      AND operation_type != 'consolidation'
-                      AND (next_retry_at IS NULL OR next_retry_at <= NOW())
-                      AND operation_id != ALL($1::uuid[])
-                    ORDER BY created_at
+                    SELECT o.operation_id, o.operation_type, o.task_payload, o.retry_count
+                    FROM {table} o
+                    WHERE o.status = 'pending'
+                      AND o.task_payload IS NOT NULL
+                      AND o.operation_type != 'consolidation'
+                      AND (o.next_retry_at IS NULL OR o.next_retry_at <= NOW())
+                      AND o.operation_id != ALL($1::uuid[])
+                      AND {graph_maintenance_bank_serialization_sql(table, "o")}
+                    ORDER BY o.created_at
                     LIMIT $2
                     FOR UPDATE SKIP LOCKED
                     """,
@@ -1453,13 +1463,14 @@ class PostgreSQLOps(DataAccessOps):
             else:
                 rows = await conn.fetch(
                     f"""
-                    SELECT operation_id, operation_type, task_payload, retry_count
-                    FROM {table}
-                    WHERE status = 'pending'
-                      AND task_payload IS NOT NULL
-                      AND operation_type != 'consolidation'
-                      AND (next_retry_at IS NULL OR next_retry_at <= NOW())
-                    ORDER BY created_at
+                    SELECT o.operation_id, o.operation_type, o.task_payload, o.retry_count
+                    FROM {table} o
+                    WHERE o.status = 'pending'
+                      AND o.task_payload IS NOT NULL
+                      AND o.operation_type != 'consolidation'
+                      AND (o.next_retry_at IS NULL OR o.next_retry_at <= NOW())
+                      AND {graph_maintenance_bank_serialization_sql(table, "o")}
+                    ORDER BY o.created_at
                     LIMIT $1
                     FOR UPDATE SKIP LOCKED
                     """,
