@@ -5,6 +5,7 @@
  */
 import type { HindsightClient } from "./hindsight";
 import { fingerprintTurns, planRetain, type RetainCursorStore } from "./retain-cursor";
+import type { RetainStamp } from "./retain-stamp";
 import type { ChatSession } from "./types";
 import { uuidV5 } from "./uuid";
 import { pool } from "./util";
@@ -152,13 +153,13 @@ export async function retainLiveSession(
   turns: TransportTurn[],
   startTs: string,
   harness?: string,
-  opts: { cursors?: RetainCursorStore } = {}
+  opts: { cursors?: RetainCursorStore; stamp?: RetainStamp } = {}
 ): Promise<void> {
   const cursors = opts.cursors;
-  if (!cursors) return writeSession(client, sessionId, turns, startTs, harness);
+  if (!cursors) return writeSession(client, sessionId, turns, startTs, harness, opts.stamp);
   // Serialised so the plan is made against the previous write-back's CONFIRMED cursor (see above).
   return serialize(cursors, sessionId, () =>
-    writeSession(client, sessionId, turns, startTs, harness, cursors)
+    writeSession(client, sessionId, turns, startTs, harness, opts.stamp, cursors)
   );
 }
 
@@ -168,6 +169,7 @@ async function writeSession(
   turns: TransportTurn[],
   startTs: string,
   harness?: string,
+  stamp?: RetainStamp,
   cursors?: RetainCursorStore
 ): Promise<void> {
   const refId = `conversation:${sessionId}`;
@@ -196,7 +198,15 @@ async function writeSession(
     content,
     "coding agent session",
     refId,
-    ["source:chat", ...(harness ? [`harness:${harness}`] : [])],
+    // Configured tags first, built-ins last and deduped: `source:chat` and `harness:<id>` are what
+    // the documents list filters and draws its agent logo from, so a template cannot displace them.
+    [
+      ...new Set([
+        ...(stamp?.tags ?? []),
+        "source:chat",
+        ...(harness ? [`harness:${harness}`] : []),
+      ]),
+    ],
     "conversation",
     {
       timestamp: startTs,
@@ -205,6 +215,7 @@ async function writeSession(
       // the original operation instead of extracting (or appending) twice.
       operationId: uuidV5(`${client.bank}\n${refId}\n${plan.mode}\n${content}`),
       metadata: {
+        ...stamp?.metadata, // configured first: the built-ins below win on any key collision
         source: "chat",
         session_id: sessionId,
         ref_id: refId,

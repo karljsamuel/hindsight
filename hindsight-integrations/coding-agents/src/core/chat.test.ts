@@ -270,6 +270,45 @@ describe("retainLiveSession — incremental write-back", () => {
     ]);
   });
 
+  it("stamps configured tags and metadata onto the write-back", async () => {
+    const { retain, client } = stubClient();
+    await retainLiveSession(client, "s1", turns(2), "2026-01-01T00:00:00Z", "codex", {
+      cursors: memoryCursorStore(),
+      stamp: { tags: ["project:acme-api", "env:work"], metadata: { repo: "acme-api" } },
+    });
+    expect(retain.mock.calls[0][3]).toEqual([
+      "project:acme-api",
+      "env:work",
+      "source:chat",
+      "harness:codex",
+    ]);
+    expect(retain.mock.calls[0][5].metadata).toMatchObject({
+      repo: "acme-api",
+      source: "chat",
+      harness: "codex",
+    });
+  });
+
+  it("keeps built-in metadata authoritative and does not double a tag", async () => {
+    // The documents list filters on `source:chat` and draws its agent logo from `metadata.harness`,
+    // so the built-ins are written last and win. (retainTags entries in those namespaces are
+    // dropped earlier, at the source — see retain-stamp.test.ts.)
+    const { retain, client } = stubClient();
+    await retainLiveSession(client, "s1", turns(2), "2026-01-01T00:00:00Z", "codex", {
+      cursors: memoryCursorStore(),
+      stamp: {
+        tags: ["source:chat", "env:work"],
+        metadata: { harness: "not-codex", source: "elsewhere", session_id: "spoofed" },
+      },
+    });
+    expect(retain.mock.calls[0][3]).toEqual(["source:chat", "env:work", "harness:codex"]);
+    expect(retain.mock.calls[0][5].metadata).toMatchObject({
+      harness: "codex",
+      source: "chat",
+      session_id: "s1",
+    });
+  });
+
   it("keeps the write-back when the capability probe itself fails", async () => {
     const retain = vi.fn().mockResolvedValue(undefined);
     const client = {

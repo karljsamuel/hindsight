@@ -21,6 +21,7 @@ import { log, setLogLevel } from "./log";
 import type { ClientOpts } from "./hindsight";
 import { HindsightClient } from "./hindsight";
 import type { RetainCursorStore } from "./retain-cursor";
+import { buildRetainStamp, type RetainStamp } from "./retain-stamp";
 import { fileCursorStore } from "./session-cache";
 import { readClaudeTranscript } from "./transcript";
 import type { TransportTurn } from "./chat";
@@ -63,6 +64,8 @@ export async function buildRetain(args: {
   transcriptPath: string;
   client: RetainClient;
   readTranscript?: TranscriptReader;
+  /** Configured retainTags/retainMetadata, already resolved for this session (core/retain-stamp.ts). */
+  stamp?: RetainStamp;
   /** Injectable for tests; defaults to the per-session temp file (a Stop hook has no memory). */
   cursors?: RetainCursorStore;
 }): Promise<void> {
@@ -77,6 +80,7 @@ export async function buildRetain(args: {
   try {
     await retainLiveSession(client as HindsightClient, sessionId, turns, startTs, harness, {
       cursors: args.cursors ?? fileCursorStore(harness),
+      stamp: args.stamp,
     });
     diag(harness, "retain_ok", { ms: Date.now() - t0, turns: turns.length, session: sessionId });
   } catch (e) {
@@ -133,5 +137,11 @@ export async function runRetainHook(
     transcriptPath,
     client,
     readTranscript: spec.readTranscript,
+    stamp: buildRetainStamp(cfg, {
+      directory: cwd,
+      harness: spec.harness,
+      bankId,
+      sessionId: sessionId || "no-session",
+    }),
   });
 }

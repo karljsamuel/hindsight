@@ -20,6 +20,7 @@ import type { HindsightClient } from "./hindsight";
 import { buildKnowledgeTools, type ToolSpec } from "./knowledge-tools";
 import { retainLiveSession, type TransportTurn } from "./chat";
 import { memoryCursorStore } from "./retain-cursor";
+import { buildRetainStamp } from "./retain-stamp";
 import { buildSessionStartContext } from "./session-start";
 import { buildHookOutput } from "./hook";
 import { sessionCacheFile, writeSessionCache } from "./session-cache";
@@ -52,7 +53,10 @@ export class RuntimeCore {
      * retained transcript's harness field, so Kilo sessions don't masquerade as opencode ones.
      * Defaults to opencode, the original (and only other) plugin harness.
      */
-    readonly harness: string = HARNESS
+    readonly harness: string = HARNESS,
+    /** Workspace root this host opened — the SAME directory bank resolution used, so a
+     *  `{gitProject}` in retainTags names the repo the bank was derived from. */
+    private readonly projectDir: string = process.cwd()
   ) {
     setLogLevel(cfg.logLevel);
   }
@@ -243,6 +247,12 @@ export class RuntimeCore {
     const t0 = Date.now();
     void retainLiveSession(this.client, sessionId, turns, startTs, this.harness, {
       cursors: this.cursors,
+      stamp: buildRetainStamp(this.cfg, {
+        directory: this.projectDir,
+        harness: this.harness,
+        bankId: this.bankId,
+        sessionId,
+      }),
     })
       .then(() =>
         diag(this.harness, "retain_ok", {
