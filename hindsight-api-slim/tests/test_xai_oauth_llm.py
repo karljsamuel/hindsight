@@ -21,7 +21,7 @@ import logging
 import os
 import threading
 import time
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,6 +30,13 @@ import pytest
 from pydantic import BaseModel
 
 from hindsight_api.config import PROVIDER_DEFAULT_MODELS
+from hindsight_api.engine.cache_affinity import XAI_CONV_ID_HEADER, cache_affinity_id
+from hindsight_api.engine.llm_trace import (
+    LLMTraceContext,
+    current_trace_context,
+    reset_trace_context,
+    set_trace_context,
+)
 from hindsight_api.engine.llm_wrapper import create_llm_provider, requires_api_key
 from hindsight_api.engine.providers import xai_oauth_auth as auth_mod
 from hindsight_api.engine.providers import xai_oauth_llm as llm_mod
@@ -53,7 +60,6 @@ from hindsight_api.engine.providers.xai_oauth_auth import (
     write_credential,
 )
 from hindsight_api.engine.providers.xai_oauth_llm import (
-    CONV_ID_HEADER,
     DEFAULT_BASE_URL,
     ENV_BASE_URL,
     ENV_DEBUG_HEADERS,
@@ -62,7 +68,6 @@ from hindsight_api.engine.providers.xai_oauth_llm import (
     XaiOAuthLLM,
     XaiOAuthQuotaExhaustedError,
     _ChatUsage,
-    _conversation_affinity_id,
     _error_detail,
     _token_counts,
 )
@@ -146,6 +151,16 @@ class _FakeSyncHttp:
     @property
     def post_count(self) -> int:
         return len(self.posts)
+
+
+@contextmanager
+def _bound_trace(trace_id: str):
+    """Bind an operation trace context, as ConfiguredLLMProvider does per call."""
+    token = set_trace_context(LLMTraceContext(bank_id="bank-1", operation="reflect", trace_id=trace_id))
+    try:
+        yield
+    finally:
+        reset_trace_context(token)
 
 
 def _never_called(*args: Any, **kwargs: Any) -> Any:
@@ -1015,38 +1030,40 @@ def _reference_first_message_fingerprint(messages: Any) -> str | None:
     ],
 )
 def test_affinity_id_matches_the_cache_affinity_derivation_byte_for_byte(messages):
-    assert _conversation_affinity_id(messages) == _reference_first_message_fingerprint(messages)
+    assert cache_affinity_id(messages) == _reference_first_message_fingerprint(messages)
 
 
 @pytest.mark.parametrize("messages", ["not a list", {"role": "system"}, [], None, [42]])
 def test_affinity_id_fails_open_on_every_non_conforming_shape(messages):
-    assert _conversation_affinity_id(messages) is None
+    assert cache_affinity_id(messages) is None
     assert _reference_first_message_fingerprint(messages) is None
 
 
 def test_affinity_id_is_thirty_two_lowercase_hex_characters():
-    result = _conversation_affinity_id([{"role": "system", "content": "S"}])
+    result = cache_affinity_id([{"role": "system", "content": "S"}])
     assert result is not None
     assert len(result) == 32
     assert all(character in "0123456789abcdef" for character in result)
 
 
-def test_affinity_id_prefers_the_trace_id_and_hashes_it(monkeypatch):
-    @dataclass
-    class _Ctx:
-        trace_id: str
+def test_affinity_id_prefers_the_trace_id_and_hashes_it():
+    """Bind a real trace context rather than patching the lookup.
 
-    monkeypatch.setattr(llm_mod, "current_trace_context", lambda: _Ctx("operation-trace-1"))
+    The derivation lives in engine/cache_affinity.py and resolves the context
+    through llm_trace at call time, so a monkeypatched module attribute here
+    would assert against a seam the provider no longer uses.
+    """
     expected = hashlib.sha256(b"operation-trace-1").hexdigest()[:32]
 
-    assert _conversation_affinity_id([{"role": "system", "content": "S"}]) == expected
+    with _bound_trace("operation-trace-1"):
+        assert cache_affinity_id([{"role": "system", "content": "S"}]) == expected
 
 
-def test_affinity_id_falls_back_to_the_first_message_without_a_trace(monkeypatch):
-    monkeypatch.setattr(llm_mod, "current_trace_context", lambda: None)
+def test_affinity_id_falls_back_to_the_first_message_without_a_trace():
     messages = [{"role": "system", "content": "S"}]
 
-    assert _conversation_affinity_id(messages) == _reference_first_message_fingerprint(messages)
+    assert current_trace_context() is None, "no operation trace may be bound for the fallback path"
+    assert cache_affinity_id(messages) == _reference_first_message_fingerprint(messages)
 
 
 async def test_the_affinity_id_is_stable_across_calls_sharing_a_first_message(tmp_path, monkeypatch):
@@ -1055,7 +1072,7 @@ async def test_the_affinity_id_is_stable_across_calls_sharing_a_first_message(tm
     await llm.call(messages=[{"role": "system", "content": "S"}, {"role": "user", "content": "a"}], max_retries=0)
     await llm.call(messages=[{"role": "system", "content": "S"}, {"role": "user", "content": "b"}], max_retries=0)
 
-    first, second = (call["headers"][CONV_ID_HEADER] for call in llm._client.calls)
+    first, second = (call["headers"][XAI_CONV_ID_HEADER] for call in llm._client.calls)
     assert first == second
 
 
@@ -1072,10 +1089,10 @@ async def test_the_request_carries_exactly_the_bearer_content_and_affinity_heade
     await llm.call(messages=[{"role": "user", "content": "hi"}], max_retries=0)
 
     headers = llm._client.calls[0]["headers"]
-    assert set(headers) == {"Content-Type", "Accept", "Authorization", CONV_ID_HEADER}
+    assert set(headers) == {"Content-Type", "Accept", "Authorization", XAI_CONV_ID_HEADER}
     assert headers["Authorization"] == f"Bearer {ACCESS_TOKEN}"
     assert headers["Content-Type"] == "application/json"
-    assert len(headers[CONV_ID_HEADER]) == 32
+    assert len(headers[XAI_CONV_ID_HEADER]) == 32
     assert llm._client.calls[0]["url"] == "https://api.x.ai/v1/chat/completions"
 
     for value in headers.values():

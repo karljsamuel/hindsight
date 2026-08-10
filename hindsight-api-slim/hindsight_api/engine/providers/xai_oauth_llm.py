@@ -39,7 +39,6 @@ token), and never logs a body.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -53,8 +52,9 @@ import httpx
 from pydantic import BaseModel, Field
 
 from hindsight_api.config import DEFAULT_LLM_TIMEOUT, ENV_LLM_TIMEOUT
+from hindsight_api.engine.cache_affinity import XAI_CONV_ID_HEADER, cache_affinity_id
 from hindsight_api.engine.llm_interface import LLM_TOOL_CHOICE_AUTO, LLMInterface, LLMToolChoice, LLMToolChoiceMode
-from hindsight_api.engine.llm_trace import LLMResponseUsage, current_trace_context, stash_response_usage
+from hindsight_api.engine.llm_trace import LLMResponseUsage, stash_response_usage
 from hindsight_api.engine.providers.xai_oauth_auth import (
     DEFAULT_REFRESH_SKEW_SECONDS,
     LOGIN_COMMAND,
@@ -86,10 +86,6 @@ __all__ = [
 ENV_BASE_URL = "HINDSIGHT_API_XAI_OAUTH_BASE_URL"
 
 DEFAULT_BASE_URL = "https://api.x.ai/v1"
-
-#: Request header xAI uses to route calls of one conversation to the same
-#: cache-holding backend.
-CONV_ID_HEADER = "x-grok-conv-id"
 
 #: Body marker xAI returns when the account's spending limit stopped the call.
 SPENDING_LIMIT_CODE = "personal-team-blocked:spending-limit"
@@ -357,35 +353,6 @@ def _log_non_2xx_response_headers(response: httpx.Response) -> None:
     logger.info("xai-oauth non-2xx reply: status=%s headers=%s", response.status_code, present)
 
 
-def _conversation_affinity_id(messages: list[dict[str, Any]]) -> str | None:
-    """Stable ``x-grok-conv-id`` so the upstream's prompt cache can hit.
-
-    xAI stores prompt-cache entries per backend server and routes requests
-    carrying the same ``x-grok-conv-id`` to the same server, so without the
-    header each call of a multi-turn loop can land on a cache-cold replica.
-
-    The id comes from the operation's trace id when there is one (every LLM call
-    of a single retain/reflect/consolidation run shares it, which is exactly the
-    grouping the cache wants), and otherwise from a hash of the first message —
-    the system prompt, byte-identical across the calls of one loop. It is hashed
-    rather than sent raw so no internal identifier leaves the process, and is
-    always 32 lowercase hex characters.
-
-    Fail-open: any shape or serialization problem returns None and the request
-    goes upstream without the header.
-    """
-    context = current_trace_context()
-    if context is not None and context.trace_id:
-        return hashlib.sha256(str(context.trace_id).encode("utf-8")).hexdigest()[:32]
-    if not isinstance(messages, list) or not messages or not isinstance(messages[0], dict):
-        return None
-    try:
-        first = json.dumps(messages[0], sort_keys=True, ensure_ascii=False, default=str)
-    except (TypeError, ValueError):
-        return None
-    return hashlib.sha256(first.encode("utf-8")).hexdigest()[:32]
-
-
 class XaiOAuthLLM(LLMInterface):
     """LLM provider backed by a SuperGrok subscription via an xAI OAuth grant."""
 
@@ -476,7 +443,7 @@ class XaiOAuthLLM(LLMInterface):
             "Authorization": f"Bearer {token}",
         }
         if conv_id:
-            headers[CONV_ID_HEADER] = conv_id
+            headers[XAI_CONV_ID_HEADER] = conv_id
 
         # Pin the client for the whole request: a concurrent recycle swaps
         # self._client, and this request must both finish on the connection it
@@ -606,7 +573,7 @@ class XaiOAuthLLM(LLMInterface):
         credential is genuinely rejected and looping cannot fix it.
         """
         token = await self._access_token()
-        conv_id = _conversation_affinity_id(messages)
+        conv_id = cache_affinity_id(messages)
 
         reply = await self._post(body, token, conv_id)
         if reply.status_code == 401:
