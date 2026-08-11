@@ -17,6 +17,7 @@ import functools
 import inspect
 import json
 import logging
+import random
 import sys
 import time
 import uuid
@@ -450,6 +451,7 @@ from .response_models import (
 )
 from .response_models import RecallResult as RecallResultModel
 from .retain import bank_utils, embedding_utils
+from .retain.fold import FoldMemberRef
 from .retain.types import RetainContentDict
 from .search.reranking import CrossEncoderReranker, apply_combined_scoring
 from .search.tags import TagGroup, TagsMatch, build_tag_groups_where_clause, build_tags_where_clause
@@ -2188,6 +2190,9 @@ class MemoryEngine(MemoryEngineInterface):
             request_context=context,
             operation_id=operation_id,
             strategy=strategy,
+            # Present when the claim folded other queued retains for this
+            # document into this task; drives one post-retain hook per member.
+            fold_members=FoldMemberRef.list_from_payload(task_dict.get("_fold_members")),
             outbox_callback_factory=self._build_retain_outbox_callback_factory(
                 bank_id=bank_id,
                 operation_id=operation_id,
@@ -2355,8 +2360,9 @@ class MemoryEngine(MemoryEngineInterface):
                 await conn.execute(
                     f"""
                     INSERT INTO {fq_table("async_operations")}
-                    (operation_id, bank_id, operation_type, result_metadata, status, task_payload)
-                    VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+                    (operation_id, bank_id, operation_type, result_metadata, status,
+                     task_payload, serialization_key)
+                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
                     """,
                     retain_operation_id,
                     bank_id,
@@ -2364,6 +2370,9 @@ class MemoryEngine(MemoryEngineInterface):
                     json.dumps({}),
                     "pending",
                     payload_json,
+                    # A converted file always retains into exactly one document,
+                    # so it queues behind any other retain for that document.
+                    document_id,
                 )
 
                 if operation_id:
@@ -4205,6 +4214,7 @@ class MemoryEngine(MemoryEngineInterface):
         outbox_callback: RetainOutboxCallback | None = None,
         outbox_callback_factory: RetainOutboxCallbackFactory | None = None,
         strategy: str | None = None,
+        fold_members: list[FoldMemberRef] | None = None,
     ):
         """
         Store multiple content items as memory units in ONE batch operation.
@@ -4226,6 +4236,11 @@ class MemoryEngine(MemoryEngineInterface):
                         Applies the same document_id to ALL content items that don't specify their own.
             fact_type_override: Override fact type for all facts ('world', 'experience')
             return_usage: If True, returns tuple of (unit_ids, TokenUsage). Default False for backward compatibility.
+            fold_members: Set by the worker when several queued retains for one
+                document were coalesced into this call (see ``engine.retain.fold``).
+                One entry per submitted operation, in submission order, with its
+                ``operation_id`` and the number of ``contents`` items it supplied —
+                the slices that let the post-retain hook fire once per operation.
 
         Returns:
             If return_usage=False: List of lists of unit IDs (one list per content item)
@@ -4438,28 +4453,21 @@ class MemoryEngine(MemoryEngineInterface):
 
         # Call post-operation hook if validator is configured
         if self._operation_validator:
-            from hindsight_api.extensions import RetainResult
-
-            result_ctx = RetainResult(
+            for result_ctx in self._build_retain_hook_results(
                 bank_id=bank_id,
-                contents=contents_copy,
+                contents_copy=contents_copy,
                 request_context=request_context,
                 document_id=document_id,
                 fact_type_override=fact_type_override,
                 unit_ids=result,
-                success=True,
-                error=None,
-                llm_input_tokens=total_usage.input_tokens,
-                llm_output_tokens=total_usage.output_tokens,
-                llm_total_tokens=total_usage.total_tokens,
-                llm_cached_input_tokens=getattr(total_usage, "cached_tokens", 0) or 0,
-                llm_thoughts_tokens=getattr(total_usage, "thoughts_tokens", 0) or 0,
-                processed_content_tokens=total_processed_content_tokens,
-            )
-            try:
-                await self._operation_validator.on_retain_complete(result_ctx)
-            except Exception as e:
-                logger.warning(f"Post-retain hook error (non-fatal): {e}")
+                total_usage=total_usage,
+                total_processed_content_tokens=total_processed_content_tokens,
+                fold_members=fold_members,
+            ):
+                try:
+                    await self._operation_validator.on_retain_complete(result_ctx)
+                except Exception as e:
+                    logger.warning(f"Post-retain hook error (non-fatal): {e}")
 
         # Same async side effects every fact insert triggers (retain or import).
         await self._submit_post_insert_maintenance(bank_id, request_context)
@@ -4467,6 +4475,82 @@ class MemoryEngine(MemoryEngineInterface):
         if return_usage:
             return result, total_usage
         return result
+
+    def _build_retain_hook_results(
+        self,
+        *,
+        bank_id: str,
+        contents_copy: list[dict],
+        request_context: "RequestContext",
+        document_id: str | None,
+        fact_type_override: str | None,
+        unit_ids: list[list[str]],
+        total_usage: "TokenUsage",
+        total_processed_content_tokens: int | None,
+        fold_members: list[FoldMemberRef] | None,
+    ) -> list["RetainResult"]:
+        """Build the post-retain hook payload(s) for one execution.
+
+        An ordinary retain produces exactly one result, unchanged.
+
+        A folded execution ran several submitted operations as one document, so
+        it produces one result per member, in submission order, each carrying
+        that member's own content slice and the ids it was folded with. The
+        execution's token usage lands entirely on the first member and is zero
+        on the rest: the members were extracted together and there is no honest
+        per-member split, but the total across the fold is exactly what the
+        execution spent — the invariant metering extensions depend on.
+        """
+        from hindsight_api.extensions import RetainResult
+
+        cached = getattr(total_usage, "cached_tokens", 0) or 0
+        thoughts = getattr(total_usage, "thoughts_tokens", 0) or 0
+
+        def _result(
+            contents: list[dict],
+            *,
+            units: list[list[str]],
+            carries_usage: bool,
+            folded_with: list[str] | None,
+        ) -> RetainResult:
+            return RetainResult(
+                bank_id=bank_id,
+                contents=contents,
+                request_context=request_context,
+                document_id=document_id,
+                fact_type_override=fact_type_override,
+                unit_ids=units,
+                success=True,
+                error=None,
+                llm_input_tokens=total_usage.input_tokens if carries_usage else 0,
+                llm_output_tokens=total_usage.output_tokens if carries_usage else 0,
+                llm_total_tokens=total_usage.total_tokens if carries_usage else 0,
+                llm_cached_input_tokens=cached if carries_usage else 0,
+                llm_thoughts_tokens=thoughts if carries_usage else 0,
+                processed_content_tokens=total_processed_content_tokens if carries_usage else 0,
+                folded_with=folded_with,
+            )
+
+        if not fold_members or len(fold_members) < 2:
+            return [_result(contents_copy, units=unit_ids, carries_usage=True, folded_with=None)]
+
+        member_ids = [member.operation_id for member in fold_members]
+        results: list[RetainResult] = []
+        offset = 0
+        for position, member in enumerate(fold_members):
+            count = member.items_count
+            # unit_ids is one entry per submitted content item, in the same
+            # order the fold merged them, so each member's slice lines up.
+            results.append(
+                _result(
+                    contents_copy[offset : offset + count],
+                    units=unit_ids[offset : offset + count],
+                    carries_usage=position == 0,
+                    folded_with=[op_id for op_id in member_ids if op_id != member_ids[position]],
+                )
+            )
+            offset += count
+        return results
 
     async def _submit_post_insert_maintenance(
         self,
@@ -4804,9 +4888,6 @@ class MemoryEngine(MemoryEngineInterface):
             See ``RetainResult.processed_content_tokens`` for the semantics of
             the third element.
         """
-        # Use the new modular orchestrator
-        from .retain import orchestrator
-
         await self._get_backend()
 
         # Resolve bank-specific config for this operation
@@ -4827,7 +4908,7 @@ class MemoryEngine(MemoryEngineInterface):
         # Create parent span for retain operation
         with create_operation_span("retain", bank_id):
             retain_llm = self._retain_llm_config.with_config(resolved_config, bank_id=bank_id, operation="retain")
-            result = await orchestrator.retain_batch(
+            result = await self._retain_batch_with_append_retry(
                 pool=self._backend,
                 embeddings_model=self.embeddings,
                 llm_config=retain_llm,
@@ -4862,6 +4943,63 @@ class MemoryEngine(MemoryEngineInterface):
             # never adds latency to the retain response.
             self._llm_recorder.attach_memory_ids(trace_context_of(retain_llm), created=created_ids)
             return result
+
+    # How many times an append re-reads the document and redoes itself after
+    # losing the race to a concurrent append. Contention this deep means the
+    # queue-level serialization is not doing its job (or the caller is racing
+    # itself on the sync path); failing then is better than looping, because
+    # the operation-level retry re-runs the whole submission anyway.
+    _APPEND_CONFLICT_ATTEMPTS = 3
+
+    async def _retain_batch_with_append_retry(self, **kwargs) -> tuple[list[list[str]], "TokenUsage", int | None]:
+        """Run ``orchestrator.retain_batch``, redoing an append that lost its race.
+
+        ``update_mode="append"`` reads the stored document, concatenates onto it
+        and reprocesses; the orchestrator raises ``ConcurrentAppendConflict``
+        rather than committing when that base moved underneath it. Redoing the
+        call re-reads the newer text and re-appends the same submission on top,
+        so no turn is lost. Delta retain makes the redo cheap: every chunk of
+        the prior document still matches by content hash, leaving only this
+        submission's own new chunks to extract.
+
+        Non-append retains never raise it, so they run exactly once.
+        """
+        from .retain import orchestrator
+        from .retain.types import ConcurrentAppendConflict
+
+        submitted: list[RetainContentDict] = kwargs["contents_dicts"]
+        is_append = any(item.get("update_mode") == "append" for item in submitted)
+        if not is_append:
+            # Only appends can raise the conflict, so replace-mode retains skip
+            # both the retry bookkeeping and the snapshot copy below.
+            return await orchestrator.retain_batch(**kwargs)
+
+        # retain_batch consumes its input: it releases the (potentially
+        # multi-MB) content strings as they are chunked so the pipeline doesn't
+        # pin them. A retry therefore has to start from a pristine copy, not
+        # from the drained list the failed attempt left behind. The copy is of
+        # the caller's submission only — the stored document text an append
+        # concatenates onto is read inside retain_batch and never copied here.
+        pristine = copy.deepcopy(submitted)
+        doc_label = next((item.get("document_id") for item in submitted if item.get("document_id")), None)
+
+        for attempt in range(1, self._APPEND_CONFLICT_ATTEMPTS + 1):
+            try:
+                return await orchestrator.retain_batch(**kwargs)
+            except ConcurrentAppendConflict:
+                if attempt == self._APPEND_CONFLICT_ATTEMPTS:
+                    logger.warning(
+                        f"Append to document {doc_label} lost its race "
+                        f"{attempt} times; failing so the operation is retried"
+                    )
+                    raise
+                # Jittered so simultaneous losers don't line up and collide again.
+                await asyncio.sleep(random.uniform(0.05, 0.25) * attempt)
+                logger.info(
+                    f"Append to document {doc_label} lost its race (attempt {attempt}) — redoing on the newer document"
+                )
+                kwargs["contents_dicts"] = copy.deepcopy(pristine)
+        raise AssertionError("unreachable: append retry loop always returns or raises")
 
     async def export_documents_async(
         self,
@@ -16087,8 +16225,10 @@ class MemoryEngine(MemoryEngineInterface):
 
                         await conn.execute(
                             f"""
-                            INSERT INTO {fq_table("async_operations")} (operation_id, bank_id, operation_type, result_metadata, status, task_payload)
-                            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+                            INSERT INTO {fq_table("async_operations")}
+                                (operation_id, bank_id, operation_type, result_metadata, status,
+                                 task_payload, serialization_key)
+                            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
                             """,
                             child_operation_id,
                             bank_id,
@@ -16096,6 +16236,11 @@ class MemoryEngine(MemoryEngineInterface):
                             json.dumps(child_metadata.to_dict(), default=_json_default),
                             "pending",
                             json.dumps(full_payload, default=_json_default),
+                            # Serialize (and coalesce) this child against other
+                            # retains for the same document. Only a child that
+                            # targets exactly one document has a document to be
+                            # serialized on; NULL leaves it claimable freely.
+                            child_metadata.document_id,
                         )
                         deferred_child_payloads.append(full_payload)
         except Exception as e:
