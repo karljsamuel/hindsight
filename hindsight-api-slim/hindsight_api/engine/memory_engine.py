@@ -617,6 +617,43 @@ class _SubBatchSplit:
     chunk_counts: list[int] = field(default_factory=list)
 
 
+@dataclass
+class _RetainGroup:
+    """One document's slice of a retain batch.
+
+    ``retain_batch_async`` folds items that share an explicit ``document_id``
+    into a single document. Grouping is done up front (not left to the
+    orchestrator) so the token splitter and its per-document ``chunk_index``
+    bookkeeping only ever see one document at a time — they assume a split never
+    interleaves two documents. ``origins`` records the indices the items
+    occupied in the submitted batch so per-input results merge back in order.
+    ``document_id`` is ``None`` for an item that carried no explicit id (each
+    such item is its own group and its own document).
+    """
+
+    document_id: str | None
+    origins: list[int]
+    contents: list[RetainContentDict]
+
+
+@dataclass
+class _RetainExecutionResult:
+    """Outcome of running one batch through the retain token splitter and its
+    sequential sub-batch loop (``MemoryEngine._run_retain_execution``).
+
+    ``unit_ids`` is the per-input-content list of created unit ids.
+    ``processed_content_tokens`` follows ``RetainResult.processed_content_tokens``
+    (``None`` when a sub-batch bypassed dedup). ``cancelled`` is True when the
+    operation's bank was deleted mid-flight and the loop stopped early, so the
+    caller skips the completion side effects.
+    """
+
+    unit_ids: list[list[str]]
+    usage: "TokenUsage"
+    processed_content_tokens: int | None
+    cancelled: bool
+
+
 @dataclass(frozen=True)
 class _RetainChunkingConfig:
     chunk_size: int
@@ -4265,20 +4302,11 @@ class MemoryEngine(MemoryEngineInterface):
                 if "document_id" not in item:
                     item["document_id"] = document_id
 
-        if outbox_callback is None and outbox_callback_factory is not None:
-            outbox_callback = outbox_callback_factory(contents)
-
-        # Validate no duplicate document_ids in the batch
-        # Having duplicate document_ids causes race conditions in document upserts during parallel processing
-        doc_ids = [item.get("document_id") for item in contents if item.get("document_id")]
-        if len(doc_ids) != len(set(doc_ids)):
-            from collections import Counter
-
-            duplicates = [doc_id for doc_id, count in Counter(doc_ids).items() if count > 1]
-            raise ValueError(
-                f"Batch contains duplicate document_ids: {duplicates}. "
-                f"Each content item in a batch must have a unique document_id to avoid race conditions."
-            )
+        # NOTE: items sharing a document_id are ALLOWED here and folded into one
+        # document (see the grouping dispatch below). The synchronous in-process
+        # path processes sub-batches sequentially, so same-document items cannot
+        # race each other — unlike the queued path, which still rejects
+        # duplicates (see submit_async_retain).
 
         # Validate update_mode=append requires document_id
         for item in contents:
@@ -4299,6 +4327,236 @@ class MemoryEngine(MemoryEngineInterface):
                     "document text is not stored and cannot be appended to. Use update_mode='replace' instead."
                 )
 
+        # Fold items that share an explicit document_id into one document. On the
+        # synchronous in-process path this is safe — sub-batches run sequentially,
+        # so same-document items cannot race (unlike the queued path, which still
+        # rejects duplicates; see submit_async_retain). Each shared-document group
+        # is processed in ONE orchestrator pass rather than being token-split:
+        # splitting one document across sub-batches that carry different bodies
+        # trips the streaming pipeline's content-hash ownership check and silently
+        # drops the later sub-batches (that path is safe only for an oversized
+        # SINGLE item, whose slices all replay the same full body). The
+        # orchestrator streams a large document chunk-batch by chunk-batch on its
+        # own, so a single pass stays memory-bounded.
+        explicit_doc_ids = [item.get("document_id") for item in contents if item.get("document_id")]
+        has_shared_document = len(explicit_doc_ids) != len(set(explicit_doc_ids))
+
+        if not has_shared_document:
+            # No document is shared, so distinct-document items may be packed and
+            # token-split across sub-batches as before (the orchestrator keeps
+            # genuinely distinct per-item document_ids separate within a pass).
+            execution = await self._run_retain_execution(
+                bank_id=bank_id,
+                contents=contents,
+                request_context=request_context,
+                document_id=document_id,
+                fact_type_override=fact_type_override,
+                document_tags=document_tags,
+                operation_id=operation_id,
+                strategy=strategy,
+                outbox_callback=outbox_callback,
+                outbox_callback_factory=outbox_callback_factory,
+                start_time=start_time,
+            )
+            result = execution.unit_ids
+            total_usage = execution.usage
+            total_processed_content_tokens = execution.processed_content_tokens
+            cancelled = execution.cancelled
+        else:
+            # Group in first-appearance order: each shared document_id becomes one
+            # group, and each item without an explicit document_id becomes its own
+            # group (its own document).
+            groups: list[_RetainGroup] = []
+            groups_by_doc_id: dict[str, _RetainGroup] = {}
+            for idx, item in enumerate(contents):
+                item_doc_id = item.get("document_id")
+                existing = groups_by_doc_id.get(item_doc_id) if item_doc_id is not None else None
+                if existing is not None:
+                    existing.origins.append(idx)
+                    existing.contents.append(item)
+                    continue
+                group = _RetainGroup(document_id=item_doc_id, origins=[idx], contents=[item])
+                groups.append(group)
+                if item_doc_id is not None:
+                    groups_by_doc_id[item_doc_id] = group
+
+            result = [[] for _ in contents]
+            total_usage = TokenUsage()
+            total_processed_content_tokens = 0
+            cancelled = False
+            for group_idx, group in enumerate(groups):
+                # Checkpoint: abort if the operation was deleted (bank deleted)
+                # between documents, mirroring the sub-batch loop's checkpoint.
+                if operation_id and not await self._check_op_alive(operation_id):
+                    logger.info(
+                        f"[BATCH_RETAIN] bank={bank_id} operation {operation_id} cancelled (bank deleted), "
+                        f"stopping after {group_idx}/{len(groups)} documents"
+                    )
+                    cancelled = True
+                    break
+
+                set_stage(f"batch_retain.document.{group_idx + 1}")
+
+                # Per-document webhook rows come from the factory, rebuilt for each
+                # group's contents. A raw pre-built callback (no factory) covers the
+                # whole operation, so fire it once, on the last group.
+                is_last_group = group_idx == len(groups) - 1
+                if outbox_callback_factory is not None:
+                    group_outbox_callback = outbox_callback_factory(group.contents)
+                else:
+                    group_outbox_callback = outbox_callback if is_last_group else None
+
+                group_result, group_usage, group_processed = await self._retain_batch_async_internal(
+                    bank_id=bank_id,
+                    contents=group.contents,
+                    request_context=request_context,
+                    document_id=group.document_id,
+                    is_first_batch=True,
+                    fact_type_override=fact_type_override,
+                    document_tags=document_tags,
+                    operation_id=operation_id,
+                    strategy=strategy,
+                    outbox_callback=group_outbox_callback,
+                )
+                for local_idx, origin_idx in enumerate(group.origins):
+                    if local_idx < len(group_result):
+                        result[origin_idx] = group_result[local_idx]
+                total_usage = total_usage + group_usage
+                if total_processed_content_tokens is None or group_processed is None:
+                    total_processed_content_tokens = None
+                else:
+                    total_processed_content_tokens = total_processed_content_tokens + group_processed
+
+        # A cancelled run (bank deleted mid-flight) skips the completion side
+        # effects, mirroring the pre-grouping early return from the sub-batch loop.
+        if cancelled:
+            if return_usage:
+                return result, total_usage
+            return result
+
+        await self._write_retain_outcome_metadata(operation_id, result)
+
+        # Call post-operation hook if validator is configured
+        if self._operation_validator:
+            from hindsight_api.extensions import RetainResult
+
+            result_ctx = RetainResult(
+                bank_id=bank_id,
+                contents=contents_copy,
+                request_context=request_context,
+                document_id=document_id,
+                fact_type_override=fact_type_override,
+                unit_ids=result,
+                success=True,
+                error=None,
+                llm_input_tokens=total_usage.input_tokens,
+                llm_output_tokens=total_usage.output_tokens,
+                llm_total_tokens=total_usage.total_tokens,
+                llm_cached_input_tokens=getattr(total_usage, "cached_tokens", 0) or 0,
+                llm_thoughts_tokens=getattr(total_usage, "thoughts_tokens", 0) or 0,
+                processed_content_tokens=total_processed_content_tokens,
+            )
+            try:
+                await self._operation_validator.on_retain_complete(result_ctx)
+            except Exception as e:
+                logger.warning(f"Post-retain hook error (non-fatal): {e}")
+
+        # Same async side effects every fact insert triggers (retain or import).
+        await self._submit_post_insert_maintenance(bank_id, request_context)
+
+        if return_usage:
+            return result, total_usage
+        return result
+
+    async def _submit_post_insert_maintenance(
+        self,
+        bank_id: str,
+        request_context: "RequestContext",
+        config: HindsightConfig | None = None,
+    ) -> None:
+        """Submit the async side effects that follow any fact insert (retain or import).
+
+        Shared by the retain pipeline and the document-import pipeline so imported
+        documents aren't second-class citizens:
+          * auto-consolidation (when observations + auto-consolidation are enabled
+            for the bank) so freshly inserted facts get observations;
+          * graph maintenance, which short-circuits when no cleanup work was
+            enqueued, so a plain insert pays a single cheap indexed SELECT here.
+
+        Both are non-critical: failures are logged, never raised, so they can't
+        fail the operation that produced the facts. Pass ``config`` when the caller
+        already resolved it to avoid a redundant lookup.
+        """
+        if config is None:
+            config = await self._config_resolver.resolve_full_config(bank_id, request_context)
+        if config.enable_observations and config.enable_auto_consolidation:
+            try:
+                await self.submit_async_consolidation(bank_id=bank_id, request_context=request_context)
+            except Exception as e:
+                logger.warning(f"Failed to submit consolidation task for bank {bank_id}: {e}")
+        try:
+            await self.submit_async_graph_maintenance(bank_id=bank_id, request_context=request_context)
+        except Exception as e:
+            logger.warning(f"Failed to submit graph maintenance task for bank {bank_id}: {e}")
+
+    async def _resolve_retain_config(
+        self,
+        bank_id: str,
+        request_context: "RequestContext",
+        strategy: str | None,
+    ) -> HindsightConfig:
+        """Resolve the config a retain runs under, strategy overrides applied.
+
+        Mirrors what ``_retain_batch_async_internal`` resolves before handing
+        config to the orchestrator, so anything the splitting caller derives
+        from it (chunk boundaries, Memory Defense screening) matches what the
+        orchestrator then does with each sub-batch.
+        """
+        from hindsight_api.config_resolver import apply_strategy
+
+        resolved_config = await self._config_resolver.resolve_full_config(bank_id, request_context)
+        effective_strategy = strategy or resolved_config.retain_default_strategy
+        if effective_strategy:
+            resolved_config = apply_strategy(resolved_config, effective_strategy)
+        return resolved_config
+
+    @staticmethod
+    def _retain_chunking_config(config: HindsightConfig) -> _RetainChunkingConfig:
+        """The chunk boundaries ``config`` implies, as the retain pipeline uses them."""
+        return _RetainChunkingConfig(
+            chunk_size=getattr(config, "retain_chunk_size", DEFAULT_RETAIN_CHUNK_SIZE),
+            structured_chunk_size=getattr(config, "retain_structured_chunk_size", None),
+        )
+
+    async def _run_retain_execution(
+        self,
+        *,
+        bank_id: str,
+        contents: list[RetainContentDict],
+        request_context: "RequestContext",
+        document_id: str | None,
+        fact_type_override: str | None,
+        document_tags: list[str] | None,
+        operation_id: str | None,
+        strategy: str | None,
+        outbox_callback: RetainOutboxCallback | None,
+        outbox_callback_factory: RetainOutboxCallbackFactory | None,
+        start_time: float,
+    ) -> _RetainExecutionResult:
+        """Run a batch with no shared document_id through the token splitter and
+        the sequential sub-batch loop (or a single pass for a small batch).
+
+        The orchestrator still separates genuinely distinct per-item document_ids
+        within one pass, and the only document that spans sub-batches here is an
+        oversized SINGLE item, whose slices all replay the same body — so the
+        per-document chunk_index offset stays valid. Shared-document batches are
+        handled by ``retain_batch_async`` itself (one pass per document), never
+        here, because splitting one document across differently-bodied sub-batches
+        trips the streaming pipeline's content-hash ownership check.
+        """
+        if outbox_callback is None and outbox_callback_factory is not None:
+            outbox_callback = outbox_callback_factory(contents)
+
         # Auto-chunk large batches by token count to avoid timeouts and memory issues
         # Calculate total token count
         total_tokens = sum(count_tokens(item.get("content", "")) for item in contents)
@@ -4308,6 +4566,7 @@ class MemoryEngine(MemoryEngineInterface):
         # means that sub-batch bypassed dedup, so the aggregate is None
         # (see RetainResult.processed_content_tokens).
         total_processed_content_tokens: int | None = 0
+        cancelled = False
 
         # Get batch size threshold from config
         config = get_config()
@@ -4403,9 +4662,8 @@ class MemoryEngine(MemoryEngineInterface):
                     logger.info(
                         f"[BATCH_RETAIN] bank={bank_id} operation {operation_id} cancelled (bank deleted), stopping after {i - 1}/{len(sub_batches)} sub-batches"
                     )
-                    if return_usage:
-                        return per_input_results, total_usage
-                    return per_input_results
+                    cancelled = True
+                    break
 
                 sub_batch_tokens = sum(count_tokens(item.get("content", "")) for item in sub_batch)
                 logger.info(
@@ -4417,10 +4675,11 @@ class MemoryEngine(MemoryEngineInterface):
                 set_stage(f"batch_retain.sub_batch.{i}")
 
                 # Resolve the document this sub-batch writes to so we can offset
-                # its chunk_index past chunks already stored by earlier
-                # sub-batches of the same document. Only the oversized-single-item
-                # split shares a document_id across sub-batches; packed multi-item
-                # sub-batches carry distinct document_ids (offset stays 0).
+                # its chunk_index past chunks already stored by earlier sub-batches
+                # of the same document. A grouped call passes ``document_id``, so
+                # every sub-batch shares it; otherwise only the oversized-single-
+                # item split shares a document_id across sub-batches (packed
+                # multi-item sub-batches carry distinct document_ids, offset 0).
                 sub_doc_id = document_id or (sub_batch[0].get("document_id") if len(sub_batch) == 1 else None)
                 sub_offset = chunk_offsets.get(sub_doc_id, 0) if sub_doc_id else 0
 
@@ -4500,98 +4759,11 @@ class MemoryEngine(MemoryEngineInterface):
             # Progress for this path is emitted by the streaming pipeline as
             # "storing N/total chunks" via progress_callback (see _retain_batch_async_internal).
 
-        await self._write_retain_outcome_metadata(operation_id, result)
-
-        # Call post-operation hook if validator is configured
-        if self._operation_validator:
-            from hindsight_api.extensions import RetainResult
-
-            result_ctx = RetainResult(
-                bank_id=bank_id,
-                contents=contents_copy,
-                request_context=request_context,
-                document_id=document_id,
-                fact_type_override=fact_type_override,
-                unit_ids=result,
-                success=True,
-                error=None,
-                llm_input_tokens=total_usage.input_tokens,
-                llm_output_tokens=total_usage.output_tokens,
-                llm_total_tokens=total_usage.total_tokens,
-                llm_cached_input_tokens=getattr(total_usage, "cached_tokens", 0) or 0,
-                llm_thoughts_tokens=getattr(total_usage, "thoughts_tokens", 0) or 0,
-                processed_content_tokens=total_processed_content_tokens,
-            )
-            try:
-                await self._operation_validator.on_retain_complete(result_ctx)
-            except Exception as e:
-                logger.warning(f"Post-retain hook error (non-fatal): {e}")
-
-        # Same async side effects every fact insert triggers (retain or import).
-        await self._submit_post_insert_maintenance(bank_id, request_context)
-
-        if return_usage:
-            return result, total_usage
-        return result
-
-    async def _submit_post_insert_maintenance(
-        self,
-        bank_id: str,
-        request_context: "RequestContext",
-        config: HindsightConfig | None = None,
-    ) -> None:
-        """Submit the async side effects that follow any fact insert (retain or import).
-
-        Shared by the retain pipeline and the document-import pipeline so imported
-        documents aren't second-class citizens:
-          * auto-consolidation (when observations + auto-consolidation are enabled
-            for the bank) so freshly inserted facts get observations;
-          * graph maintenance, which short-circuits when no cleanup work was
-            enqueued, so a plain insert pays a single cheap indexed SELECT here.
-
-        Both are non-critical: failures are logged, never raised, so they can't
-        fail the operation that produced the facts. Pass ``config`` when the caller
-        already resolved it to avoid a redundant lookup.
-        """
-        if config is None:
-            config = await self._config_resolver.resolve_full_config(bank_id, request_context)
-        if config.enable_observations and config.enable_auto_consolidation:
-            try:
-                await self.submit_async_consolidation(bank_id=bank_id, request_context=request_context)
-            except Exception as e:
-                logger.warning(f"Failed to submit consolidation task for bank {bank_id}: {e}")
-        try:
-            await self.submit_async_graph_maintenance(bank_id=bank_id, request_context=request_context)
-        except Exception as e:
-            logger.warning(f"Failed to submit graph maintenance task for bank {bank_id}: {e}")
-
-    async def _resolve_retain_config(
-        self,
-        bank_id: str,
-        request_context: "RequestContext",
-        strategy: str | None,
-    ) -> HindsightConfig:
-        """Resolve the config a retain runs under, strategy overrides applied.
-
-        Mirrors what ``_retain_batch_async_internal`` resolves before handing
-        config to the orchestrator, so anything the splitting caller derives
-        from it (chunk boundaries, Memory Defense screening) matches what the
-        orchestrator then does with each sub-batch.
-        """
-        from hindsight_api.config_resolver import apply_strategy
-
-        resolved_config = await self._config_resolver.resolve_full_config(bank_id, request_context)
-        effective_strategy = strategy or resolved_config.retain_default_strategy
-        if effective_strategy:
-            resolved_config = apply_strategy(resolved_config, effective_strategy)
-        return resolved_config
-
-    @staticmethod
-    def _retain_chunking_config(config: HindsightConfig) -> _RetainChunkingConfig:
-        """The chunk boundaries ``config`` implies, as the retain pipeline uses them."""
-        return _RetainChunkingConfig(
-            chunk_size=getattr(config, "retain_chunk_size", DEFAULT_RETAIN_CHUNK_SIZE),
-            structured_chunk_size=getattr(config, "retain_structured_chunk_size", None),
+        return _RetainExecutionResult(
+            unit_ids=result,
+            usage=total_usage,
+            processed_content_tokens=total_processed_content_tokens,
+            cancelled=cancelled,
         )
 
     async def _retain_batch_async_internal(
@@ -15763,16 +15935,22 @@ class MemoryEngine(MemoryEngineInterface):
             if replay is not None:
                 return replay
 
-        # Validate no duplicate document_ids in the batch
-        # Having duplicate document_ids causes race conditions in document upserts during parallel processing
+        # Reject duplicate document_ids on the QUEUED path only. Children fan out
+        # to workers that claim them in parallel with no per-document gate, and
+        # append is a non-transactional read-modify-write, so concurrent appends
+        # to one document lose updates. The synchronous path (async=false) folds
+        # shared-document items into one document safely — sub-batches there run
+        # sequentially — so a client that needs this should send async=false.
         doc_ids = [item.get("document_id") for item in contents if item.get("document_id")]
         if len(doc_ids) != len(set(doc_ids)):
             from collections import Counter
 
             duplicates = [doc_id for doc_id, count in Counter(doc_ids).items() if count > 1]
             raise ValueError(
-                f"Batch contains duplicate document_ids: {duplicates}. "
-                f"Each content item in a batch must have a unique document_id to avoid race conditions."
+                f"Batch contains duplicate document_ids: {duplicates}. Each content item in an "
+                f"async batch must have a unique document_id to avoid races between the parallel "
+                f"workers that process them. To fold several items into one document, send the "
+                f"batch synchronously (async=false), which processes them sequentially."
             )
 
         # Calculate total token count and determine if we need to split
