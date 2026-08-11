@@ -6021,7 +6021,7 @@ class MemoryEngine(MemoryEngineInterface):
                 from .memories import get_memories
 
                 _obs_store = get_memories()
-                if observation_ids_ordered and not _obs_store.writes_memory_rows_in_sql:
+                if observation_ids_ordered and not _obs_store.writes_memory_rows_in_sql_for(bank_id):
                     # A store that keeps memories outside SQL: fetch each observation, then its
                     # source memories, for their chunk_ids — the join the SQL branch does, walked
                     # in observation-rank order so per-observation grouping is preserved.
@@ -6103,7 +6103,7 @@ class MemoryEngine(MemoryEngineInterface):
                     # row, so it selects one fewer column and keeps the asyncpg Records as-is — no
                     # per-chunk ``dict`` allocation for an overlay it never runs.
                     _chunk_store = get_memories()
-                    _owns_docs = _chunk_store.owns_document_store
+                    _owns_docs = _chunk_store.owns_document_store_for(bank_id)
                     if _owns_docs:
                         _chunk_cols = "chunk_id, chunk_text, chunk_index, document_id"
                     else:
@@ -6300,7 +6300,7 @@ class MemoryEngine(MemoryEngineInterface):
                         # Resolve each observation's sources. This is a recall hot path, so the SQL
                         # store reads only the two columns it needs rather than a full memory row; a
                         # store that owns its rows answers from its own objects via one addressed read.
-                        if store.writes_memory_rows_in_sql:
+                        if store.writes_memory_rows_in_sql_for(bank_id):
                             obs_rows = [
                                 {"id": str(r["id"]), "source_memory_ids": r["source_memory_ids"]}
                                 for r in await sf_conn.fetch(
@@ -6337,7 +6337,7 @@ class MemoryEngine(MemoryEngineInterface):
                         # needed, so the SQL store selects those (bank-scoped) instead of the full
                         # 17-column memory row — the difference is measurable on this hot path.
                         if source_ids_ordered:
-                            if store.writes_memory_rows_in_sql:
+                            if store.writes_memory_rows_in_sql_for(bank_id):
                                 source_row_by_id = {
                                     str(r["id"]): _source_fact_dict(
                                         uid=str(r["id"]),
@@ -6710,7 +6710,7 @@ class MemoryEngine(MemoryEngineInterface):
             from .memories import get_memories
 
             _store = get_memories()
-            if _store.writes_memory_rows_in_sql:
+            if _store.writes_memory_rows_in_sql_for(bank_id):
                 # Use a subquery for counts to avoid GROUP BY on CLOB columns
                 # (Oracle cannot use CLOB types as comparison keys in GROUP BY).
                 doc = await conn.fetchrow(
@@ -6772,7 +6772,7 @@ class MemoryEngine(MemoryEngineInterface):
                     # A store that owns the document store keeps the extracted text in
                     # its own store, not in documents.original_text (which is NULL here). Overlay
                     # it from the store so get_document still returns the body.
-                    if _store.owns_document_store:
+                    if _store.owns_document_store_for(bank_id):
                         _rec = await _store.get_document_record(
                             bank_id=bank_id, document_id=document_id, include_text=True
                         )
@@ -6849,7 +6849,7 @@ class MemoryEngine(MemoryEngineInterface):
                 from .memories import get_memories
 
                 _store = get_memories()
-                if _store.writes_memory_rows_in_sql:
+                if _store.writes_memory_rows_in_sql_for(bank_id):
                     unit_rows = await conn.fetch(
                         f"SELECT id FROM {fq_table('memory_units')} WHERE document_id = $1 AND fact_type IN ('experience', 'world')",
                         document_id,
@@ -6895,7 +6895,7 @@ class MemoryEngine(MemoryEngineInterface):
                 # cascade to its memories (they are not SQL rows) — drop them through the store,
                 # tagged with a write-group so the store tombstone commits atomically with the
                 # Postgres document delete (a rolled-back delete must not orphan the memories).
-                if deleted and not _store.writes_memory_rows_in_sql:
+                if deleted and not _store.writes_memory_rows_in_sql_for(bank_id):
                     _del_txn = await _store.begin_txn(conn=conn, fq_table=fq_table, bank_id=bank_id, mutating=True)
                     await _store.delete_document(
                         conn=conn, fq_table=fq_table, bank_id=bank_id, document_id=document_id, txn=_del_txn
@@ -6904,7 +6904,7 @@ class MemoryEngine(MemoryEngineInterface):
                     # extracted text + chunk bodies; the orphan sweep reclaims the blobs), under the
                     # same write-group so it commits atomically with the Postgres document delete.
                     # This is the EXPLICIT deletion — distinct from the re-ingest facts-delete above.
-                    if _store.owns_document_store:
+                    if _store.owns_document_store_for(bank_id):
                         await _store.delete_document_record(bank_id=bank_id, document_id=document_id, txn=_del_txn)
 
                 # Invalidate observations referencing these (now-deleted) memories
@@ -7017,7 +7017,7 @@ class MemoryEngine(MemoryEngineInterface):
                     from .memories import MemoryPatch, get_memories
 
                     _store = get_memories()
-                if tags is not None and not _store.writes_memory_rows_in_sql:
+                if tags is not None and not _store.writes_memory_rows_in_sql_for(bank_id):
                     # A store that keeps memories outside SQL: retag the document's memories, then
                     # invalidate the observations built on them and requeue their sources so the
                     # next consolidation rebuilds them under the new tags (the cascade the SQL
@@ -7191,7 +7191,7 @@ class MemoryEngine(MemoryEngineInterface):
                 from .memories import get_memories
 
                 _store = get_memories()
-                if _store.writes_memory_rows_in_sql:
+                if _store.writes_memory_rows_in_sql_for(bank_id):
                     row = await conn.fetchrow(
                         f"SELECT bank_id, fact_type FROM {fq_table('memory_units')} WHERE id = $1",
                         str(unit_uuid),
@@ -7220,7 +7220,7 @@ class MemoryEngine(MemoryEngineInterface):
                 # observations inserted concurrently by consolidation (otherwise a
                 # racing insert committed between the sweep and the delete would
                 # leave an orphan referencing this just-deleted source memory).
-                if _store.writes_memory_rows_in_sql:
+                if _store.writes_memory_rows_in_sql_for(bank_id):
                     deleted = await conn.fetchval(
                         f"DELETE FROM {fq_table('memory_units')} WHERE id = $1 RETURNING id", unit_id
                     )
@@ -7534,7 +7534,7 @@ class MemoryEngine(MemoryEngineInterface):
                             from .memories import get_memories as _get_memories_for_scope
 
                             _scope_store = _get_memories_for_scope()
-                            if _scope_store.writes_memory_rows_in_sql:
+                            if _scope_store.writes_memory_rows_in_sql_for(bank_id):
                                 unit_id_rows = await conn.fetch(
                                     f"SELECT id FROM {fq_table('memory_units')} WHERE bank_id = $1 AND fact_type = $2",
                                     bank_id,
@@ -7684,7 +7684,7 @@ class MemoryEngine(MemoryEngineInterface):
         from .memories import DeletePredicate, get_memories
 
         store = get_memories()
-        if not store.writes_memory_rows_in_sql:
+        if not store.writes_memory_rows_in_sql_for(bank_id):
             if fact_type:
                 await store.delete_where(bank_id, DeletePredicate(fact_types=[fact_type]))
             else:
@@ -7734,7 +7734,7 @@ class MemoryEngine(MemoryEngineInterface):
         backend = await self._get_backend()
         async with acquire_with_retry(backend) as conn:
             async with conn.transaction():
-                if store.writes_memory_rows_in_sql:
+                if store.writes_memory_rows_in_sql_for(bank_id):
                     # Count observations before deletion
                     count = await conn.fetchval(
                         f"SELECT COUNT(*) FROM {fq_table('memory_units')} WHERE bank_id = $1 AND fact_type = 'observation'",
@@ -7867,7 +7867,7 @@ class MemoryEngine(MemoryEngineInterface):
         store = get_memories()
         backend = await self._get_backend()
         async with acquire_with_retry(backend) as conn:
-            if store.writes_memory_rows_in_sql:
+            if store.writes_memory_rows_in_sql_for(bank_id):
                 count = await conn.fetchval(
                     f"""
                     SELECT COUNT(*) FROM {fq_table("memory_units")}
@@ -7947,7 +7947,7 @@ class MemoryEngine(MemoryEngineInterface):
                     from .memories import get_memories
 
                     _store = get_memories()
-                    if _store.writes_memory_rows_in_sql:
+                    if _store.writes_memory_rows_in_sql_for(bank_id):
                         await conn.execute(
                             f"""
                             UPDATE {fq_table("memory_units")}
@@ -9395,7 +9395,7 @@ class MemoryEngine(MemoryEngineInterface):
             from .memories import get_memories
 
             _store = get_memories()
-            if _store.owns_document_store:
+            if _store.owns_document_store_for(chunk["bank_id"]):
                 _t = await _store.get_chunk_text(
                     bank_id=chunk["bank_id"],
                     document_id=chunk["document_id"],
@@ -9486,7 +9486,7 @@ class MemoryEngine(MemoryEngineInterface):
             from .memories import get_memories
 
             _store = get_memories()
-            if _store.owns_document_store:
+            if _store.owns_document_store_for(bank_id):
                 _texts = await _store.list_chunk_texts(bank_id=bank_id, document_id=document_id)
                 if _texts is not None:
                     _texts_by_index = dict(enumerate(_texts))
@@ -11636,7 +11636,7 @@ class MemoryEngine(MemoryEngineInterface):
             from .memories import get_memories
 
             _store = get_memories()
-            if _store.writes_memory_rows_in_sql:
+            if _store.writes_memory_rows_in_sql_for(bank_id):
                 consolidation_row = await conn.fetchrow(
                     f"""
                     SELECT

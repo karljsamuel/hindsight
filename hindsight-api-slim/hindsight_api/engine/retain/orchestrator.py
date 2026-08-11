@@ -1278,7 +1278,7 @@ async def _store_document_bodies(
     from ..memories import get_memories
 
     store = get_memories()
-    if not store.owns_document_store:
+    if not store.owns_document_store_for(bank_id):
         return
     # The record's content_hash must equal what the SQL documents row stores, so a read is
     # consistent whichever it comes from: sanitize + sha256 the same combined_content. The
