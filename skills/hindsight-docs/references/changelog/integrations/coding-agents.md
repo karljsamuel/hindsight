@@ -10,6 +10,12 @@ For the source code, see [`hindsight-integrations/coding-agents`](https://github
 
 ← [Back to main changelog](../index.md)
 
+## [0.2.1](https://github.com/vectorize-io/hindsight/tree/integrations/coding-agents/v0.2.1)
+
+**Bug Fixes**
+
+- Prevent Claude Code compaction summaries from being retained in coding-agent conversation history.<span style={{color: "var(--ifm-color-emphasis-500)", margin: "0 0.3em"}}>·</span><a href="https://github.com/nicoloboschi" target="_blank" rel="noopener noreferrer" style={{color: "var(--ifm-color-primary)", textDecoration: "none", display: "inline-flex", alignItems: "center", gap: "4px", verticalAlign: "middle"}}>@nicoloboschi</a><span style={{color: "var(--ifm-color-emphasis-500)", margin: "0 0.3em"}}>·</span><a href="https://github.com/vectorize-io/hindsight/commit/f10394933" target="_blank" rel="noopener noreferrer" style={{fontFamily: "var(--ifm-font-family-monospace, monospace)", fontSize: "0.85em", color: "var(--ifm-color-emphasis-600)"}}>f10394933</a>
+
 ## [0.2.0](https://github.com/vectorize-io/hindsight/tree/integrations/coding-agents/v0.2.0)
 
 **Features**
