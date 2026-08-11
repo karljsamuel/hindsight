@@ -2,8 +2,8 @@
 title: "Best Open-Source Agent Memory Systems (Self-Hosted, 2026)"
 description: "A benchmark-grounded, fair comparison of the open-source agent memory systems you can self-host: Hindsight, Mem0, Graphiti/Zep, Letta, and Cognee."
 authors: [benfrank241]
-slug: "2026/08/05/open-source-agent-memory-systems"
-date: 2026-08-05T12:00
+slug: "2026/08/11/open-source-agent-memory-systems"
+date: 2026-08-11T12:00
 tags: [hindsight, agent-memory, open-source, self-hosting, comparison, mem0, zep, letta, cognee]
 image: /img/blog/open-source-agent-memory-systems.png
 hide_table_of_contents: true
