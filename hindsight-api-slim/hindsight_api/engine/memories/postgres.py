@@ -23,7 +23,15 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from .base import DeletePredicate, MemoriesExtension, MemoryPatch, ScanPage, StoredMemory
+from .base import (
+    DeletePredicate,
+    EntityPrunePassResult,
+    MemoriesExtension,
+    MemoryPatch,
+    RelinkPassResult,
+    ScanPage,
+    StoredMemory,
+)
 from .pg import counts, curation, graph, reads, writes
 
 
@@ -496,14 +504,25 @@ class PostgresMemories(MemoriesExtension):
             include_affected_units=include_affected_units,
         )
 
-    async def relink_pass(self, *, backend, fq_table, bank_id: str, config) -> dict:
-        return await graph.relink_pass(backend=backend, fq_table=fq_table, bank_id=bank_id, config=config)
+    async def relink_pass(
+        self, *, backend, fq_table, bank_id: str, config, deadline: float | None = None
+    ) -> RelinkPassResult:
+        return await graph.relink_pass(
+            backend=backend, fq_table=fq_table, bank_id=bank_id, config=config, deadline=deadline
+        )
 
-    async def prune_orphan_entities(self, *, conn, fq_table, bank_id: str) -> int:
-        return await graph.prune_orphan_entities(conn=conn, fq_table=fq_table, bank_id=bank_id)
+    async def enqueue_entity_prune_candidates(self, *, conn, fq_table, bank_id: str, affected_unit_ids: list) -> int:
+        return await graph.enqueue_entity_prune_candidates(
+            conn=conn,
+            fq_table=fq_table,
+            bank_id=bank_id,
+            affected_unit_ids=affected_unit_ids,
+        )
 
-    async def prune_stale_cooccurrences(self, *, conn, fq_table, bank_id: str) -> int:
-        return await graph.prune_stale_cooccurrences(conn=conn, fq_table=fq_table, bank_id=bank_id)
+    async def entity_prune_pass(
+        self, *, backend, fq_table, bank_id: str, deadline: float | None = None
+    ) -> EntityPrunePassResult:
+        return await graph.entity_prune_pass(backend=backend, fq_table=fq_table, bank_id=bank_id, deadline=deadline)
 
 
 __all__ = ["PostgresMemories"]
