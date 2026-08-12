@@ -188,11 +188,11 @@ describe("environment fallback", () => {
     writeJson(globalCfg, {});
     process.env.HINDSIGHT_AUTO_REFLECT = "false";
     process.env.HINDSIGHT_DISABLED = "1";
-    process.env.HINDSIGHT_RETAIN_EVERY_TURNS = "5";
+    process.env.HINDSIGHT_SEED_LIMIT = "5";
     const cfg = loadConfig({ path: globalCfg });
     expect(cfg.autoReflect).toBe(false);
     expect(cfg.disabled).toBe(true);
-    expect(cfg.retainEveryTurns).toBe(5);
+    expect(cfg.seedLimit).toBe(5);
   });
 
   it("ignores a malformed number instead of resolving it to NaN", () => {
