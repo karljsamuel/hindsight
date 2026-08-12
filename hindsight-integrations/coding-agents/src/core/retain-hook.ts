@@ -119,7 +119,7 @@ export async function runRetainHook(
 
   if (!transcriptPath) return;
 
-  const resolved = applyBankConfig(cfg, deriveBankId(cfg, cwd, spec.harness));
+  const resolved = applyBankConfig(cfg, deriveBankId(cfg, cwd, spec.harness), cwd);
   cfg = resolved.cfg;
   const bankId = resolved.bankId;
   if (cfg.disabled) return;
