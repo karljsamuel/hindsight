@@ -15941,6 +15941,8 @@ class MemoryEngine(MemoryEngineInterface):
         *,
         result_metadata: dict[str, Any] | None = None,
         dedupe_by_bank: bool = False,
+        dedupe_by_bank_includes_processing: bool = False,
+        dedupe_excludes_operation_id: str | None = None,
         dedupe_in_flight_payload_key: str | None = None,
     ) -> dict[str, Any]:
         """Generic helper to submit an async operation.
@@ -15951,7 +15953,14 @@ class MemoryEngine(MemoryEngineInterface):
             task_type: Task type for the task payload (e.g., 'consolidation', 'batch_retain')
             task_payload: Additional task payload fields (operation_id and bank_id are added automatically)
             result_metadata: Optional metadata to store with the operation record
-            dedupe_by_bank: If True, skip creating a new task if one is already pending for this bank+operation_type
+            dedupe_by_bank: If True, skip creating a new task if one is already queued for this
+                bank+operation_type. Which statuses count as "queued" depends on
+                dedupe_by_bank_includes_processing below.
+            dedupe_by_bank_includes_processing: Widen dedupe_by_bank to also match a
+                *processing* job. Only correct for operations whose job drains its
+                own backlog to empty before finishing (see submit_async_graph_maintenance);
+                for watermark-based jobs like consolidation it would drop work that
+                arrived after the running job took its watermark.
             dedupe_in_flight_payload_key: If set, skip creating a new task when a pending or processing
                 operation of this type exists whose task_payload carries the same value for this key
                 (e.g. 'mental_model_id'). Narrower than dedupe_by_bank, which dedupes per bank.
@@ -16016,13 +16025,28 @@ class MemoryEngine(MemoryEngineInterface):
                     raise OperationValidationError(f"Bank '{bank_id}' not found", status_code=404)
 
                 if dedupe_by_bank:
-                    # Only check 'pending', not 'processing': a processing task uses a
-                    # watermark from when it started, so memories added after that need
-                    # a fresh run regardless.
+                    # Which statuses count as "already covered".
+                    #
+                    # 'pending' only, by default: a *processing* watermark-based task
+                    # (consolidation) fixed its watermark when it started, so memories
+                    # added after that need a fresh run regardless.
+                    #
+                    # Callers whose job drains its own backlog to empty before
+                    # finishing opt into 'processing' as well. Without it, dedup is
+                    # ineffective under load: the single pending row gets claimed
+                    # within milliseconds, the next submit sees no pending row and
+                    # inserts another, and the cycle repeats once per triggering
+                    # operation — producing hundreds of concurrent jobs for one bank
+                    # rather than the one the job body assumes is running.
+                    status_filter = (
+                        "status IN ('pending', 'processing')"
+                        if dedupe_by_bank_includes_processing
+                        else "status = 'pending'"
+                    )
                     pending = await conn.fetch(
                         f"""
-                        SELECT operation_id, task_payload FROM {fq_table("async_operations")}
-                        WHERE bank_id = $1 AND operation_type = $2 AND status = 'pending'
+                        SELECT operation_id, task_payload, status FROM {fq_table("async_operations")}
+                        WHERE bank_id = $1 AND operation_type = $2 AND {status_filter}
                         """,
                         bank_id,
                         operation_type,
@@ -16034,6 +16058,17 @@ class MemoryEngine(MemoryEngineInterface):
                     # JSON_VALUE returns NULL for the array-valued observation_scopes.
                     # (Scoped submits never reach here: they pass dedupe_by_bank=False.)
                     for row in pending:
+                        # A job that submits its own successor must not match itself.
+                        # The submitting operation is still 'processing' while its body
+                        # runs (the worker only marks it completed afterwards), so with
+                        # dedupe_by_bank_includes_processing the hand-off would dedupe
+                        # against its own row and silently do nothing. Compared in
+                        # Python rather than SQL because the operation_id cast is not
+                        # portable across the Postgres and Oracle backends.
+                        if dedupe_excludes_operation_id is not None and str(row["operation_id"]) == str(
+                            dedupe_excludes_operation_id
+                        ):
+                            continue
                         row_payload = row["task_payload"]
                         row_dict = json.loads(row_payload) if isinstance(row_payload, str) else (row_payload or {})
                         if row_dict.get("observation_scopes") is None:
@@ -16062,7 +16097,7 @@ class MemoryEngine(MemoryEngineInterface):
                                         row["operation_id"],
                                     )
                             logger.debug(
-                                f"{operation_type} task already pending for bank_id={bank_id}, "
+                                f"{operation_type} task already {row['status']} for bank_id={bank_id}, "
                                 f"skipping duplicate (existing operation_id={row['operation_id']})"
                             )
                             return {
@@ -16626,6 +16661,7 @@ class MemoryEngine(MemoryEngineInterface):
         bank_id: str,
         *,
         request_context: "RequestContext",
+        dedupe_excludes_operation_id: str | None = None,
         force_sweep: bool = False,
     ) -> dict[str, Any]:
         """Submit a graph-maintenance job to drain the bank's maintenance queues.
@@ -16634,8 +16670,9 @@ class MemoryEngine(MemoryEngineInterface):
         (``graph_maintenance_queue`` and ``entity_maintenance_queue``) are empty
         for this bank, so unconditional callers (e.g. every retain that may or
         may not have triggered a document upsert) don't generate empty worker
-        tasks. Deduplicates by bank when an existing pending job is already
-        scheduled.
+        tasks. Deduplicates by bank against a job that is already pending *or*
+        already running — graph maintenance drains its own queue to empty, so a
+        job that is mid-flight still covers work queued after it started.
 
         Args:
             force_sweep: Skip the empty-queue short-circuit and submit anyway.
@@ -16688,6 +16725,15 @@ class MemoryEngine(MemoryEngineInterface):
             task_type="graph_maintenance",
             task_payload=task_payload,
             dedupe_by_bank=True,
+            # Safe here (unlike consolidation): run_graph_maintenance_job loops
+            # until graph_maintenance_queue is empty for the bank, so a running
+            # job already covers rows enqueued while it runs. The job re-submits
+            # itself if anything lands in the gap between its final claim and
+            # completion.
+            dedupe_by_bank_includes_processing=True,
+            # Set by the job's own hand-off so it does not match its own
+            # still-'processing' row and suppress its successor.
+            dedupe_excludes_operation_id=dedupe_excludes_operation_id,
         )
 
     async def submit_async_refresh_mental_model(
