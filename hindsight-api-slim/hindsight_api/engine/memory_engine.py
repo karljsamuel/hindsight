@@ -52,7 +52,7 @@ from ..worker.exceptions import DeferOperation, RetryTaskAt, format_task_error
 from ..worker.stage import set_stage
 from .audit import AuditLogger, audit_context
 from .bank_stats_cache import BankStatsCache, DistributedBankStatsCache
-from .db import DatabaseBackend, create_database_backend
+from .db import DatabaseBackend, DatabaseConnection, ResultRow, create_database_backend
 from .db.ops_postgresql import pg_search_vector_expr
 from .db_budget import budgeted_operation
 from .llm_interface import ProviderRateLimitResetError
@@ -12494,6 +12494,54 @@ class MemoryEngine(MemoryEngineInterface):
                 )
             return result
 
+    async def _generate_mental_model_embedding(self, name: str, content: str) -> str | None:
+        embedding = await embedding_utils.generate_embeddings_batch(self.embeddings, [f"{name} {content}"])
+        return str(embedding[0]) if embedding else None
+
+    async def _insert_pinned_mental_model(
+        self,
+        conn: DatabaseConnection,
+        *,
+        mental_model_id: str,
+        bank_id: str,
+        name: str,
+        source_query: str,
+        content: str,
+        embedding: str | None,
+        tags: list[str] | None,
+        max_tokens: int | None,
+        trigger: dict[str, Any] | None,
+    ) -> ResultRow:
+        """Insert a pinned model using the caller's transaction."""
+        # VectorChord needs mental_models.search_vector tokenized on write; every
+        # other backend either generates it or indexes the source columns.
+        sv_expr = pg_search_vector_expr(
+            get_config(), text_col="$3", context_col="$5", signals_col=None, native_inline=False
+        )
+        sv_col = ", search_vector" if sv_expr else ""
+        sv_val = f", {sv_expr}" if sv_expr else ""
+        row = await conn.fetchrow(
+            f"""
+            INSERT INTO {fq_table("mental_models")}
+            (id, bank_id, subtype, name, description, source_query, content, embedding, tags, max_tokens, trigger{sv_col})
+            VALUES ($1, $2, 'pinned', $3, ' ', $4, $5, $6, $7, COALESCE($8, 2048), COALESCE($9, '{{"refresh_after_consolidation": false}}'::jsonb){sv_val})
+            RETURNING id, bank_id, name, source_query, content, tags,
+                      last_refreshed_at, created_at, reflect_response,
+                      max_tokens, trigger, structured_content
+            """,
+            mental_model_id,
+            bank_id,
+            name,
+            source_query,
+            content,
+            embedding,
+            tags or [],
+            max_tokens,
+            json.dumps(trigger) if trigger else None,
+        )
+        assert row is not None
+        return row
+
     async def create_mental_model(
         self,
         bank_id: str,
@@ -12539,11 +12587,7 @@ class MemoryEngine(MemoryEngineInterface):
                 await self._validate_operation(self._operation_validator.validate_bank_write(ctx))
         backend = await self._get_backend()
 
-        # Generate embedding for the content
-        embedding_text = f"{name} {content}"
-        embedding = await embedding_utils.generate_embeddings_batch(self.embeddings, [embedding_text])
-        # Convert embedding to string for asyncpg vector type
-        embedding_str = str(embedding[0]) if embedding else None
+        embedding = await self._generate_mental_model_embedding(name, content)
 
         if not mental_model_id:
             mental_model_id = f"mm-{uuid.uuid4().hex}"
@@ -12559,63 +12603,18 @@ class MemoryEngine(MemoryEngineInterface):
                     request_context,
                     conn=conn,
                 )
-                # VectorChord needs mental_models.search_vector tokenized on write:
-                # its column is a plain bm25vector read by idx_mental_models_text_search
-                # (native's is GENERATED; pg_search/pg_textsearch/pgroonga index base
-                # columns), so every other backend leaves it out. Same tokenization the
-                # memory_units write path uses (pg_search_vector_expr / insert_facts_batch),
-                # over name + content — native_inline=False because mm's native column
-                # populates itself.
-                config = get_config()
-                if mental_model_id:
-                    sv_expr = pg_search_vector_expr(
-                        config, text_col="$3", context_col="$5", signals_col=None, native_inline=False
-                    )
-                    sv_col = ", search_vector" if sv_expr else ""
-                    sv_val = f", {sv_expr}" if sv_expr else ""
-                    row = await conn.fetchrow(
-                        f"""
-                        INSERT INTO {fq_table("mental_models")}
-                        (id, bank_id, subtype, name, description, source_query, content, embedding, tags, max_tokens, trigger{sv_col})
-                        VALUES ($1, $2, 'pinned', $3, ' ', $4, $5, $6, $7, COALESCE($8, 2048), COALESCE($9, '{{"refresh_after_consolidation": false}}'::jsonb){sv_val})
-                        RETURNING id, bank_id, name, source_query, content, tags,
-                                  last_refreshed_at, created_at, reflect_response,
-                                  max_tokens, trigger, structured_content
-                        """,
-                        mental_model_id,
-                        bank_id,
-                        name,
-                        source_query,
-                        content,
-                        embedding_str,
-                        tags or [],
-                        max_tokens,
-                        json.dumps(trigger) if trigger else None,
-                    )
-                else:
-                    sv_expr = pg_search_vector_expr(
-                        config, text_col="$2", context_col="$4", signals_col=None, native_inline=False
-                    )
-                    sv_col = ", search_vector" if sv_expr else ""
-                    sv_val = f", {sv_expr}" if sv_expr else ""
-                    row = await conn.fetchrow(
-                        f"""
-                        INSERT INTO {fq_table("mental_models")}
-                        (bank_id, subtype, name, description, source_query, content, embedding, tags, max_tokens, trigger{sv_col})
-                        VALUES ($1, 'pinned', $2, ' ', $3, $4, $5, $6, COALESCE($7, 2048), COALESCE($8, '{{"refresh_after_consolidation": false}}'::jsonb){sv_val})
-                        RETURNING id, bank_id, name, source_query, content, tags,
-                                  last_refreshed_at, created_at, reflect_response,
-                                  max_tokens, trigger, structured_content
-                        """,
-                        bank_id,
-                        name,
-                        source_query,
-                        content,
-                        embedding_str,
-                        tags or [],
-                        max_tokens,
-                        json.dumps(trigger) if trigger else None,
-                    )
+                row = await self._insert_pinned_mental_model(
+                    conn,
+                    mental_model_id=mental_model_id,
+                    bank_id=bank_id,
+                    name=name,
+                    source_query=source_query,
+                    content=content,
+                    embedding=embedding,
+                    tags=tags,
+                    max_tokens=max_tokens,
+                    trigger=trigger,
+                )
 
         # Best-effort default-template hook runs after the bank-create commits
         # (it opens its own connections and can create pinned models).
@@ -14034,48 +14033,57 @@ class MemoryEngine(MemoryEngineInterface):
                 request_context=request_context,
             )
             await self._validate_operation(self._operation_validator.validate_bank_write(ctx))
-        # The mental model carries the content (and is created by the existing
-        # path, including lazy bank creation); the node only refs it. The write is
-        # already authorized above, so the nested mental-model create/delete run
-        # without invoking the validator a second time.
-        with _authorize_nested_operations():
-            mm = await self.create_mental_model(
-                bank_id=bank_id,
-                name=name,
-                source_query=source_query,
-                content=content,
-                mental_model_id=mental_model_id,
-                tags=tags,
-                max_tokens=max_tokens if max_tokens is not None else self.KNOWLEDGE_PAGE_DEFAULT_MAX_TOKENS,
-                trigger=trigger if trigger is not None else dict(self.KNOWLEDGE_PAGE_DEFAULT_TRIGGER),
-                request_context=request_context,
-            )
-            backend = await self._get_backend()
-            page_id = f"kp-{uuid.uuid4().hex}"
-            try:
-                async with acquire_with_retry(backend) as conn:
-                    async with conn.transaction():
-                        await self._kp_assert_folder_parent(conn, bank_id, parent_id)
-                        row = await conn.fetchrow(
-                            f"""
-                            INSERT INTO {fq_table("knowledge_pages")}
-                                (id, bank_id, parent_id, kind, name, mental_model_id, managed)
-                            VALUES ($1, $2, $3, 'page', $4, $5, $6)
-                            RETURNING {self._KP_COLUMNS}
-                            """,
-                            page_id,
-                            bank_id,
-                            parent_id,
-                            name,
-                            mm["id"],
-                            managed,
-                        )
-            except asyncpg.UniqueViolationError:
-                # Duplicate page name in this folder (uq_kp_folder_pagename). Roll back
-                # by deleting the orphan mental model we just created, then signal the
-                # caller that the page already exists.
-                await self.delete_mental_model(bank_id, mm["id"], request_context=request_context)
-                return None
+        mental_model_id = mental_model_id or f"mm-{uuid.uuid4().hex}"
+        embedding = await self._generate_mental_model_embedding(name, content)
+        effective_max_tokens = max_tokens if max_tokens is not None else self.KNOWLEDGE_PAGE_DEFAULT_MAX_TOKENS
+        effective_trigger = trigger if trigger is not None else dict(self.KNOWLEDGE_PAGE_DEFAULT_TRIGGER)
+        backend = await self._get_backend()
+        page_id = f"kp-{uuid.uuid4().hex}"
+        try:
+            async with acquire_with_retry(backend) as conn:
+                # The page row and its backing model have one lifecycle, so they
+                # share a transaction instead of compensating after a partial commit.
+                async with conn.transaction():
+                    created = await self._ensure_bank_exists(bank_id, request_context, conn=conn)
+                    await self._kp_assert_folder_parent(conn, bank_id, parent_id)
+                    mm_row = await self._insert_pinned_mental_model(
+                        conn,
+                        mental_model_id=mental_model_id,
+                        bank_id=bank_id,
+                        name=name,
+                        source_query=source_query,
+                        content=content,
+                        embedding=embedding,
+                        tags=tags,
+                        max_tokens=effective_max_tokens,
+                        trigger=effective_trigger,
+                    )
+                    row = await conn.fetchrow(
+                        f"""
+                        INSERT INTO {fq_table("knowledge_pages")}
+                            (id, bank_id, parent_id, kind, name, mental_model_id, managed)
+                        VALUES ($1, $2, $3, 'page', $4, $5, $6)
+                        RETURNING {self._KP_COLUMNS}
+                        """,
+                        page_id,
+                        bank_id,
+                        parent_id,
+                        name,
+                        mental_model_id,
+                        managed,
+                    )
+        except asyncpg.UniqueViolationError as exc:
+            if getattr(exc, "constraint_name", None) != "uq_kp_folder_pagename":
+                raise
+            # The transaction already rolled the MM back; preserve the existing
+            # API contract that a duplicate page is surfaced as HTTP 409.
+            return None
+
+        # This hook opens its own connections and therefore must run after commit.
+        if created:
+            await self._apply_default_bank_template(bank_id, request_context)
+        logger.info(f"[MENTAL_MODELS] Created pinned mental model '{name}' for bank {bank_id}")
+        mm = self._row_to_mental_model(mm_row)
         node = self._row_to_knowledge_node(row)
         # Surface the mental-model metadata so the caller can render markdown or
         # schedule a content refresh without a second fetch.
