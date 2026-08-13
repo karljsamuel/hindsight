@@ -153,6 +153,15 @@ elif [ -f "$INTEGRATION_DIR/package.json" ]; then
     print_info "Updating version in $INTEGRATION_DIR/package.json"
     sed -i.bak "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" "$INTEGRATION_DIR/package.json"
     rm "$INTEGRATION_DIR/package.json.bak"
+    # package-lock.json carries the package's own version twice, and the sed above does not touch
+    # it — so every npm release since the lock was committed left it pinned at whatever version it
+    # was born with (coding-agents still said 0.0.5 at v0.3.2). `npm version` rewrites exactly
+    # those two fields and nothing else; `--package-lock-only` was rejected because it re-resolves
+    # dependencies, which would smuggle dependency bumps into a release commit.
+    if [ -f "$INTEGRATION_DIR/package-lock.json" ]; then
+        print_info "Syncing $INTEGRATION_DIR/package-lock.json"
+        (cd "$INTEGRATION_DIR" && npm version "$VERSION" --no-git-tag-version --allow-same-version >/dev/null)
+    fi
 elif [ -f "$INTEGRATION_DIR/.claude-plugin/plugin.json" ]; then
     print_info "Updating version in $INTEGRATION_DIR/.claude-plugin/plugin.json"
     sed -i.bak "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" "$INTEGRATION_DIR/.claude-plugin/plugin.json"
