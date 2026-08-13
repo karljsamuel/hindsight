@@ -1429,6 +1429,15 @@ jobs:
     - name: Verify cargo-about
       run: cargo about --version
 
+    # cargo-about resolves the dependency graph for every target platform, so it
+    # needs crates this host never builds (e.g. the Android-only
+    # android_system_properties). Populate the registry first: `cargo fetch`
+    # without --target downloads for all targets, and Cargo.lock is not checked
+    # in, so nothing is cached from a previous step.
+    - name: Fetch crate sources for the license scan
+      working-directory: hindsight-cli
+      run: cargo fetch
+
     - name: Generate and verify license manifest
       working-directory: hindsight-cli
       run: |

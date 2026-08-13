@@ -337,6 +337,14 @@ jobs:
       if: matrix.asset_name == 'hindsight-linux-amd64'
       run: cargo about --version
 
+    # The build above only fetches crates for this target; cargo-about resolves
+    # the graph for every target platform, so fetch for all of them (that is what
+    # `cargo fetch` without --target does) before the --offline generate.
+    - name: Fetch crate sources for the license scan
+      if: matrix.asset_name == 'hindsight-linux-amd64'
+      working-directory: hindsight-cli
+      run: cargo fetch
+
     - name: Generate license manifest
       if: matrix.asset_name == 'hindsight-linux-amd64'
       working-directory: hindsight-cli
