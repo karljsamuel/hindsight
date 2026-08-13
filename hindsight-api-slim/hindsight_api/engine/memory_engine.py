@@ -935,6 +935,33 @@ def _is_invalid_embedding_dimension_error(e: Exception) -> bool:
     )
 
 
+def _entity_map_from_results(
+    ids_by_unit: dict[str, list[str]], names: dict[str, str]
+) -> dict[str, list[dict[str, str]]]:
+    """Build the ``{unit_id: [{entity_id, canonical_name}]}`` recall shape from the
+    entity ids a store carried on its results, given a resolved id->name map.
+
+    Mirrors ``entity_map_for_units`` exactly, so both paths produce identical output:
+    an order-preserving per-unit dedupe (a unit can carry the same id twice), ids with
+    no resolved name dropped, and — crucially — a unit that resolves to no entity is
+    omitted entirely rather than mapped to ``[]``, so its fact keeps ``entities=None``
+    downstream instead of an empty list. Pure and connectionless, so it is unit-testable
+    without a store or a database.
+    """
+    out: dict[str, list[dict[str, str]]] = {}
+    for unit_id, ids in ids_by_unit.items():
+        rows: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for entity_id in ids:
+            if entity_id in seen or entity_id not in names:
+                continue
+            seen.add(entity_id)
+            rows.append({"entity_id": entity_id, "canonical_name": names[entity_id]})
+        if rows:
+            out[unit_id] = rows
+    return out
+
+
 def _is_non_retryable_task_error(e: Exception) -> bool:
     """Classify deterministic task failures that should skip worker retry."""
     return (
@@ -6754,13 +6781,37 @@ class MemoryEngine(MemoryEngineInterface):
                 if unit_ids:
                     from .memories import get_memories
 
-                    async with acquire_with_retry(backend) as entity_conn:
-                        # The memory carries its own entity ids; the store resolves
-                        # them to names (observations inherit their sources'), the
-                        # `entities` registry staying in postgres.
-                        fact_entity_map = await get_memories().entity_map_for_units(
-                            conn=entity_conn, fq_table=fq_table, bank_id=bank_id, unit_ids=unit_ids
-                        )
+                    # A backend that resolves the unit->entity posting inline carries
+                    # each result's entity ids on the RetrievalResult (a list, possibly
+                    # empty); Postgres leaves them None and resolves them here. When every
+                    # result carries its ids we avoid re-fetching the memories: build the
+                    # map from the results themselves and resolve names in one Postgres
+                    # lookup — and when no result carries any entity (chunks mode) skip all
+                    # work, acquiring no connection at all.
+                    if all(sr.retrieval.entity_ids is not None for sr in top_scored):
+                        # Normalise ids to str once, here at the boundary: a store may
+                        # hand back UUIDs, and everything downstream (the union, the
+                        # membership test, the map keys) then speaks one type.
+                        ids_by_unit = {sr.id: [str(e) for e in (sr.retrieval.entity_ids or [])] for sr in top_scored}
+                        union = {e for ids in ids_by_unit.values() for e in ids}
+                        names: dict[str, str] = {}
+                        # Acquire a connection only when there is actually a name to
+                        # resolve — when no result carries any entity (chunks mode) we
+                        # touch Postgres not at all.
+                        if union:
+                            async with acquire_with_retry(backend) as entity_conn:
+                                names = await get_memories().resolve_entity_names(
+                                    conn=entity_conn, fq_table=fq_table, bank_id=bank_id, entity_ids=list(union)
+                                )
+                        fact_entity_map = _entity_map_from_results(ids_by_unit, names)
+                    else:
+                        async with acquire_with_retry(backend) as entity_conn:
+                            # The memory carries its own entity ids; the store resolves
+                            # them to names (observations inherit their sources'), the
+                            # `entities` registry staying in postgres.
+                            fact_entity_map = await get_memories().entity_map_for_units(
+                                conn=entity_conn, fq_table=fq_table, bank_id=bank_id, unit_ids=unit_ids
+                            )
 
             # Convert results to MemoryFact objects
             # Build per-result scores (final/reranker/semantic/text) keyed by id.
