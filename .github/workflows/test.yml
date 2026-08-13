@@ -1421,6 +1421,21 @@ jobs:
           hindsight-cli/target
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+    - name: Install cargo-about
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-about@0.9.1
+
+    - name: Verify cargo-about
+      run: cargo about --version
+
+    - name: Generate and verify license manifest
+      working-directory: hindsight-cli
+      run: |
+        cargo about generate --offline --manifest-path Cargo.toml --config about.toml about.hbs --output-file /tmp/THIRD_PARTY_LICENSES.txt
+        test -s /tmp/THIRD_PARTY_LICENSES.txt
+        grep -Fq "THIRD-PARTY SOFTWARE LICENSES" /tmp/THIRD_PARTY_LICENSES.txt
+
     - name: Run unit tests
       working-directory: hindsight-cli
       run: cargo test
