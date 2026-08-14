@@ -7267,6 +7267,10 @@ class MemoryEngine(MemoryEngineInterface):
                     # This is the EXPLICIT deletion — distinct from the re-ingest facts-delete above.
                     if _store.owns_document_store_for(bank_id):
                         await _store.delete_document_record(bank_id=bank_id, document_id=document_id, txn=_del_txn)
+                    # Re-record the witness now that the group's writes have happened, so the row
+                    # carries what they actually wrote. `begin_txn` recorded it before any write
+                    # existed; the upsert widens rather than replaces.
+                    await _store.write_txn_witness(_del_txn, conn=conn, fq_table=fq_table)
 
                 # Invalidate observations referencing these (now-deleted) memories
                 if unit_ids:
@@ -7599,6 +7603,10 @@ class MemoryEngine(MemoryEngineInterface):
                         # Tag the store tombstone so it commits atomically with this transaction.
                         _del_txn = await _store.begin_txn(conn=conn, fq_table=fq_table, bank_id=bank_id, mutating=True)
                         await _store.delete_facts(bank_id, [unit_id], txn=_del_txn)
+                        # Re-record the witness now that the group's write has happened, so the row
+                        # carries what it actually wrote. `begin_txn` recorded it before any write
+                        # existed; the upsert widens rather than replaces.
+                        await _store.write_txn_witness(_del_txn, conn=conn, fq_table=fq_table)
 
                 # Invalidate observations referencing this (now-deleted) source memory
                 if bank_id and fact_type in ("experience", "world"):
@@ -8819,6 +8827,12 @@ class MemoryEngine(MemoryEngineInterface):
                                 )
                         need_consolidation = True
                         need_graph = True
+
+                    # Last thing inside the transaction: re-record the witness now that the
+                    # group's writes have happened, so the row carries what they actually wrote.
+                    # `begin_txn` above recorded it before any write existed; the upsert widens
+                    # rather than replaces.
+                    await store.write_txn_witness(_curation_txn, conn=conn, fq_table=fq_table)
 
                 # Postgres committed the curation change: publish the store's write-group. On a
                 # crash before here the writes stay invisible and the recovery sweep resolves them.
