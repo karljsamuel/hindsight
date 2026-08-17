@@ -571,7 +571,8 @@ class MaintenanceLoop:
                 # the row under the bank's schema context.
                 async with acquire_with_retry(engine._backend, max_retries=1) as conn:
                     mm_row = await conn.fetchrow(
-                        f"SELECT id, tags, trigger, last_refreshed_at FROM {fq_table('mental_models')} "
+                        f"SELECT id, tags, trigger, last_refreshed_at, last_memory_seen_at "
+                        f"FROM {fq_table('mental_models')} "
                         "WHERE bank_id = $1 AND id = $2",
                         bank_id,
                         mm_id,

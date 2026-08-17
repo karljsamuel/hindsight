@@ -1512,6 +1512,168 @@ class TestMentalModelStaleness:
             await memory.delete_bank(bank_id, request_context=request_context)
 
 
+class TestMentalModelRefreshTimestamps:
+    """``last_refreshed_at`` (when a refresh ran) and ``last_memory_seen_at`` (how far
+    through the memories the document is written) move independently.
+
+    Conflating them is #3531: the watermark never regresses, so on a model whose scope
+    gained no memories a refresh wrote the value already in the column back over itself.
+    The document changed, the timestamp did not, and a client asking "have I already
+    refreshed this?" refreshed it again on every tick.
+    """
+
+    @staticmethod
+    async def _read_timestamps(memory: MemoryEngine, bank_id: str, mm_id: str):
+        """The row's two timestamps, straight from the column — not the API's ISO strings."""
+        pool = await memory._get_pool()
+        async with pool.acquire() as conn:
+            return await conn.fetchrow(
+                f"SELECT last_refreshed_at, last_memory_seen_at "
+                f"FROM {fq_table('mental_models')} WHERE bank_id = $1 AND id = $2",
+                bank_id,
+                mm_id,
+            )
+
+    async def test_refresh_of_static_scope_still_advances_last_refreshed_at(
+        self, memory: MemoryEngine, request_context
+    ):
+        """The reported bug, reproduced: two refreshes over a scope that gained no
+        memories. The watermark is identical both times — that is correct, the data did
+        not move — but ``last_refreshed_at`` must advance anyway, or a client scheduling
+        its own refreshes sees the model as permanently never-refreshed."""
+        from datetime import datetime, timedelta, timezone
+
+        bank_id = f"test-mm-ts-static-{uuid.uuid4().hex[:8]}"
+        await memory.get_bank_profile(bank_id, request_context=request_context)
+        mm = await memory.create_mental_model(
+            bank_id=bank_id, name="MM", source_query="q", content="c", request_context=request_context
+        )
+
+        # The scope is quiet, so every refresh computes the same watermark.
+        watermark = datetime(2026, 8, 15, 20, 16, 58, tzinfo=timezone.utc)
+        for content in ("synthesis v1", "synthesis v2"):
+            await memory.update_mental_model(
+                bank_id=bank_id,
+                mental_model_id=mm["id"],
+                content=content,
+                refresh_watermark=watermark,
+                refresh_completed=True,
+                request_context=request_context,
+            )
+            if content == "synthesis v1":
+                first = await self._read_timestamps(memory, bank_id, mm["id"])
+        second = await self._read_timestamps(memory, bank_id, mm["id"])
+
+        assert second["last_refreshed_at"] > first["last_refreshed_at"], (
+            "a second refresh over an unchanged scope must still record that it ran"
+        )
+        # The watermark is the one that legitimately stands still.
+        assert first["last_memory_seen_at"] == watermark
+        assert second["last_memory_seen_at"] == watermark
+        # last_refreshed_at is a real clock reading, not the watermark it used to hold.
+        assert second["last_refreshed_at"] > watermark + timedelta(days=1)
+
+        api = await memory.get_mental_model(bank_id, mm["id"], request_context=request_context)
+        assert api["last_memory_seen_at"] == watermark.isoformat()
+        assert datetime.fromisoformat(api["last_refreshed_at"]) > watermark + timedelta(days=1)
+
+        await memory.delete_bank(bank_id, request_context=request_context)
+
+    async def test_refresh_that_preserves_content_still_advances_last_refreshed_at(
+        self, memory: MemoryEngine, request_context
+    ):
+        """A delta refresh that finds no new facts writes no content but did complete.
+        It stamps the wall clock; only a *failed* refresh leaves it alone."""
+        from datetime import datetime, timezone
+
+        bank_id = f"test-mm-ts-noop-{uuid.uuid4().hex[:8]}"
+        await memory.get_bank_profile(bank_id, request_context=request_context)
+        mm = await memory.create_mental_model(
+            bank_id=bank_id, name="MM", source_query="q", content="c", request_context=request_context
+        )
+        before = await self._read_timestamps(memory, bank_id, mm["id"])
+
+        # No content: the content-preserved path a delta refresh takes when the window
+        # held nothing topic-relevant.
+        await memory.update_mental_model(
+            bank_id=bank_id,
+            mental_model_id=mm["id"],
+            reflect_response={"text": "no new facts"},
+            refresh_watermark=datetime(2026, 8, 15, tzinfo=timezone.utc),
+            refresh_completed=True,
+            request_context=request_context,
+        )
+        after_noop = await self._read_timestamps(memory, bank_id, mm["id"])
+        assert after_noop["last_refreshed_at"] > before["last_refreshed_at"]
+
+        # A failed refresh persists its reflect_response for audit but claims nothing:
+        # neither timestamp moves, so a retry re-reads the same window.
+        await memory.update_mental_model(
+            bank_id=bank_id,
+            mental_model_id=mm["id"],
+            reflect_response={"refresh_skipped": "empty_candidate"},
+            request_context=request_context,
+        )
+        after_failure = await self._read_timestamps(memory, bank_id, mm["id"])
+        assert after_failure["last_refreshed_at"] == after_noop["last_refreshed_at"]
+        assert after_failure["last_memory_seen_at"] == after_noop["last_memory_seen_at"]
+
+        await memory.delete_bank(bank_id, request_context=request_context)
+
+    async def test_staleness_keys_off_memories_seen_not_refresh_time(self, memory: MemoryEngine, request_context):
+        """The inverse regression: making ``last_refreshed_at`` a wall clock must not let
+        a recent refresh mask a memory the document has never seen."""
+        from datetime import datetime, timezone
+
+        bank_id = f"test-mm-ts-stale-{uuid.uuid4().hex[:8]}"
+        await memory.get_bank_profile(bank_id, request_context=request_context)
+        mm = await memory.create_mental_model(
+            bank_id=bank_id, name="MM", source_query="q", content="c", request_context=request_context
+        )
+
+        memory_at = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        pool = await memory._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                f"""
+                INSERT INTO {fq_table("memory_units")}
+                    (id, bank_id, text, event_date, fact_type, tags, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, 'experience', $5::varchar[], $4, $4)
+                """,
+                str(uuid.uuid4()),
+                bank_id,
+                "test memory",
+                memory_at,
+                [],
+            )
+
+        # Refreshed just now, but built from memories only up to January: stale.
+        await memory.update_mental_model(
+            bank_id=bank_id,
+            mental_model_id=mm["id"],
+            content="built before the memory landed",
+            refresh_watermark=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            refresh_completed=True,
+            request_context=request_context,
+        )
+        api = await memory.get_mental_model(bank_id, mm["id"], request_context=request_context)
+        assert api["is_stale"] is True, "a recent last_refreshed_at must not mask an unseen memory"
+
+        # Same wall clock, watermark now covers the memory: not stale.
+        await memory.update_mental_model(
+            bank_id=bank_id,
+            mental_model_id=mm["id"],
+            content="built after the memory landed",
+            refresh_watermark=memory_at,
+            refresh_completed=True,
+            request_context=request_context,
+        )
+        api = await memory.get_mental_model(bank_id, mm["id"], request_context=request_context)
+        assert api["is_stale"] is False
+
+        await memory.delete_bank(bank_id, request_context=request_context)
+
+
 @pytest.mark.hs_llm_core
 class TestMentalModelRefreshTagSecurity:
     """Test that mental model refresh respects tag-based security boundaries."""

@@ -214,6 +214,8 @@ export interface MentalModel {
     keep_trace?: boolean;
   };
   last_refreshed_at: string;
+  /** Newest in-scope memory this model has seen. Staleness compares against this. */
+  last_memory_seen_at: string | null;
   created_at: string;
   reflect_response?: any;
   is_stale?: boolean | null;
@@ -1437,6 +1439,7 @@ export class ControlPlaneClient {
           keep_trace?: boolean;
         };
         last_refreshed_at: string;
+        last_memory_seen_at: string | null;
         created_at: string;
         reflect_response?: {
           text: string;
@@ -1543,6 +1546,7 @@ export class ControlPlaneClient {
         keep_trace?: boolean;
       };
       last_refreshed_at: string;
+      last_memory_seen_at: string | null;
       created_at: string;
       reflect_response?: {
         text: string;

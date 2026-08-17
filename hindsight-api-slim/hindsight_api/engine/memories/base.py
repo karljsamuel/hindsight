@@ -962,7 +962,7 @@ class MemoriesExtension(Extension, ABC):
         ``last_memory_write_at`` is the newest write time (``updated_at``) across
         the bank's memories, or None for an empty bank. It is the bank-wide
         counterpart of :meth:`any_memory_updated_since`: a mental model whose
-        ``last_refreshed_at`` is at or after it cannot be stale, whatever its
+        ``last_memory_seen_at`` is at or after it cannot be stale, whatever its
         scope — which is how the stats and knowledge-tree surfaces answer "is
         this up to date" for many models without a scoped scan each.
         """

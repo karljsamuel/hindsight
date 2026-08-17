@@ -78,7 +78,9 @@ class TestBuildContentDict:
 # =========================================================================
 
 
-_MENTAL_MODEL_METADATA_FIELDS = frozenset({"id", "bank_id", "name", "tags", "last_refreshed_at", "created_at"})
+_MENTAL_MODEL_METADATA_FIELDS = frozenset(
+    {"id", "bank_id", "name", "tags", "last_refreshed_at", "last_memory_seen_at", "created_at"}
+)
 
 _FULL_MENTAL_MODELS = [
     {
@@ -91,6 +93,7 @@ _FULL_MENTAL_MODELS = [
         "max_tokens": 2048,
         "trigger": {"interval": "daily"},
         "last_refreshed_at": "2026-01-01T00:00:00",
+        "last_memory_seen_at": "2026-01-01T00:00:00",
         "created_at": "2026-01-01T00:00:00",
         "reflect_response": {
             "text": "Prefers Python",
@@ -107,6 +110,7 @@ _FULL_MENTAL_MODELS = [
         "max_tokens": 2048,
         "trigger": None,
         "last_refreshed_at": "2026-01-01T00:00:00",
+        "last_memory_seen_at": "2026-01-01T00:00:00",
         "created_at": "2026-01-01T00:00:00",
         "reflect_response": {"text": "Ship v2", "based_on": {}},
     },
