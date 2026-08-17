@@ -2409,6 +2409,16 @@ class UpdateNodeRequest(BaseModel):
     source_query: str | None = None
     tags: list[str] | None = None
     max_tokens: int | None = None
+    trigger: MentalModelTrigger | None = Field(
+        default=None,
+        description=(
+            "Refresh settings to change. Applied as a patch: only the fields present in this "
+            "object are updated, and the rest keep the page's current values — so moving a page "
+            "onto a schedule does not reset how it refreshes. Setting refresh_cron clears "
+            "refresh_after_consolidation and vice versa, since a page refreshes on one or the "
+            "other, never both."
+        ),
+    )
 
 
 class CreateKnowledgePageResponse(BaseModel):
@@ -5698,7 +5708,11 @@ def _register_routes(app: FastAPI):
                 parent_id=body.parent_id,
                 tags=body.tags if body.tags else None,
                 max_tokens=body.max_tokens,
-                trigger=body.trigger.model_dump() if body.trigger else None,
+                # Only what the client actually set: the engine merges these over the
+                # knowledge-page defaults, and a full dump would drown them in this model's
+                # own field defaults (mode="full", exclude_mental_models=False) — which is
+                # how every page created with a trigger lost its delta refresh (#3506).
+                trigger=body.trigger.model_dump(exclude_unset=True) if body.trigger else None,
                 request_context=request_context,
             )
             if node is None:
@@ -5846,8 +5860,10 @@ def _register_routes(app: FastAPI):
         response_model=KnowledgeNode,
         summary="Rename/move a knowledge-base node or update a page's options",
         description="Rename a node (set `name`), move it under another folder (set `parent_id`, null "
-        "for the root), and/or update a page's options (`source_query`, `tags`, `max_tokens`). "
-        "Changing `source_query` schedules an async refresh so the page rebuilds against the new question.",
+        "for the root), and/or update a page's options (`source_query`, `tags`, `max_tokens`, `trigger`). "
+        "Changing `source_query` schedules an async refresh so the page rebuilds against the new question. "
+        "`trigger` is applied as a patch: the fields you send are updated and the rest keep the page's "
+        "current values.",
         operation_id="update_knowledge_node",
         tags=["Knowledge Base"],
     )
@@ -5875,7 +5891,7 @@ def _register_routes(app: FastAPI):
                 )
             # Page options live on the backing mental model; each applies only when
             # present in the body (so tags=[] clears, distinct from "not provided").
-            page_fields = {"source_query", "tags", "max_tokens"} & body.model_fields_set
+            page_fields = {"source_query", "tags", "max_tokens", "trigger"} & body.model_fields_set
             if page_fields:
                 did_change = True
                 updated = await app.state.memory.update_knowledge_page(
@@ -5884,6 +5900,10 @@ def _register_routes(app: FastAPI):
                     source_query=body.source_query if "source_query" in page_fields else None,
                     tags=body.tags if "tags" in page_fields else None,
                     max_tokens=body.max_tokens if "max_tokens" in page_fields else None,
+                    # Only the trigger fields the client stated: the engine patches them over
+                    # the page's current trigger, and a full dump would carry this model's own
+                    # defaults (mode="full", exclude_mental_models=False) into every update.
+                    trigger=(body.trigger.model_dump(exclude_unset=True) if body.trigger else None),
                     request_context=request_context,
                 )
                 # A new source query means the content is stale — rebuild it.
@@ -5895,7 +5915,8 @@ def _register_routes(app: FastAPI):
                     )
             if not did_change:
                 raise HTTPException(
-                    status_code=400, detail="Provide name, parent_id, source_query, tags, and/or max_tokens to update"
+                    status_code=400,
+                    detail="Provide name, parent_id, source_query, tags, max_tokens, and/or trigger to update",
                 )
             if updated is None:
                 raise HTTPException(status_code=404, detail=f"Knowledge node '{node_id}' not found")
