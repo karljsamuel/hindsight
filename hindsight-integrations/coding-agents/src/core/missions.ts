@@ -236,13 +236,61 @@ export const PAGES: KnowledgePage[] = [
   },
 ];
 
-// Refresh policy shared by every seeded page: a living document, rebuilt from all three fact
-// tiers whenever consolidation produces new material.
+// Refresh policy shared by every page this plugin creates — the seeded taxonomy above and the
+// per-initiative pages `captureInitiative` adds.
 export const PAGE_MAX_TOKENS = 4096;
-export const PAGE_TRIGGER = {
-  fact_types: ["world", "experience", "observation"],
-  refresh_after_consolidation: true,
-} as const;
+
+/** A page's `trigger`, in the API's own shape (see MentalModelTrigger in api/http.py). */
+export interface PageTrigger {
+  fact_types: string[];
+  refresh_after_consolidation?: boolean;
+  refresh_cron?: string;
+}
+
+/** A page synthesizes from all three tiers; the fact types are not a preference. */
+export const PAGE_FACT_TYPES = ["world", "experience", "observation"];
+
+/** The config fields that shape the trigger (a subset of Config — see core/config.ts). */
+export interface PageTriggerConfig {
+  pageTriggerType?: "auto-refresh" | "cron" | "manual";
+  pageTriggerCron?: string;
+}
+
+/**
+ * How this project's pages keep themselves current.
+ *
+ * WHEN is the only part of this that is a preference. `auto-refresh` — the default, and what every
+ * page shipped with — keeps a living document, rebuilt whenever consolidation produced new
+ * material: the most current setting and the most expensive, since a busy repo consolidates
+ * constantly and each pass is an LLM synthesis per page (#3506). `cron` bounds that to a schedule
+ * (the server skips a tick when nothing changed), `manual` refreshes only when something asks. A page is a mental model like any
+ * other, so the scheduler picks it up either way (`mental_models_with_cron()` filters on nothing
+ * but a non-empty `refresh_cron`).
+ *
+ * HOW a page refreshes is deliberately NOT stated here. `create_knowledge_page` owns that
+ * (`KNOWLEDGE_PAGE_DEFAULT_TRIGGER`: delta refresh, no sibling pages in the reflect loop) and
+ * merges a client's fields over it, so this sends only what it actually means and inherits the
+ * rest. Restating the server's own defaults here would just freeze a copy of them that drifts the
+ * next time they change.
+ *
+ * `fact_types` IS ours to state: the server's page default is observation-only, while these pages
+ * are tag-scoped syntheses over the `knowledge:<tier>` labels the extractor puts on world and
+ * experience facts.
+ *
+ * `refresh_after_consolidation` and `refresh_cron` are mutually exclusive server-side, so exactly
+ * one of them is ever set here.
+ */
+export function buildPageTrigger(cfg: PageTriggerConfig = {}): PageTrigger {
+  const base: PageTrigger = { fact_types: PAGE_FACT_TYPES };
+  switch (cfg.pageTriggerType) {
+    case "cron":
+      return { ...base, refresh_cron: cfg.pageTriggerCron };
+    case "manual":
+      return { ...base, refresh_after_consolidation: false };
+    default:
+      return { ...base, refresh_after_consolidation: true };
+  }
+}
 
 // ── the bank template ──────────────────────────────────────────────────────────
 // The bank's CONFIG — missions, retain strategies, entity labels — as a single manifest for

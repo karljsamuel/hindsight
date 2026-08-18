@@ -16,6 +16,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_SEED_LIMIT } from "./seed";
 import { isOptedIn } from "./bank";
+import { log } from "./log";
 
 /** Default config-file path: ~/.hindsight/coding-agent.json */
 export // HINDSIGHT_CONFIG joins the two env exceptions (diag/log files): it points at THE config file,
@@ -84,6 +85,17 @@ export interface RawConfig {
   reflectTimeoutMs?: number; // session-start reflect timeout (default 120000; hooks cap lower internally)
   autoReflect?: boolean; // inject a one-time reflect synthesis on the session's first prompt (default true; false = the agent reflects only via the hindsight_reflect tool, and the tool guide tells it to do so on new goals)
   pageRefreshEveryTurns?: number; // knowledge-page refresh cadence in user turns (default 10)
+  /** What it COSTS to keep this project's knowledge pages current — the trigger stamped on every
+   *  page this plugin creates (the seeded taxonomy and each captured initiative):
+   *    "auto-refresh" (default) — refresh after every consolidation that produced new material
+   *    "cron"                   — refresh on `pageTriggerCron` only, and only when actually stale
+   *    "manual"                 — never refresh on its own; the tools and control plane still can
+   *  Auto-refresh is both the most current and the most expensive: one LLM synthesis per page per
+   *  consolidation, which adds up fast across auto-surveyed repos (#3506). Existing pages keep the
+   *  trigger they were created with — this changes what NEW pages get. */
+  pageTriggerType?: "auto-refresh" | "cron" | "manual";
+  /** Schedule for `pageTriggerType: "cron"` — UTC, standard 5-field cron, e.g. "0 3 * * *". */
+  pageTriggerCron?: string;
   autoSeed?: boolean; // SessionStart: auto-seed a cold repo's bank from git history (default true)
   seedLimit?: number; // SessionStart auto-seed: most-recent-N-commits cap (default 300)
   codebaseSurvey?: boolean; // SessionStart: spawn a headless claude to survey a cold repo's structure (default true)
@@ -147,6 +159,8 @@ export interface Config {
   reflectTimeoutMs: number;
   autoReflect: boolean;
   pageRefreshEveryTurns: number;
+  pageTriggerType: "auto-refresh" | "cron" | "manual";
+  pageTriggerCron?: string;
   autoSeed: boolean;
   seedLimit: number;
   codebaseSurvey: boolean;
@@ -158,6 +172,26 @@ export interface Config {
   retainMetadata: Record<string, string>;
   banks: Record<string, Omit<RawConfig, "banks" | "harnesses"> & { bank?: string }>;
   logLevel: "debug" | "info" | "warn" | "error";
+}
+
+/**
+ * Which page-refresh trigger a raw config asks for.
+ *
+ * `"cron"` without a `pageTriggerCron` is a broken config, not a request to stop refreshing: the
+ * API rejects a cron trigger with no expression, which would fail page creation outright. Fall
+ * back to the default and say so — a user who wants pages to stop refreshing writes "manual".
+ */
+function resolvePageTriggerType(raw: RawConfig): "auto-refresh" | "cron" | "manual" {
+  if (raw.pageTriggerType === "manual") return "manual";
+  if (raw.pageTriggerType === "cron") {
+    if (raw.pageTriggerCron?.trim()) return "cron";
+    log.warn(
+      "config",
+      'pageTriggerType "cron" needs pageTriggerCron (UTC 5-field, e.g. "0 3 * * *") — ' +
+        'falling back to "auto-refresh"'
+    );
+  }
+  return "auto-refresh";
 }
 
 /** Apply defaults to a raw (file) config. Pure — the single place the defaults live. */
@@ -198,6 +232,8 @@ export function resolveConfig(raw: RawConfig = {}): Config {
     reflectTimeoutMs: raw.reflectTimeoutMs || 120000,
     autoReflect: raw.autoReflect ?? true,
     pageRefreshEveryTurns: raw.pageRefreshEveryTurns || 10,
+    pageTriggerType: resolvePageTriggerType(raw),
+    pageTriggerCron: raw.pageTriggerCron?.trim() || undefined,
     autoSeed: raw.autoSeed ?? true,
     seedLimit: raw.seedLimit || DEFAULT_SEED_LIMIT,
     codebaseSurvey: raw.codebaseSurvey ?? true,
@@ -300,6 +336,8 @@ const ENV_KEYS = {
   reflectTimeoutMs: "HINDSIGHT_REFLECT_TIMEOUT_MS",
   autoReflect: "HINDSIGHT_AUTO_REFLECT",
   pageRefreshEveryTurns: "HINDSIGHT_PAGE_REFRESH_EVERY_TURNS",
+  pageTriggerType: "HINDSIGHT_PAGE_TRIGGER_TYPE",
+  pageTriggerCron: "HINDSIGHT_PAGE_TRIGGER_CRON",
   autoSeed: "HINDSIGHT_AUTO_SEED",
   seedLimit: "HINDSIGHT_SEED_LIMIT",
   codebaseSurvey: "HINDSIGHT_CODEBASE_SURVEY",
