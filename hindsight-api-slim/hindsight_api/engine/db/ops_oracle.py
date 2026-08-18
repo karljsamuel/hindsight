@@ -696,6 +696,21 @@ class OracleOps(DataAccessOps):
         # Entity expansion via observation_sources junction table.
         # Previously used JSON_TABLE to explode source_memory_ids CLOB. The junction
         # table approach uses standard SQL joins, identical to the PG backend.
+        #
+        # Two PostgreSQL fixes are deliberately NOT mirrored here, because neither
+        # was measured against Oracle and both are tuned to PostgreSQL's planner:
+        #   - #3085 made PG score set-wise; the scoring below is still the
+        #     correlated per-observation COUNT(*). On Oracle that counts rows of
+        #     the indexed observation_sources junction table rather than scanning
+        #     an unpruned array, so it is a much weaker version of that problem.
+        #   - #3510 replaced PG's `DISTINCT` over a `LATERAL ... LIMIT` with a
+        #     row_number() window, because PostgreSQL cannot estimate the row count
+        #     of that shape and mis-planned the scoring join into a nested loop.
+        #     `connected_sources` below has the same shape, so the same collapse is
+        #     structurally possible, but Oracle's cardinality estimation differs and
+        #     no Oracle instance was available to measure it.
+        # If observation recall is reported slow on Oracle, start by capturing the
+        # plan for connected_sources and checking its estimated vs actual rows.
         from ..schema import fq_table
 
         obs_sources_table = fq_table("observation_sources")
