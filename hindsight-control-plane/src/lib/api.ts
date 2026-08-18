@@ -1059,6 +1059,7 @@ export class ControlPlaneClient {
       occurredEnd?: string;
       factType?: "world" | "experience";
       entities?: string[];
+      resolveEntities?: boolean;
       state?: "valid" | "invalidated";
       reason?: string;
     }
@@ -1070,6 +1071,7 @@ export class ControlPlaneClient {
     if (update.occurredEnd !== undefined) body.occurred_end = update.occurredEnd;
     if (update.factType !== undefined) body.fact_type = update.factType;
     if (update.entities !== undefined) body.entities = update.entities;
+    if (update.resolveEntities !== undefined) body.resolve_entities = update.resolveEntities;
     if (update.state !== undefined) body.state = update.state;
     if (update.reason !== undefined) body.reason = update.reason;
     return this.fetchApi(memoryApi(memoryId, bankId), {

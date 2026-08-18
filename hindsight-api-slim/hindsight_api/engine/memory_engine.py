@@ -8439,6 +8439,7 @@ class MemoryEngine(MemoryEngineInterface):
         occurred_end: str | None = None,
         new_fact_type: str | None = None,
         entities: list[str] | None = None,
+        resolve_entities: bool = True,
         state: str | None = None,
         reason: str | None = None,
         request_context: "RequestContext",
@@ -8456,9 +8457,18 @@ class MemoryEngine(MemoryEngineInterface):
           observations + temporal/semantic links, and re-consolidates. For date/context fields,
           ``""`` clears to NULL and ``None`` leaves unchanged; ``new_fact_type``
           must be world/experience. ``entities`` (when not None) replaces the
-          unit's entity set: names are resolved/find-or-created via the same
-          resolver retain uses, ``unit_entities`` + cooccurrence are rebuilt, and
-          ``[]`` detaches all entities. Entities orphaned by the swap, and any
+          unit's entity set, ``unit_entities`` + cooccurrence are rebuilt, and
+          ``[]`` detaches all entities. ``resolve_entities`` decides how those
+          names find their entities. When True (the default, and what retain
+          does) each name is resolved against the bank: a similar existing entity
+          that scores above the match threshold is reused. When False the names
+          are taken literally — an existing entity is reused only on a
+          case-insensitive name match, any other name creates its own entity, and
+          same-request names are never merged with each other. Hand-authored
+          corrections want False: with resolution on, a similar-but-wrong entity
+          that is well connected to the other names in the same edit outscores
+          the one the caller named, and the correction lands on it silently
+          (#3479). Entities orphaned by the swap, and any
           now-stale cooccurrence rows, are reclaimed by the graph-maintenance
           sweep that this edit submits (entity edges live in ``unit_entities``,
           not ``memory_links``, so there is nothing to relink directly).
@@ -8607,6 +8617,14 @@ class MemoryEngine(MemoryEngineInterface):
                     # resolve_entities_only find-or-creates the corrected entities (idempotent) and
                     # autocommits them on this short connection; the Phase-2 relink writes exactly
                     # this resolved set, keeping the stored embedding consistent with the links.
+                    #
+                    # resolve_entities decides whether these names are a correction or another
+                    # guess (#3479). It defaults to True — retain's behaviour, kept as the default
+                    # so existing callers are unaffected — under which a similar-but-wrong entity
+                    # that is well-connected to the other names in this same list outscores the one
+                    # the caller actually named, and the edit lands on it with a 200 and no warning.
+                    # Callers correcting a fact by hand should pass False, which reuses an existing
+                    # entity only on a case-insensitive name match.
                     entities_resolved = True
                     entity_resolution = await resolve_entities_only(
                         self.entity_resolver,
@@ -8616,7 +8634,7 @@ class MemoryEngine(MemoryEngineInterface):
                         [new_text],
                         new_context or "",
                         [entity_date],
-                        [[{"text": name, "type": "CONCEPT"} for name in new_entities]],
+                        [[{"text": name, "type": "CONCEPT", "resolve": resolve_entities} for name in new_entities]],
                         entity_labels=entity_labels,
                     )
                     resolved_for_unit = entity_resolution.unit_to_entity_ids.get(str(memory_uuid), [])
