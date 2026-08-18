@@ -359,6 +359,7 @@ hook by Codex...), so one shared config serves several agents side by side:
 | `resolveWorktrees`      | `true`                               | `{gitProject}`: linked worktrees share the main repo's bank                                                                                                                                                                                                                                                                                                                                                                                       |
 | `retainTags`            | —                                    | extra tags on every document written by the integration, e.g. `["project:{gitProject}"]` — see **Recording where a memory came from** below                                                                                                                                                                                                                                                                                                       |
 | `retainMetadata`        | —                                    | extra metadata on every document written by the integration, e.g. `{"repo": "{gitProject}"}`                                                                                                                                                                                                                                                                                                                                                      |
+| `observationScopes`     | `"shared"`                           | how consolidation groups observations: `"shared"` (default) = ONE global scope per bank, so every agent on a repo builds one set of beliefs; also `"combined"` (the server default), `"per_tag"`, `"all_combinations"`, `[["t"]]`                                                                                                                                                                                                                 |
 | `disabled`              | `false`                              | hard off-switch (inert plugin/hook — a no-memory baseline)                                                                                                                                                                                                                                                                                                                                                                                        |
 | `reflectTimeoutMs`      | `120000`                             | session-reflect timeout (hook harnesses additionally cap it at 25s to fit the host's hook window); on timeout the session runs without reflect (recorded)                                                                                                                                                                                                                                                                                         |
 | `pageRefreshEveryTurns` | `10`                                 | refetch the knowledge pages and re-inject the page roster + tool guide every N user turns                                                                                                                                                                                                                                                                                                                                                         |
@@ -481,6 +482,35 @@ of. Both accept the same placeholders as `bankIdTemplate` — `{gitProject}`, `{
 
 The plugin's own `source:` and `harness:` tags are reserved: entries in those namespaces are ignored
 with a warning, so a document's agent attribution always reflects the agent that actually wrote it.
+
+### One set of beliefs per repo
+
+Every document this integration writes carries provenance tags — `source:chat`, `harness:<id>`,
+`knowledge:<kind>`, plus anything from `retainTags`. Those tags say **who wrote** a memory; they are
+what filters recall and draws each document's agent logo, and they stay on the facts.
+
+They are not, however, a good boundary for [observations](/developer/observations). Consolidation's own
+default (`combined`) builds one observation set per distinct tag set, so the same repository
+worked on by two agents would grow two parallel sets of beliefs — one per harness — that never
+merge, each blind to the other, at double the consolidation cost. Which agent happened to be typing
+does not change whether a convention or a decision is true.
+
+So the integration retains with `observationScopes: "shared"`: one global, untagged observation
+scope per bank, which is what a bank already is — one project's memory. Set the field to change it:
+
+```jsonc
+{
+  "observationScopes": "combined", // one observation set per distinct tag set (server default)
+  "banks": {
+    "coding-agent::mono": { "observationScopes": "per_tag" }, // per-repo, like any behavioral field
+  },
+}
+```
+
+`"per_tag"` and `"all_combinations"` split further still, and an explicit `[["project:demo"], …]`
+declares the scopes literally. `HINDSIGHT_OBSERVATION_SCOPES` sets the scalar modes; a scope list is
+file-only. Changing this does not rewrite observations already consolidated under the old scoping —
+they stay where they were built, and new work accrues under the new setting.
 
 ## Diagnostics & logging
 

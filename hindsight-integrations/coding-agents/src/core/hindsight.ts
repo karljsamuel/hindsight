@@ -26,6 +26,27 @@ export interface KnowledgeNode {
   children?: KnowledgeNode[];
 }
 
+/**
+ * How consolidation scopes the observations a retained memory feeds (`observation_scopes` on the
+ * retain API). The scalar modes are the server's; a `string[][]` declares the scopes explicitly.
+ */
+export type ObservationScopes = "shared" | "combined" | "per_tag" | "all_combinations" | string[][];
+
+/**
+ * One global scope for everything this plugin writes.
+ *
+ * The server default (`combined`) scopes an observation to the memory's WHOLE tag set, and every
+ * document we write carries provenance tags — `source:chat`, `harness:<id>`, `knowledge:<kind>`,
+ * anything from `retainTags`. That splits one repository's knowledge into a separate observation
+ * set per tag combination: work the same repo with two agents and the harness tag alone gives two
+ * parallel sets of beliefs that never merge, each blind to the other, at double the consolidation
+ * cost (#3564). Those tags are provenance — they say who wrote a memory, not which project the
+ * belief is about — so they belong on the facts (where they still filter recall) and not on the
+ * consolidation boundary. `shared` keeps them on the facts and consolidates into ONE untagged
+ * scope per bank, which is what a bank already is: one project's memory.
+ */
+export const DEFAULT_OBSERVATION_SCOPES: ObservationScopes = "shared";
+
 export interface ClientOpts {
   apiUrl: string;
   apiToken?: string;
@@ -37,6 +58,8 @@ export interface ClientOpts {
   log?: (msg: string) => void;
   /** Cap on concurrent retain-related requests (drain op polls, deepen pools). Default 10. */
   maxParallelRetains?: number;
+  /** Observation scoping for every retain this client sends. Default `DEFAULT_OBSERVATION_SCOPES`. */
+  observationScopes?: ObservationScopes;
 }
 
 export interface RetainOpts {
@@ -126,6 +149,7 @@ export class HindsightClient {
   private idempotentRetain: boolean | undefined;
   private readonly log: (msg: string) => void;
   readonly maxParallelRetains: number;
+  readonly observationScopes: ObservationScopes;
 
   constructor(o: ClientOpts) {
     this.apiUrl = o.apiUrl.replace(/\/$/, "");
@@ -134,6 +158,7 @@ export class HindsightClient {
     this.project = o.project;
     this.log = o.log ?? (() => {});
     this.maxParallelRetains = o.maxParallelRetains || DEFAULT_MAX_PARALLEL_RETAINS;
+    this.observationScopes = o.observationScopes ?? DEFAULT_OBSERVATION_SCOPES;
   }
 
   private headers(): Record<string, string> {
@@ -184,6 +209,10 @@ export class HindsightClient {
       document_id: documentId,
       tags,
       strategy,
+      // Sent on EVERY retain, including the server default `combined`, so the scoping a bank's
+      // observations were built under is a property of the write rather than of whichever server
+      // version happened to process it. Servers older than 0.4.15 ignore the field.
+      observation_scopes: this.observationScopes,
     };
     if (opts.timestamp) item.timestamp = opts.timestamp;
     if (opts.metadata) item.metadata = opts.metadata;

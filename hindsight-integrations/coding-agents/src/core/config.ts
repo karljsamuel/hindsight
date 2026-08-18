@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { DEFAULT_SEED_LIMIT } from "./seed";
 import { isOptedIn } from "./bank";
 import { log } from "./log";
+import { DEFAULT_OBSERVATION_SCOPES, type ObservationScopes } from "./hindsight";
 
 /** Default config-file path: ~/.hindsight/coding-agent.json */
 export // HINDSIGHT_CONFIG joins the two env exceptions (diag/log files): it points at THE config file,
@@ -118,6 +119,12 @@ export interface RawConfig {
   /** Extra metadata stamped on every session write-back, e.g. {"repo": "{gitProject}"}. Same
    *  placeholders as retainTags; built-in metadata (harness attribution) wins on conflict. */
   retainMetadata?: Record<string, string>;
+  /** How consolidation groups the observations this plugin's memories feed (default "shared" — one
+   *  global scope per bank, so every agent working a repo builds ONE set of beliefs; see
+   *  DEFAULT_OBSERVATION_SCOPES). "combined" restores the server default of one scope per distinct
+   *  tag set, "per_tag" one per tag, "all_combinations" one per subset; a string[][] declares the
+   *  scopes literally. Anything else falls back to the default. */
+  observationScopes?: ObservationScopes;
   /** Per-harness overrides of any of the fields above, keyed by harness name ("opencode",
    *  "claude-code", ...). Lets one config file give each agent its own bank/settings. */
   harnesses?: Record<string, Omit<RawConfig, "harnesses">>;
@@ -170,6 +177,7 @@ export interface Config {
   gitIngest: "message" | "full" | "none";
   retainTags: string[];
   retainMetadata: Record<string, string>;
+  observationScopes: ObservationScopes;
   banks: Record<string, Omit<RawConfig, "banks" | "harnesses"> & { bank?: string }>;
   logLevel: "debug" | "info" | "warn" | "error";
 }
@@ -192,6 +200,35 @@ function resolvePageTriggerType(raw: RawConfig): "auto-refresh" | "cron" | "manu
     );
   }
   return "auto-refresh";
+}
+
+/** The server's scalar scoping modes; anything else in this field has to be an explicit scope list. */
+const OBSERVATION_SCOPE_MODES = ["shared", "combined", "per_tag", "all_combinations"] as const;
+
+/**
+ * Validate `observationScopes`, falling back to the default on anything unrecognized.
+ *
+ * A typo here would otherwise reach the API as an unknown scoping mode and change how a whole
+ * bank's observations are grouped, so an unusable value takes the default rather than travelling.
+ * An empty list is unusable too, and specifically so: `[]` declares ZERO scopes, which the server
+ * reads as "no spec" and silently treats as `combined` — the opposite of what writing this field
+ * at all was meant to express.
+ */
+function resolveObservationScopes(raw: RawConfig["observationScopes"]): ObservationScopes {
+  // Widened deliberately: this arrives from a hand-edited JSON file, so the declared type says what
+  // is meant, not what is there.
+  const value: unknown = raw;
+  if (typeof value === "string")
+    return (OBSERVATION_SCOPE_MODES as readonly string[]).includes(value)
+      ? (value as ObservationScopes)
+      : DEFAULT_OBSERVATION_SCOPES;
+  if (Array.isArray(value)) {
+    const scopes = (value as unknown[])
+      .filter((scope): scope is unknown[] => Array.isArray(scope))
+      .map((scope) => scope.filter((t): t is string => typeof t === "string" && t.trim() !== ""));
+    if (scopes.length) return scopes;
+  }
+  return DEFAULT_OBSERVATION_SCOPES;
 }
 
 /** Apply defaults to a raw (file) config. Pure — the single place the defaults live. */
@@ -254,6 +291,7 @@ export function resolveConfig(raw: RawConfig = {}): Config {
             Object.entries(raw.retainMetadata).filter(([, v]) => typeof v === "string")
           )
         : {},
+    observationScopes: resolveObservationScopes(raw.observationScopes),
     banks: raw.banks && typeof raw.banks === "object" ? raw.banks : {},
     logLevel: ["debug", "info", "warn", "error"].includes(raw.logLevel as string)
       ? (raw.logLevel as "debug" | "info" | "warn" | "error")
@@ -346,6 +384,9 @@ const ENV_KEYS = {
   surveyRefreshCommits: "HINDSIGHT_SURVEY_REFRESH_COMMITS",
   logLevel: "HINDSIGHT_LOG_LEVEL",
   gitIngest: "HINDSIGHT_GIT_INGEST",
+  // Scalar modes only ("shared", "combined", "per_tag", "all_combinations"). An explicit scope
+  // list is a list OF lists, which does not survive flattening into one variable — file-only.
+  observationScopes: "HINDSIGHT_OBSERVATION_SCOPES",
   // Comma-separated, e.g. HINDSIGHT_RETAIN_TAGS="project:{gitProject},env:work". A LIST rather than
   // a map, so it flattens cleanly; its sibling retainMetadata stays file-only for the reason above.
   retainTags: "HINDSIGHT_RETAIN_TAGS",

@@ -138,6 +138,7 @@ async function main() {
       // worktree-aware name the gitlog document id uses, so all worktrees agree on it.
       project: repoNameOf(REPO!),
       maxParallelRetains: cfg.maxParallelRetains,
+      observationScopes: cfg.observationScopes,
       log,
     });
     log(`deepen -> ${client.apiUrl} bank=${FINAL_BANK} harness=${harness.name}`);

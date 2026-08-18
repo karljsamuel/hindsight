@@ -54,6 +54,7 @@ async function main() {
     apiToken: cfg.apiToken,
     bank: bankId,
     maxParallelRetains: cfg.maxParallelRetains,
+    observationScopes: cfg.observationScopes,
   });
 
   const server = new McpServer({ name: "hindsight", version: "0.1.0" });
