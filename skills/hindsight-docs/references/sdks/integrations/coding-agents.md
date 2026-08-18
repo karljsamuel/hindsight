@@ -484,7 +484,8 @@ Every document this integration writes carries provenance tags — `source:chat`
 `knowledge:<kind>`, plus anything from `retainTags`. Those tags say **who wrote** a memory; they are
 what filters recall and draws each document's agent logo, and they stay on the facts.
 
-They are not, however, a good boundary for [observations](../../developer/observations.md). Consolidation's own
+They are not, however, a good boundary for
+[observations](../../developer/observations.md). Consolidation's own
 default (`combined`) builds one observation set per distinct tag set, so the same repository
 worked on by two agents would grow two parallel sets of beliefs — one per harness — that never
 merge, each blind to the other, at double the consolidation cost. Which agent happened to be typing
