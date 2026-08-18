@@ -359,8 +359,16 @@ def oracle_db_url(_oracle_admin_dsn):
                 f'CREATE USER {test_user} IDENTIFIED BY "{test_pass}" DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS'
             )
         except oracledb.DatabaseError as e:
-            if hasattr(e.args[0], "code") and e.args[0].code == 1920:
+            code = getattr(e.args[0], "code", None)
+            if code == 1920:
                 # ORA-01920: user name conflicts with another user or role name
+                pass
+            elif code == 1031:
+                # ORA-01031: we are not an admin. CI provisions the user with a
+                # privileged account before pytest runs and then points
+                # ORACLE_TEST_DSN at that same unprivileged user, so this bootstrap
+                # cannot (and need not) create it. Assume it exists — if it does
+                # not, run_migrations below fails with a plain login error.
                 pass
             else:
                 raise
