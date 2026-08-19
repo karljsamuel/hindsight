@@ -140,6 +140,7 @@ from hindsight_client_api.models.reflect_request import ReflectRequest
 from hindsight_client_api.models.reflect_response import ReflectResponse
 from hindsight_client_api.models.reflect_tool_call import ReflectToolCall
 from hindsight_client_api.models.reflect_trace import ReflectTrace
+from hindsight_client_api.models.refresh_mental_model_operation_details import RefreshMentalModelOperationDetails
 from hindsight_client_api.models.reprocess_document_response import ReprocessDocumentResponse
 from hindsight_client_api.models.retain_request import RetainRequest
 from hindsight_client_api.models.retain_response import RetainResponse

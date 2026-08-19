@@ -3159,6 +3159,7 @@ export type MentalModelDryRunRefreshResult = {
    */
   outcome:
     | "content_written"
+    | "content_unchanged"
     | "content_preserved_no_new_facts"
     | "refresh_failed_empty_candidate"
     | "refresh_failed_delta_not_applied";
@@ -3391,6 +3392,7 @@ export type MentalModelRefreshTrace = {
    */
   outcome:
     | "content_written"
+    | "content_unchanged"
     | "content_preserved_no_new_facts"
     | "refresh_failed_empty_candidate"
     | "refresh_failed_delta_not_applied";
@@ -3921,6 +3923,10 @@ export type OperationResponse = {
    */
   mental_model_id?: string | null;
   /**
+   * Typed, per-operation-type outcome detail, discriminated by its own `operation_type`. Populated for `refresh_mental_model` operations that have finished; null for operation types that report no typed detail, for operations still in flight, and for operations recorded before this field existed. Unlike `result_metadata` this is a supported field — new operation types add their own shape here rather than flattening fields onto the operation.
+   */
+  details?: RefreshMentalModelOperationDetails | null;
+  /**
    * Created At
    */
   created_at: string;
@@ -4014,6 +4020,10 @@ export type OperationStatusResponse = {
   result_metadata?: {
     [key: string]: unknown;
   } | null;
+  /**
+   * Typed, per-operation-type outcome detail, discriminated by its own `operation_type`. Populated for `refresh_mental_model` operations that have finished; null for operation types that report no typed detail, for operations still in flight, and for operations recorded before this field existed. Unlike `result_metadata` this is a supported field — new operation types add their own shape here rather than flattening fields onto the operation.
+   */
+  details?: RefreshMentalModelOperationDetails | null;
   /**
    * Child Operations
    *
@@ -4607,6 +4617,54 @@ export type ReflectTrace = {
    * LLM calls made during reflection
    */
   llm_calls?: Array<ReflectLlmCall>;
+};
+
+/**
+ * RefreshMentalModelOperationDetails
+ *
+ * What a refresh_mental_model operation did, on the operation record itself.
+ *
+ * Reported under an async operation's ``details``, which is keyed by
+ * ``operation_type``: each type that has a typed outcome to report contributes
+ * its own shape there, rather than every type's fields being flattened onto the
+ * operation. Today refresh is the only one.
+ *
+ * This exists because ``result_metadata`` — the only per-refresh record kept
+ * indefinitely — could not say what a refresh did (#3274), and is documented as
+ * debug-only and unstable, so it is not something a caller can build on.
+ */
+export type RefreshMentalModelOperationDetails = {
+  /**
+   * Operation Type
+   *
+   * Discriminator: which operation type this detail describes.
+   */
+  operation_type?: "refresh_mental_model";
+  /**
+   * Outcome
+   *
+   * What the refresh did with the document: rewrote it (`content_written`), produced a document identical to the stored one (`content_unchanged`), had no new facts to read at all (`content_preserved_no_new_facts`), or refused to write (the `refresh_failed_*` values).
+   */
+  outcome:
+    | "content_written"
+    | "content_unchanged"
+    | "content_preserved_no_new_facts"
+    | "refresh_failed_empty_candidate"
+    | "refresh_failed_delta_not_applied"
+    | "refresh_failed_structured_output";
+  /**
+   * Failure Reason
+   *
+   * Why the refresh refused to write, finer-grained than the outcome — it distinguishes an op call that failed from one whose operations were all rejected, and from a baseline document that could not be read. Null unless `outcome` is one of the `refresh_failed_*` values.
+   */
+  failure_reason?:
+    | "empty_candidate"
+    | "structured_doc_unreadable"
+    | "delta_ops_failed"
+    | "delta_ops_all_skipped"
+    | "delta_not_applied"
+    | "structured_output_failed"
+    | null;
 };
 
 /**

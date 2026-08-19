@@ -34,12 +34,82 @@ ModeFallbackReason = Literal[
     "delta_ops_all_skipped",
 ]
 
+# What a refresh did with the document, as the shared executor reports it — so
+# exactly what ``_execute_mental_model_refresh`` can return, and therefore what a
+# dry run can predict.
 RefreshOutcome = Literal[
     "content_written",
+    "content_unchanged",
     "content_preserved_no_new_facts",
     "refresh_failed_empty_candidate",
     "refresh_failed_delta_not_applied",
 ]
+
+# What a refresh did, as recorded on the operation. A superset of RefreshOutcome:
+# the persist path can still refuse a document the executor accepted, when
+# structured-output extraction fails against a configured response_schema. Kept
+# separate rather than widening RefreshOutcome, so the dry run does not advertise
+# an outcome it can never return — it never extracts structured output. Spelled
+# out rather than unioned because a union of Literals renders as an ``anyOf`` of
+# two enums in the OpenAPI schema, which the generated clients carry through.
+# ``test_operation_outcome_is_a_superset_of_executor_outcome`` pins the relationship.
+RefreshOperationOutcome = Literal[
+    "content_written",
+    "content_unchanged",
+    "content_preserved_no_new_facts",
+    "refresh_failed_empty_candidate",
+    "refresh_failed_delta_not_applied",
+    "refresh_failed_structured_output",
+]
+
+# Why a refresh refused to write, matching the ``reflect_response.refresh_skipped``
+# value persisted alongside the preserved document. Finer-grained than the outcome:
+# ``refresh_failed_delta_not_applied`` alone does not say whether the op call failed,
+# every op was rejected, or the baseline document could not be read.
+RefreshFailureReason = Literal[
+    "empty_candidate",
+    "structured_doc_unreadable",
+    "delta_ops_failed",
+    "delta_ops_all_skipped",
+    "delta_not_applied",
+    "structured_output_failed",
+]
+
+
+class RefreshMentalModelOperationDetails(BaseModel):
+    """What a refresh_mental_model operation did, on the operation record itself.
+
+    Reported under an async operation's ``details``, which is keyed by
+    ``operation_type``: each type that has a typed outcome to report contributes
+    its own shape there, rather than every type's fields being flattened onto the
+    operation. Today refresh is the only one.
+
+    This exists because ``result_metadata`` — the only per-refresh record kept
+    indefinitely — could not say what a refresh did (#3274), and is documented as
+    debug-only and unstable, so it is not something a caller can build on.
+    """
+
+    operation_type: Literal["refresh_mental_model"] = Field(
+        default="refresh_mental_model",
+        description="Discriminator: which operation type this detail describes.",
+    )
+    outcome: RefreshOperationOutcome = Field(
+        description=(
+            "What the refresh did with the document: rewrote it (`content_written`), produced a "
+            "document identical to the stored one (`content_unchanged`), had no new facts to read "
+            "at all (`content_preserved_no_new_facts`), or refused to write (the `refresh_failed_*` "
+            "values)."
+        )
+    )
+    failure_reason: RefreshFailureReason | None = Field(
+        default=None,
+        description=(
+            "Why the refresh refused to write, finer-grained than the outcome — it distinguishes an "
+            "op call that failed from one whose operations were all rejected, and from a baseline "
+            "document that could not be read. Null unless `outcome` is one of the `refresh_failed_*` "
+            "values."
+        ),
+    )
 
 
 class MentalModelRefreshScope(BaseModel):
