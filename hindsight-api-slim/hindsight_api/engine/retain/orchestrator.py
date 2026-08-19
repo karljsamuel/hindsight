@@ -1033,6 +1033,7 @@ async def _delta_batch_write_ext(
     document_tags,
     document_body_override,
     doc_hash_at_load,
+    doc_watermark_at_load=None,
     new_chunk_metadata: list,
     delta_chunk_map: dict,
     new_chunks_with_contents: dict,
@@ -1059,15 +1060,37 @@ async def _delta_batch_write_ext(
 
     # Re-upload the document bodies (dedup by hash — only what changed moves). A store write, so it
     # belongs in the connection-free phase.
-    await _store_document_bodies(
-        bank_id=bank_id,
-        document_id=effective_doc_id,
-        combined_content=combined_content,
-        chunk_texts=[new_chunks_with_contents[i] for i in sorted(new_chunks_with_contents)],
-        merged_tags=merged_tags,
-        config=config,
-        retain_params=retain_params,
-    )
+    # This is the delta batch's fence for a store-owned bank, and it has to be its FIRST store
+    # write. `expect_watermark` guards on the namespace's WAL head, and this batch's own fact writes
+    # move that head — so performing the compare-and-set after them fences the batch against itself
+    # and a plain sequential append fails with "required WAL head < 10, but head was 12".
+    #
+    # Postgres does not need it here: it locks the `documents` row inside the connection phase
+    # below. A store-owned bank has no such row, which is why parallel appends used to plan against
+    # the same base and overwrite each other with every call returning success.
+    try:
+        await _store_document_bodies(
+            bank_id=bank_id,
+            document_id=effective_doc_id,
+            combined_content=combined_content,
+            chunk_texts=[new_chunks_with_contents[i] for i in sorted(new_chunks_with_contents)],
+            merged_tags=merged_tags,
+            config=config,
+            retain_params=retain_params,
+            expect_watermark=doc_watermark_at_load,
+        )
+    except ConcurrentAppendConflict:
+        # `_store_document_bodies` already translates the store's StoreWriteConflict into the
+        # retain-level ConcurrentAppendConflict, so that is what arrives here. Catching the store
+        # exception instead let it escape to the caller, turning a losable race into a failed
+        # request.
+        log_buffer.append(
+            f"[delta] Document {effective_doc_id} moved under this delta write — "
+            f"falling back to the full streaming retain"
+        )
+        logger.info("\n" + "\n".join(log_buffer) + "\n")
+        await provider.decide_txn(ext_txn, commit=False)
+        return _ExtDeltaWriteResult(fell_back=True, result_unit_ids=[])
 
     # Deterministic chunk ids for the new/changed chunks (mirrors chunk_storage.store_chunks_batch
     # after the delta remap), so facts can be tagged before the metadata rows are written.
@@ -1100,6 +1123,12 @@ async def _delta_batch_write_ext(
             async with conn.transaction():
                 # Ownership recheck: the delta diff was computed against a snapshot taken outside
                 # this txn; if the document was replaced since, the diff is stale — fall back.
+                #
+                # This is the SQL store's fence, and it only means anything where a `documents` row
+                # exists to lock. A store-owned bank is fenced earlier and differently — see the
+                # `expect_watermark` compare-and-set on `_store_document_bodies` above, which has to
+                # be the batch's FIRST store write because the guard is on the namespace's WAL head
+                # and this batch's own fact writes move it.
                 current_hash = await conn.fetchval(
                     f"SELECT content_hash FROM {fq_table('documents')} WHERE id = $1 AND bank_id = $2 FOR UPDATE",
                     effective_doc_id,
@@ -3149,9 +3178,7 @@ async def _try_delta_retain(
     from ..memories import get_memories as _get_memories_delta
 
     _delta_store = _get_memories_delta()
-    if _delta_store.store_owned_retain_for(bank_id):
-        return None
-    _store_owned_delta = False
+    _store_owned_delta = _delta_store.store_owned_retain_for(bank_id)
 
     # Need a single document_id
     effective_doc_id = document_id
@@ -3170,13 +3197,16 @@ async def _try_delta_retain(
         # separate id here — a chunk_id is `{bank_id}_{document_id}_{index}` by construction — and
         # the hash is recomputed from the text with the same function that wrote it, so the
         # comparison below is against like.
-        record = (
-            await _delta_store.get_document_record(bank_id=bank_id, document_id=effective_doc_id, include_text=True)
-            if document_body_override is not None
-            else None
+        # ONE record read, not two: it carries the content hash, the text when asked for it, and
+        # the watermark this plan will compare-and-set against when it writes. Reading the hash
+        # separately would leave the watermark un-paired with it, which is the pairing the CAS
+        # depends on.
+        record = await _delta_store.get_document_record(
+            bank_id=bank_id, document_id=effective_doc_id, include_text=document_body_override is not None
         )
-        doc_hash_at_load = await _delta_store.document_content_hash(bank_id=bank_id, document_id=effective_doc_id)
-        original_text_at_load = (record or {}).get("original_text") if record is not None else None
+        doc_hash_at_load = (record or {}).get("content_hash")
+        doc_watermark_at_load = (record or {}).get("watermark")
+        original_text_at_load = (record or {}).get("original_text") if document_body_override is not None else None
         _texts = await _delta_store.list_chunk_texts(bank_id=bank_id, document_id=effective_doc_id) or []
         existing_chunks = [
             chunk_storage.ExistingChunk(
@@ -3187,6 +3217,7 @@ async def _try_delta_retain(
             for index, text in enumerate(_texts)
         ]
     else:
+        doc_watermark_at_load = None  # SQL serializes on the documents row instead
         async with acquire_with_retry(pool) as conn:
             if document_body_override is not None:
                 doc_row_at_load = await conn.fetchrow(
@@ -3449,6 +3480,7 @@ async def _try_delta_retain(
                 document_tags=document_tags,
                 document_body_override=document_body_override,
                 doc_hash_at_load=doc_hash_at_load,
+                doc_watermark_at_load=doc_watermark_at_load,
                 new_chunk_metadata=new_chunk_metadata,
                 delta_chunk_map=delta_chunk_map,
                 new_chunks_with_contents=new_chunks_with_contents,
