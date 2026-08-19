@@ -38,7 +38,6 @@ from ..config import (
     DEFAULT_RECALL_INCLUDE_CHUNKS,
     DEFAULT_RECALL_MAX_TOKENS,
     DEFAULT_REFLECT_SOURCE_FACTS_MAX_TOKENS,
-    DEFAULT_RETAIN_CHUNK_SIZE,
     DEFAULT_STORE_DOCUMENT_TEXT,
     ENV_MODEL_INIT_TIMEOUT,
     HindsightConfig,
@@ -4896,8 +4895,8 @@ class MemoryEngine(MemoryEngineInterface):
     def _retain_chunking_config(config: HindsightConfig) -> _RetainChunkingConfig:
         """The chunk boundaries ``config`` implies, as the retain pipeline uses them."""
         return _RetainChunkingConfig(
-            chunk_size=getattr(config, "retain_chunk_size", DEFAULT_RETAIN_CHUNK_SIZE),
-            structured_chunk_size=getattr(config, "retain_structured_chunk_size", None),
+            chunk_size=config.retain_chunk_size,
+            structured_chunk_size=config.retain_structured_chunk_size,
         )
 
     async def _run_retain_execution(
