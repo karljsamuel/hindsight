@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveHarness, selectTools } from "./mcp-server";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { buildMcpServer, resolveHarness, selectTools } from "./mcp-server";
 import { resolveConfig } from "./core/config";
 import type { HindsightClient } from "./core/hindsight";
 
@@ -140,5 +142,23 @@ describe("every mcp-server.js registration names a harness", () => {
       return src.includes("mcp-server.js") && !SETS_HARNESS.test(src);
     });
     expect(nameless).toEqual([]);
+  });
+});
+
+describe("buildMcpServer", () => {
+  it("answers tools/list with an empty list when Hindsight is disabled", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const server = buildMcpServer([]);
+    const client = new Client({ name: "test-client", version: "0.1.0" });
+
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      expect(client.getServerCapabilities()).toMatchObject({ tools: { listChanged: false } });
+      await expect(client.listTools()).resolves.toEqual({ tools: [] });
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
 });
