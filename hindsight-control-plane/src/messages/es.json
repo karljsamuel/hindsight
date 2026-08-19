@@ -422,6 +422,11 @@
     "sourceFactsMaxTokensPerObservationDescription": "Máximo de tokens de hechos de origen considerados al generar una sola observación. Deja en blanco para usar el valor predeterminado del servidor.",
     "maxObservationsPerScopeLabel": "Máx. observaciones por ámbito",
     "maxObservationsPerScopeDescription": "Límite del número de observaciones almacenadas por ámbito tras la consolidación. Deja en blanco para usar el valor predeterminado del servidor.",
+    "mentalModelMinRefreshIntervalLabel": "Intervalo mínimo de actualización de modelos mentales",
+    "mentalModelMinRefreshIntervalDescription": "Segundos mínimos entre dos actualizaciones automáticas del mismo modelo mental en este banco. Una actualización disparada antes se encola y espera a que cierre la ventana, y los disparos siguientes se fusionan con ella: una ráfaga de retains cuesta una sola actualización en vez de una por retain. Las actualizaciones manuales siempre se ejecutan de inmediato. Déjalo vacío para usar el valor predeterminado del servidor; 0 significa sin límite. Un modelo concreto puede anularlo en sus propios ajustes de actualización.",
+    "mentalModelsTitle": "Modelos mentales y páginas de conocimiento",
+    "mentalModelsDescription": "Cómo se mantienen actualizados los modelos mentales de este banco y las páginas de conocimiento que se apoyan en ellos.",
+    "mentalModelsFailedToSave": "No se pudieron guardar los ajustes de modelos mentales",
     "serverDefault": "Predeterminado del servidor",
     "addStrategy": "Añadir estrategia",
     "nameLabel": "Nombre",
@@ -490,13 +495,15 @@
     "unknown": "Desconocido",
     "notAvailable": "N/D",
     "operationDetailsLoadError": "No se pudieron cargar los detalles de la operación",
+    "deferredUntilTitle": "Aplazada hasta {time}",
     "status": {
       "all": "Todos",
       "pending": "Pendiente",
       "processing": "En proceso",
       "completed": "Completada",
       "failed": "Fallida",
-      "cancelled": "Cancelada"
+      "cancelled": "Cancelada",
+      "deferred": "Aplazada"
     },
     "operationType": {
       "all": "Todos los tipos",
@@ -832,6 +839,9 @@
     "optionsRefreshCronLabel": "Actualización programada (cron)",
     "optionsRefreshCronPlaceholder": "min hora día mes díaSem  ·  ej. 0 3 * * * (diario 03:00 UTC)",
     "optionsRefreshCronDescription": "Actualiza según una programación cron fija en UTC. Mutuamente excluyente con la actualización con nuevas memorias. Una actualización programada solo se ejecuta cuando nuevas memorias cambian el ámbito de este modelo. Déjalo vacío para desactivarlo.",
+    "optionsMinRefreshIntervalLabel": "Intervalo mínimo de actualización (segundos)",
+    "optionsMinRefreshIntervalPlaceholder": "Predeterminado (heredar)",
+    "optionsMinRefreshIntervalDescription": "Límite inferior de la frecuencia de las actualizaciones automáticas. Un disparador que llega antes se encola y queda en espera hasta que cierra la ventana, y los siguientes se fusionan con él: una ráfaga de retains cuesta una sola actualización. Las actualizaciones manuales siempre se ejecutan de inmediato. 0 o vacío = sin límite.",
     "optionsSectionTags": "Etiquetas",
     "optionsTagsLabel": "Etiquetas",
     "optionsTagsPlaceholder": "Ej.: proyecto-x, equipo-alpha (separadas por comas)",

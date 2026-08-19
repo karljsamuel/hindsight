@@ -422,6 +422,11 @@
     "sourceFactsMaxTokensPerObservationDescription": "Maximale Anzahl Tokens von Quellfakten, die beim Generieren einer einzelnen Beobachtung berücksichtigt werden. Leer lassen, um den Server-Standardwert zu verwenden.",
     "maxObservationsPerScopeLabel": "Max. Beobachtungen pro Bereich",
     "maxObservationsPerScopeDescription": "Obergrenze für die Anzahl der pro Bereich nach der Konsolidierung gespeicherten Beobachtungen. Leer lassen, um den Server-Standardwert zu verwenden.",
+    "mentalModelMinRefreshIntervalLabel": "Mindestintervall für Mental-Model-Aktualisierung",
+    "mentalModelMinRefreshIntervalDescription": "Mindestabstand in Sekunden zwischen zwei automatischen Aktualisierungen desselben Mental Models in dieser Bank. Eine früher ausgelöste Aktualisierung wird eingereiht und wartet das Fenster ab; weitere Auslöser fließen darin zusammen — ein Schub an Retains kostet also eine Aktualisierung statt einer pro Retain. Manuelle Aktualisierungen laufen immer sofort. Leer lassen für den Server-Standard; 0 bedeutet keine Begrenzung. Ein einzelnes Modell kann dies in seinen eigenen Aktualisierungseinstellungen überschreiben.",
+    "mentalModelsTitle": "Mental Models & Wissensseiten",
+    "mentalModelsDescription": "Wie die Mental Models dieser Bank — und die darauf aufbauenden Wissensseiten — aktuell gehalten werden.",
+    "mentalModelsFailedToSave": "Mental-Model-Einstellungen konnten nicht gespeichert werden",
     "serverDefault": "Server-Standard",
     "addStrategy": "Strategie hinzufügen",
     "nameLabel": "Name",
@@ -490,13 +495,15 @@
     "unknown": "Unbekannt",
     "notAvailable": "N/V",
     "operationDetailsLoadError": "Vorgangsdetails konnten nicht geladen werden",
+    "deferredUntilTitle": "Zurückgestellt bis {time}",
     "status": {
       "all": "Alle",
       "pending": "Ausstehend",
       "processing": "In Bearbeitung",
       "completed": "Abgeschlossen",
       "failed": "Fehlgeschlagen",
-      "cancelled": "Abgebrochen"
+      "cancelled": "Abgebrochen",
+      "deferred": "Zurückgestellt"
     },
     "operationType": {
       "all": "Alle Typen",
@@ -832,6 +839,9 @@
     "optionsRefreshCronLabel": "Geplante Aktualisierung (Cron)",
     "optionsRefreshCronPlaceholder": "Min Std Tag Monat Wochentag  ·  z. B. 0 3 * * * (täglich 03:00 UTC)",
     "optionsRefreshCronDescription": "Aktualisiert nach einem festen UTC-Cron-Zeitplan. Schließt sich mit der Aktualisierung bei neuen Erinnerungen gegenseitig aus. Eine geplante Aktualisierung wird nur ausgeführt, wenn neue Erinnerungen den Geltungsbereich dieses Modells geändert haben. Leer lassen, um zu deaktivieren.",
+    "optionsMinRefreshIntervalLabel": "Minimales Aktualisierungsintervall (Sekunden)",
+    "optionsMinRefreshIntervalPlaceholder": "Standard (übernehmen)",
+    "optionsMinRefreshIntervalDescription": "Untergrenze dafür, wie oft automatische Aktualisierungen laufen. Ein früher auslösender Trigger wird eingereiht und bis zum Ende des Fensters zurückgestellt; weitere Trigger fließen darin zusammen — ein Schub an Retains kostet also eine Aktualisierung. Manuelle Aktualisierungen laufen immer sofort. 0 oder leer = keine Untergrenze.",
     "optionsSectionTags": "Tags",
     "optionsTagsLabel": "Tags",
     "optionsTagsPlaceholder": "z. B. projekt-x, team-alpha (kommagetrennt)",
