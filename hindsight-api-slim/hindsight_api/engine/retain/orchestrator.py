@@ -66,10 +66,20 @@ def redact_document_body(body: str, config: Any) -> str:
     oversized item carries the identical body, so re-screening would rescan the
     whole document once per sub-batch (issue #3282).
     """
-    try:
-        policy = parse_policy(config.memory_defense)
-    except Exception:
-        return body
+    # No try/except around the parse. A malformed policy must fail the retain, not
+    # quietly skip screening: this is a security control, so fail-open is the wrong
+    # default even for an unreachable state (the HTTP layer 422s a bad policy on
+    # write, so one can only reach the store by a direct DB edit).
+    #
+    # The blanket ``except Exception: return body`` this replaces could not buy a
+    # successful retain anyway — ``retain_batch`` parses the very same
+    # ``config.memory_defense`` unguarded before extracting, so anything raising here
+    # raises there moments later and the retain fails with nothing persisted. All the
+    # catch did was swallow the traceback that says *why* the policy did not parse,
+    # and hide that screening had been skipped first. It also made the large-batch
+    # path (the only caller) diverge from the small-batch path, which has always let
+    # the same error propagate.
+    policy = parse_policy(config.memory_defense)
     if not policy.enabled:
         return body
     if not any(r.on == "sensitive_data" for r in policy.rules):
