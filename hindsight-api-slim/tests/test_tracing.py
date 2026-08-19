@@ -31,6 +31,7 @@ def test_provider_name_mapping():
     assert PROVIDER_NAME_MAPPING["ollama"] == "ollama"
     assert PROVIDER_NAME_MAPPING["openai-codex"] == "openai"
     assert PROVIDER_NAME_MAPPING["claude-code"] == "anthropic"
+    assert PROVIDER_NAME_MAPPING["github-copilot"] == "github"
 
 
 def test_truncate_content_short():
