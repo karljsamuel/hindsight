@@ -15355,6 +15355,27 @@ class MemoryEngine(MemoryEngineInterface):
         if row["kind"] != "folder":
             raise ValueError(f"Parent '{parent_id}' is not a folder")
 
+    async def _kp_lock_bank(self, conn, bank_id: str) -> None:
+        """Serialize structural knowledge-tree writers on the bank row.
+
+        FOR NO KEY UPDATE conflicts with other tree writers but not with the
+        FOR KEY SHARE locks taken by inserts into tables that reference banks.
+        Oracle rewrites it to FOR UPDATE, which does not block indexed-FK child
+        inserts there.
+
+        Correctness relies on READ COMMITTED (the default here): the waiter's
+        snapshot is taken per statement, so the hierarchy it reads *after* this
+        call reflects whatever the previous writer committed.
+
+        A missing bank row takes no lock and is not an error: there is then no
+        tree to serialize, and each caller already surfaces "not found" from its
+        own query (create paths ensure the bank in this same transaction first).
+        """
+        await conn.fetchrow(
+            f"SELECT bank_id FROM {fq_table('banks')} WHERE bank_id = $1 FOR NO KEY UPDATE",
+            bank_id,
+        )
+
     async def create_knowledge_folder(
         self,
         bank_id: str,
@@ -15384,6 +15405,7 @@ class MemoryEngine(MemoryEngineInterface):
         async with acquire_with_retry(backend) as conn:
             async with conn.transaction():
                 await self._ensure_bank_exists(bank_id, request_context, conn=conn)
+                await self._kp_lock_bank(conn, bank_id)
                 await self._kp_assert_folder_parent(conn, bank_id, parent_id)
                 row = await conn.fetchrow(
                     f"""
@@ -15447,6 +15469,7 @@ class MemoryEngine(MemoryEngineInterface):
                 # share a transaction instead of compensating after a partial commit.
                 async with conn.transaction():
                     created = await self._ensure_bank_exists(bank_id, request_context, conn=conn)
+                    await self._kp_lock_bank(conn, bank_id)
                     await self._kp_assert_folder_parent(conn, bank_id, parent_id)
                     mm_row = await self._insert_pinned_mental_model(
                         conn,
@@ -15842,6 +15865,9 @@ class MemoryEngine(MemoryEngineInterface):
         backend = await self._get_backend()
         async with acquire_with_retry(backend) as conn:
             async with conn.transaction():
+                # Structural tree writers lock this bank row before reading or
+                # changing the hierarchy, serializing moves with creates/deletes.
+                await self._kp_lock_bank(conn, bank_id)
                 await self._kp_assert_folder_parent(conn, bank_id, new_parent_id)
                 # Cycle guard: walk up from the new parent; if we reach node_id,
                 # the move would create a loop. Done in Python so the check stays
@@ -15854,10 +15880,19 @@ class MemoryEngine(MemoryEngineInterface):
                             bank_id,
                         )
                     }
+                    # `seen` bounds the walk. The lock above stops this process
+                    # from creating a loop, but a tree corrupted before the lock
+                    # existed (or restored from such an export) would otherwise
+                    # spin here forever, holding a connection and an open
+                    # transaction. Refuse the move instead of hanging.
+                    seen: set[str] = set()
                     cursor: str | None = new_parent_id
                     while cursor is not None:
                         if cursor == node_id:
                             raise ValueError("Cannot move a node into its own subtree")
+                        if cursor in seen:
+                            raise ValueError(f"Knowledge tree for bank '{bank_id}' contains a parent cycle")
+                        seen.add(cursor)
                         cursor = parents.get(cursor)
                 row = await conn.fetchrow(
                     f"""
@@ -15892,6 +15927,7 @@ class MemoryEngine(MemoryEngineInterface):
         backend = await self._get_backend()
         async with acquire_with_retry(backend) as conn:
             async with conn.transaction():
+                await self._kp_lock_bank(conn, bank_id)
                 all_rows = await conn.fetch(
                     f"SELECT id, parent_id, mental_model_id FROM {fq_table('knowledge_pages')} WHERE bank_id = $1",
                     bank_id,
@@ -15902,10 +15938,19 @@ class MemoryEngine(MemoryEngineInterface):
                 if not any(r["id"] == node_id for r in all_rows):
                     return False
                 # BFS the subtree rooted at node_id, collecting page mental models.
+                # `visited` bounds the walk: a tree corrupted before the bank lock
+                # existed (or restored from such an export) contains a parent cycle
+                # the FK does not forbid, and an unguarded walk would spin forever
+                # holding a connection and an open transaction. Visiting each node
+                # once still deletes every reachable node.
                 stack = [node_id]
+                visited: set[str] = set()
                 mm_ids: list[str] = []
                 while stack:
                     current = stack.pop()
+                    if current in visited:
+                        continue
+                    visited.add(current)
                     for child in by_parent.get(current, []):
                         stack.append(child["id"])
                     node_row = next((r for r in all_rows if r["id"] == current), None)
