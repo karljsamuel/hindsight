@@ -349,6 +349,9 @@ async def test_grounding_on_another_mental_model_is_never_read_as_retracted(
 
 
 @pytest.mark.asyncio
+# Retracts the grounding with a raw DELETE FROM memory_units. A store-owned bank keeps its
+# memories elsewhere, so the delete removes nothing and the precondition never holds.
+@pytest.mark.memory_backend_incompatible
 async def test_sweep_schedules_a_refresh_for_a_page_whose_grounding_is_gone(
     memory: MemoryEngine, request_context: RequestContext
 ):
@@ -560,6 +563,9 @@ async def test_unsay_runs_even_when_no_new_facts_arrived(
 
 
 @pytest.mark.asyncio
+# Establishes 'pending consolidation' with a raw UPDATE of memory_units.consolidated_at,
+# which a store-owned bank does not read, so the deferral precondition is never set up.
+@pytest.mark.memory_backend_incompatible
 async def test_unsay_is_deferred_while_facts_are_pending_consolidation(
     memory: MemoryEngine, request_context: RequestContext, monkeypatch, patch_reflect
 ):

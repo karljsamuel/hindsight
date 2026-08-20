@@ -8287,7 +8287,7 @@ class MemoryEngine(MemoryEngineInterface):
                             # Store-owned: the tombstone is the ONLY write here (the relink/prune
                             # enqueues above join memory_units/unit_entities, which this store keeps
                             # no rows in — so they touch nothing; stale-observation cleanup routes to
-                            # the store and is not part of this txn either). One memlake delete needs
+                            # the store and is not part of this txn either). One store-side delete needs
                             # no write-group — a plain, immediately-durable tombstone leaves no witness
                             # to go undecided (a store-owned retain creates none of these either).
                             await _store.delete_facts(bank_id, [unit_id])
