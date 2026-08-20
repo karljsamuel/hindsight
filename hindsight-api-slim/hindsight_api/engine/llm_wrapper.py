@@ -201,14 +201,60 @@ sanitize_llm_output = sanitize_text
 # real provider path (see issue #3172).
 
 
+_JSON_CONTROL_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t", "\b": "\\b", "\f": "\\f"}
+
+
+def _escape_control_chars_in_json(text: str) -> str:
+    """Make raw control characters inside JSON string values parseable.
+
+    ``json.loads`` rejects an unescaped control character in a string. Models
+    hit this whenever they write a multi-line value (a markdown table, a list,
+    a code fence) without escaping the line breaks.
+
+    A line break, tab or form feed inside a string is *content*: it is escaped
+    so it survives. Blanking it out instead welds a markdown table onto one
+    line, and the damage is invisible downstream (#3361). Every other control
+    character carries no meaning in text, so it keeps the historical treatment
+    of becoming a space.
+
+    The scan tracks string state because only characters inside a string need
+    escaping; the same byte between tokens is junk either way.
+    """
+    out: list[str] = []
+    in_string = False
+    escape = False
+    for ch in text:
+        if in_string and escape:
+            escape = False
+            out.append(ch)
+            continue
+        if in_string and ch == "\\":
+            escape = True
+            out.append(ch)
+            continue
+        if ch == '"':
+            in_string = not in_string
+            out.append(ch)
+            continue
+        if in_string and ch in _JSON_CONTROL_ESCAPES:
+            out.append(_JSON_CONTROL_ESCAPES[ch])
+            continue
+        if ch <= "\x1f" or ch == "\x7f":
+            out.append(" ")
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
 def parse_llm_json(raw: str) -> Any:
     """
     Robustly parse JSON returned by an LLM.
 
     Handles common LLM output quirks:
     1. Markdown code fences (```json ... ```) — strip them before parsing.
-    2. Embedded control characters (\\x00-\\x1f, \\x7f) — replace with space
-       and retry if the initial parse fails.
+    2. Embedded control characters (\\x00-\\x1f, \\x7f) — escape the ones inside
+       string values (so a raw newline stays a line break), drop the ones
+       between tokens, and retry if the initial parse fails.
     3. Structural malformation (trailing commas, unterminated strings, single
        quotes, invalid ``\\escape`` sequences) — repaired as a last resort via
        ``json_repair`` (#2547/#2544).
@@ -241,8 +287,12 @@ def parse_llm_json(raw: str) -> Any:
         return json.loads(text)
     except json.JSONDecodeError:
         # Some models (e.g. Gemini) embed raw control characters inside JSON
-        # string values. Replacing them with a space usually produces valid JSON.
-        cleaned = re.sub(r"[\x00-\x1f\x7f]", " ", text)
+        # string values. Escape them rather than blank them out: a raw newline
+        # in a string is the model writing a real line break, and replacing it
+        # with a space silently welds a markdown table or list onto one line
+        # (#3361). Control characters *outside* a string are noise and are
+        # dropped, since nothing meaningful can sit between JSON tokens.
+        cleaned = _escape_control_chars_in_json(text)
 
     try:
         return json.loads(cleaned)

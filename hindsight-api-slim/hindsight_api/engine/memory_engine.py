@@ -12024,6 +12024,7 @@ class MemoryEngine(MemoryEngineInterface):
         recall_chunks_max_tokens_override: int | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        answer_as_document: bool = False,
         _skip_span: bool = False,
         _operation_label: str = "reflect",
     ) -> ReflectResult:
@@ -12327,6 +12328,7 @@ class MemoryEngine(MemoryEngineInterface):
                         llm_output_language=getattr(resolved_reflect_config, "llm_output_language", None),
                         cancel_check=request_context.raise_if_cancelled,
                         store_document_text=config_dict.get("store_document_text", DEFAULT_STORE_DOCUMENT_TEXT),
+                        answer_as_document=answer_as_document,
                     ),
                     timeout=wall_timeout,
                 )
@@ -12503,6 +12505,7 @@ class MemoryEngine(MemoryEngineInterface):
             # Return response (compatible with existing API)
             result = ReflectResult(
                 text=agent_result.text,
+                document=agent_result.document,
                 based_on=based_on,
                 structured_output=agent_result.structured_output,
                 usage=usage,
@@ -13567,7 +13570,17 @@ class MemoryEngine(MemoryEngineInterface):
         max_tokens: int | None,
         trigger: dict[str, Any] | None,
     ) -> ResultRow:
-        """Insert a pinned model using the caller's transaction."""
+        """Insert a pinned model using the caller's transaction.
+
+        ``content`` is stored as the render of its own structure: a mental model
+        created from authored markdown is on the structured schema from the
+        first byte, not from its first delta refresh. Leaving the column NULL
+        here would mean the first refresh silently reshapes a document nobody
+        asked it to touch.
+        """
+        from .reflect.structured_doc import canonical_document
+
+        document = canonical_document(content)
         # VectorChord needs mental_models.search_vector tokenized on write; every
         # other backend either generates it or indexes the source columns.
         #
@@ -13587,8 +13600,10 @@ class MemoryEngine(MemoryEngineInterface):
         row = await conn.fetchrow(
             f"""
             INSERT INTO {fq_table("mental_models")}
-            (id, bank_id, subtype, name, description, source_query, content, embedding, tags, max_tokens, trigger{sv_col})
-            VALUES ($1, $2, 'pinned', $3::text, ' ', $4, $5, $6, $7, COALESCE($8, 2048), COALESCE($9, '{{"refresh_after_consolidation": false}}'::jsonb){sv_val})
+            (id, bank_id, subtype, name, description, source_query, content, embedding, tags, max_tokens,
+             trigger, structured_content{sv_col})
+            VALUES ($1, $2, 'pinned', $3::text, ' ', $4, $5, $6, $7, COALESCE($8, 2048),
+                    COALESCE($9, '{{"refresh_after_consolidation": false}}'::jsonb), $10{sv_val})
             RETURNING id, bank_id, name, source_query, content, tags,
                       last_refreshed_at, last_memory_seen_at, created_at, reflect_response,
                       max_tokens, trigger, structured_content
@@ -13597,11 +13612,12 @@ class MemoryEngine(MemoryEngineInterface):
             bank_id,
             name,
             source_query,
-            content,
+            document.markdown,
             embedding,
             tags or [],
             max_tokens,
             json.dumps(trigger) if trigger else None,
+            json.dumps(document.structure.model_dump()),
         )
         assert row is not None
         return row
@@ -13891,6 +13907,11 @@ class MemoryEngine(MemoryEngineInterface):
             recall_include_chunks=recall_include_chunks_override,
             recall_max_tokens_override=recall_max_tokens_override,
             recall_chunks_max_tokens_override=recall_chunks_max_tokens_override,
+            # The refresh stores a document, so the agent states its structure and
+            # the markdown is rendered from it. The model never writes the markdown
+            # that gets persisted, and nothing has to read markdown back to find
+            # out what the model meant (#3361).
+            answer_as_document=True,
             _skip_span=True,
             # Attribute these LLM calls to the mental-model refresh, not a
             # plain reflect, so traces group under the right operation.
@@ -14115,8 +14136,9 @@ class MemoryEngine(MemoryEngineInterface):
             build_structured_retraction_prompt,
         )
         from .reflect.structured_doc import (
-            parse_markdown,
             render_document,
+            split_markdown,
+            structured_document_from_stored,
         )
 
         final_content = reflect_result.text
@@ -14140,34 +14162,21 @@ class MemoryEngine(MemoryEngineInterface):
             return _op_llm_config
 
         if use_delta:
-            # Use the previously stored structured doc when available; otherwise
-            # parse the existing markdown so the very first delta refresh can
-            # still operate without waiting for a full rebuild.
-            #
-            # A stored doc that fails validation (hand-edited JSON, a shape from an
-            # older schema) is NOT fatal: the markdown in ``content`` is the same
-            # document and ``parse_markdown`` is lenient, so re-deriving the baseline
-            # from it keeps the delta path alive and rebuilds the structured doc as a
-            # side effect. Giving up here would refuse every subsequent refresh
-            # (nothing else repairs the column) over a baseline we can reconstruct.
+            # The stored structure is the baseline. A model that has never been
+            # refreshed in delta mode, or was last written under an older schema,
+            # has its baseline imported once from the stored markdown — a lossless
+            # split on headings and blank lines, not a re-interpretation of the
+            # prose (see ``structured_document_from_stored``). From this refresh on
+            # the structure is authoritative and the markdown is its render.
             current_doc: StructuredDocument | None = None
-            if stored_structured_content is not None:
-                try:
-                    current_doc = StructuredDocument.model_validate(stored_structured_content)
-                except Exception as exc:
-                    logger.warning(
-                        f"[MENTAL_MODELS] Stored structured doc for {mental_model_id} is unusable "
-                        f"({exc}); re-deriving the delta baseline from the stored markdown"
-                    )
-            if current_doc is None:
-                try:
-                    current_doc = parse_markdown(current_content)
-                except Exception as exc:
-                    logger.warning(
-                        f"[MENTAL_MODELS] Could not load structured doc for {mental_model_id} "
-                        f"({exc}); delta has no baseline to edit"
-                    )
-                    mode_fallback_reason = "structured_doc_unreadable"
+            try:
+                current_doc = structured_document_from_stored(stored_structured_content, current_content)
+            except Exception as exc:
+                logger.warning(
+                    f"[MENTAL_MODELS] Could not load structured doc for {mental_model_id} "
+                    f"({exc}); delta has no baseline to edit"
+                )
+                mode_fallback_reason = "structured_doc_unreadable"
 
             if current_doc is not None:
                 supporting_facts = delta_supporting_facts
@@ -14283,12 +14292,23 @@ class MemoryEngine(MemoryEngineInterface):
                 # transport cap — see the call below.
                 doc_max_tokens = stored_max_tokens or 2048
                 delta_max_tokens = max(2048, int(doc_max_tokens * 1.5))
+                # The document's own budget. Nothing else measures it on this leg:
+                # a delta refresh only adds, so a page grows every round and drifts
+                # past its configured size with no signal (~20 tokens/round measured,
+                # which crosses the 4096 default after a couple of hundred refreshes).
+                # The model is told where it stands so it can reclaim space from
+                # stale content; truncating here would delete knowledge instead.
+                from .reflect.tokenization import count_cl100k_tokens
+
+                document_tokens = count_cl100k_tokens(current_content)
                 user_prompt = build_structured_delta_prompt(
                     current_document_json=current_doc.model_dump_json(),
                     candidate_markdown=reflect_result.text,
                     supporting_facts=supporting_facts,
                     source_query=source_query,
                     max_output_tokens=delta_max_tokens,
+                    document_tokens=document_tokens,
+                    document_budget=doc_max_tokens,
                 )
                 # Trace the delta call. Unlike the synthesis, this runs on the raw
                 # ``_reflect_llm_config`` outside ``reflect_async``'s trace context,
@@ -14344,6 +14364,18 @@ class MemoryEngine(MemoryEngineInterface):
                         final_structured = apply_outcome.document
                         final_content = render_document(apply_outcome.document)
                         delta_applied = True
+                        # Surfaced rather than enforced: a page that keeps growing past
+                        # its budget is a page whose content needs a decision, and that
+                        # is visible here instead of only in the byte count.
+                        final_tokens = count_cl100k_tokens(final_content)
+                        reflect_response_payload["document_tokens"] = final_tokens
+                        reflect_response_payload["document_budget"] = doc_max_tokens
+                        if final_tokens > doc_max_tokens:
+                            warnings.append(
+                                f"The document is ~{final_tokens} tokens, over its {doc_max_tokens}-token "
+                                "budget. Delta refreshes were asked to reclaim space from superseded "
+                                "content; if it keeps growing, raise max_tokens or narrow the source query."
+                            )
                         logger.info(
                             f"[MENTAL_MODELS] Delta refresh for {mental_model_id}: "
                             f"applied {len(apply_outcome.applied)} op(s), "
@@ -14444,17 +14476,35 @@ class MemoryEngine(MemoryEngineInterface):
                 outcome="refresh_failed_delta_not_applied",
             )
 
-        # When delta is not applied (full mode, or delta fallback), parse the
+        # When delta is not applied (full mode, or delta fallback), split the
         # candidate markdown so the next refresh has a structured baseline to
-        # operate against.
+        # operate against, and store the render of that structure as the content.
+        #
+        # Writing the render rather than the raw candidate is what keeps the two
+        # columns in agreement: under v1 the full leg stored the candidate verbatim
+        # while deriving the structure from it lossily, so the first delta refresh
+        # afterwards silently replaced the user-visible markdown with the render of
+        # a degraded structure (#3361). The split is lossless, so this now changes
+        # nothing but whitespace between blocks — and if it ever did more, it would
+        # show up on the refresh that caused it instead of one refresh later.
         if final_structured is None:
             try:
-                final_structured = parse_markdown(final_content)
+                # The agent emitted the document (``answer_as_document``), so its
+                # structure is used as-is. Splitting is the fallback for a run that
+                # produced plain text instead — an older stub, a provider that
+                # dropped the tool call, or the iteration-limit answer.
+                structured = reflect_result.document or split_markdown(final_content)
+                rendered = render_document(structured)
             except Exception as exc:
+                # Both or neither: a half-applied split would store a structure the
+                # content does not match, which is the very state this replaces.
                 logger.warning(
-                    f"[MENTAL_MODELS] Could not parse final markdown into structured form "
+                    f"[MENTAL_MODELS] Could not split final markdown into structured form "
                     f"for {mental_model_id} ({exc}); leaving structured_content unchanged"
                 )
+            else:
+                final_structured = structured
+                final_content = rendered
 
         # Report by observable effect, not by which branch got here. A delta run
         # whose model emitted *zero* operations lands in the applied path — the
@@ -14810,6 +14860,20 @@ class MemoryEngine(MemoryEngineInterface):
                 )
                 await self._validate_operation(self._operation_validator.validate_bank_write(ctx))
         backend = await self._get_backend()
+
+        # A caller that hands over markdown alone (an import, a hand-authored
+        # document) gets its structure derived here, so the two columns can never
+        # be written out of step — the divergence that let a degraded document
+        # reach users one refresh after it was written (#3361). A refresh passes
+        # both (the structure is authoritative there and the markdown is already
+        # its render) and is left exactly as it supplied them. Derived up front so
+        # the embedding, the history snapshot and the UPDATE all see one text.
+        if content is not None and structured_content is None:
+            from .reflect.structured_doc import canonical_document
+
+            document = canonical_document(content)
+            content = document.markdown
+            structured_content = document.structure.model_dump()
 
         # Compute the new embedding BEFORE acquiring a pooled connection: a slow
         # embedder must never pin a DB connection. The embedding text depends only

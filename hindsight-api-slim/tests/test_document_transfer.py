@@ -779,7 +779,7 @@ async def test_bank_roundtrip_carries_mental_model_history(memory, request_conte
         await memory.update_mental_model(bank, mental_model_id="mm-1", content="v3", request_context=request_context)
         # Two refreshes → two snapshots (previous content v1 then v2), newest-first.
         before = await memory.get_mental_model_history(bank, "mm-1", request_context=request_context)
-        assert [h["previous_content"] for h in before] == ["v2", "v1"]
+        assert [h["previous_content"] for h in before] == ["v2\n", "v1\n"]
 
         from hindsight_api.engine.transfer import export_bank
 
@@ -791,7 +791,7 @@ async def test_bank_roundtrip_carries_mental_model_history(memory, request_conte
         assert result.mental_model_history_imported == 2
 
         after = await memory.get_mental_model_history(bank, "mm-1", request_context=request_context)
-        assert [h["previous_content"] for h in after] == ["v2", "v1"]
+        assert [h["previous_content"] for h in after] == ["v2\n", "v1\n"]
     finally:
         await memory.delete_bank(bank, request_context=request_context)
 
