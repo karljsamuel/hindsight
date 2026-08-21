@@ -376,6 +376,21 @@ class OutputTooLongError(Exception):
     pass
 
 
+class ProviderContentPolicyError(RuntimeError):
+    """Raised when a provider refuses a request on content-policy (AUP) grounds.
+
+    A refusal is a deterministic function of the content, not a transient fault:
+    the same prompt earns the same refusal on every attempt. Retrying it — inside
+    the provider's transport loop or by re-running the whole worker task — burns
+    identical calls for a guaranteed-identical failure (issue #3690), so both
+    layers treat this as permanent: the provider raises it without retrying, and
+    ``_is_non_retryable_task_error`` marks the operation failed on first sight.
+
+    A ``RuntimeError`` subclass so existing ``except RuntimeError`` handlers
+    around LLM calls keep behaving as they did before the class existed.
+    """
+
+
 class ProviderRateLimitResetError(Exception):
     """Raised when an upstream provider says quota will reopen at a known time."""
 

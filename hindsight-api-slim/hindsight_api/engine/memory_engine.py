@@ -62,7 +62,7 @@ from .db.ops_postgresql import pg_search_vector_expr
 from .db.postgresql import PostgreSQLBackend
 from .db.postgresql import apply_session_settings as _apply_session_settings
 from .db_budget import budgeted_operation
-from .llm_interface import ProviderRateLimitResetError
+from .llm_interface import ProviderContentPolicyError, ProviderRateLimitResetError
 from .llm_trace import (
     LLMRequestEntry,
     LLMRequestListResponse,
@@ -1099,6 +1099,10 @@ def _is_non_retryable_task_error(e: Exception) -> bool:
         isinstance(e, asyncpg.exceptions.IntegrityConstraintViolationError)
         or _is_oracledb_integrity_error(e)
         or _is_invalid_embedding_dimension_error(e)
+        # A provider content-policy refusal is a function of the content, not of
+        # the moment: re-running the task feeds the same chunk to the same model
+        # and earns the same refusal (issue #3690).
+        or isinstance(e, ProviderContentPolicyError)
     )
 
 
