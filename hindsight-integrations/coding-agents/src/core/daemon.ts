@@ -195,6 +195,7 @@ export function startDaemonDetached(
     const child = spawnFn("node", [starter, "--harness", harness], {
       detached: true,
       stdio: "ignore",
+      windowsHide: true,
     });
     // spawn() failures often surface ASYNCHRONOUSLY as an 'error' event; unhandled, that would
     // crash the hook.
