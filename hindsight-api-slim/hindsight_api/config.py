@@ -464,7 +464,7 @@ ENV_EMBEDDINGS_LITELLM_SDK_MODEL = "HINDSIGHT_API_EMBEDDINGS_LITELLM_SDK_MODEL"
 ENV_EMBEDDINGS_LITELLM_SDK_API_BASE = "HINDSIGHT_API_EMBEDDINGS_LITELLM_SDK_API_BASE"
 ENV_EMBEDDINGS_LITELLM_SDK_OUTPUT_DIMENSIONS = "HINDSIGHT_API_EMBEDDINGS_LITELLM_SDK_OUTPUT_DIMENSIONS"
 ENV_EMBEDDINGS_LITELLM_SDK_ENCODING_FORMAT = "HINDSIGHT_API_EMBEDDINGS_LITELLM_SDK_ENCODING_FORMAT"
-# Provider-agnostic per-input truncation cap (tiktoken cl100k_base tokens).
+# Provider-agnostic per-input truncation cap (tokens, see ENV_TOKENIZER_ENCODING).
 ENV_EMBEDDINGS_MAX_INPUT_TOKENS = "HINDSIGHT_API_EMBEDDINGS_MAX_INPUT_TOKENS"
 # Deprecated alias kept so existing deployments keep working; folded into
 # ENV_EMBEDDINGS_MAX_INPUT_TOKENS (the generic name) at load time.
@@ -1193,12 +1193,20 @@ DEFAULT_RERANKER_LITELLM_MAX_TOKENS_PER_DOC: int | None = None
 # LiteLLM SDK defaults
 DEFAULT_EMBEDDINGS_LITELLM_SDK_MODEL = "cohere/embed-english-v3.0"
 DEFAULT_EMBEDDINGS_LITELLM_SDK_ENCODING_FORMAT = "float"
-# Opt-in per-text input truncation (tiktoken cl100k_base tokens). Off by default;
+# Opt-in per-text input truncation (tokens, see ENV_TOKENIZER_ENCODING). Off by default;
 # set to the embedding model's real input limit (e.g. 8192 for Bedrock Titan V2, or a
 # llama.cpp server's context) to keep oversized content from permanently failing the
 # embed call. Applies to every embeddings provider. See #2501.
 DEFAULT_EMBEDDINGS_MAX_INPUT_TOKENS: int | None = None
 DEFAULT_RERANKER_LITELLM_SDK_MODEL = "cohere/rerank-english-v3.0"
+
+# Vocabulary used for every token count and chunk boundary in the engine. Server-level:
+# these counts back budgets that stand in for a model's context window, and a bank that
+# counted differently from its neighbours would make those budgets incomparable.
+# o200k_base is what current OpenAI models tokenize with; set cl100k_base to restore the
+# counts Hindsight produced before this default changed. See engine/token_encoding.py.
+ENV_TOKENIZER_ENCODING = "HINDSIGHT_API_TOKENIZER_ENCODING"
+DEFAULT_TOKENIZER_ENCODING = "o200k_base"
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8888
@@ -2545,6 +2553,9 @@ class HindsightConfig:
     # to every newly-created bank, overriding the env/config defaults for any fields it sets.
     default_bank_template: dict | None
 
+    # Tokenization (server-level; see ENV_TOKENIZER_ENCODING)
+    tokenizer_encoding: str
+
     # Recall
     graph_retriever: str
     recall_max_concurrent: int
@@ -3773,6 +3784,8 @@ class HindsightConfig:
             enable_dry_run_extract=os.getenv(ENV_ENABLE_DRY_RUN_EXTRACT, str(DEFAULT_ENABLE_DRY_RUN_EXTRACT)).lower()
             == "true",
             default_bank_template=_parse_default_bank_template(os.getenv(ENV_DEFAULT_BANK_TEMPLATE)),
+            # Tokenization
+            tokenizer_encoding=os.getenv(ENV_TOKENIZER_ENCODING, DEFAULT_TOKENIZER_ENCODING),
             # Recall
             graph_retriever=os.getenv(ENV_GRAPH_RETRIEVER, DEFAULT_GRAPH_RETRIEVER),
             recall_max_concurrent=int(os.getenv(ENV_RECALL_MAX_CONCURRENT, str(DEFAULT_RECALL_MAX_CONCURRENT))),
