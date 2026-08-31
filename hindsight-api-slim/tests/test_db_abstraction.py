@@ -355,6 +355,26 @@ class TestPostgreSQLDialect:
         assert "'bm25' AS source" in arm
         assert "LIMIT $3" in arm
 
+    def test_build_bm25_arm_pg_search_custom_schema(self, d):
+        arm = d.build_bm25_arm(
+            table="schema.memory_units",
+            cols="id, text",
+            fact_type="world",
+            bank_id_param="$2",
+            limit_param="$3",
+            text_param="$4",
+            text_search_extension="pg_search",
+            pg_search_function_schema="pgsearch",
+        )
+        assert "pgsearch.score(id)" in arm
+        assert "id @@@ pgsearch.boolean(should =>" in arm
+        assert "pgsearch.match('text', $4)" in arm
+        assert "pgsearch.match('context', $4)" in arm
+        assert "pgsearch.match('text_signals', $4)" in arm
+        assert "pgsearch.score(id) DESC" in arm
+        assert "'bm25' AS source" in arm
+        assert "LIMIT $3" in arm
+
     def test_prepare_bm25_text_native(self, d):
         result = d.prepare_bm25_text(["hello", "world"], "hello world")
         assert result == "hello | world"

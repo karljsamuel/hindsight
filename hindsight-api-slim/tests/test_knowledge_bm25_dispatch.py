@@ -60,6 +60,16 @@ def test_pg_search_uses_paradedb_over_base_columns():
     assert "ts_rank_cd" not in arm.order_by
 
 
+def test_pg_search_uses_custom_function_schema():
+    arm = knowledge_bm25_arm("pg_search", table_alias="mm", text_param="$3", pg_search_function_schema="pgsearch")
+    assert arm.score_expr == "pgsearch.score(mm.id)"
+    assert "mm.id @@@ pgsearch.boolean(should => ARRAY[" in arm.match_filter
+    assert "pgsearch.match('name', $3)" in arm.match_filter
+    assert "pgsearch.match('content', $3)" in arm.match_filter
+    assert "paradedb" not in arm.score_expr
+    assert "paradedb" not in arm.match_filter
+
+
 def test_pg_textsearch_ranks_content_by_bm25_distance():
     arm = _arm("pg_textsearch")
     # `<@>` is a distance (lower = closer): order ASC, negate for the score.

@@ -399,6 +399,7 @@ class SQLDialect(ABC):
         text_search_extension: str = "native",
         bm25_language: str = "english",
         bm25_min_score: float = 0.0,
+        pg_search_function_schema: str = "paradedb",
         extra_where: str = "",
     ) -> str:
         """Build a BM25/full-text search subquery arm.
@@ -418,7 +419,7 @@ class SQLDialect(ABC):
             arm_index: Index of this arm in the UNION ALL (used by Oracle for
                        unique SCORE labels).
             text_search_extension: Full-text search backend ("native", "vchord",
-                                   "pg_textsearch", "pgroonga"). Only relevant for PostgreSQL.
+                                   "pg_textsearch", "pgroonga", "pg_search"). Only relevant for PostgreSQL.
             bm25_language: PostgreSQL text search dictionary used by the native
                            backend (e.g. "english", "french"). Ignored by other backends.
             bm25_min_score: Minimum BM25 relevance score a row must exceed to be
@@ -426,6 +427,8 @@ class SQLDialect(ABC):
                             operator (e.g. VectorChord) ranks every document instead
                             of pre-filtering to query-term matches. Backends that
                             already apply a boolean match gate ignore this.
+            pg_search_function_schema: Schema containing pg_search functions (e.g. "paradedb",
+                                       "pgsearch"). Only used by the pg_search backend.
             extra_where: Optional additional WHERE clause fragment (e.g. time range filter).
         """
         ...

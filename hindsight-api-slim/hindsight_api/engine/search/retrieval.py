@@ -324,6 +324,7 @@ async def retrieve_semantic_bm25_combined_sql(
                     text_search_extension=text_ext,
                     bm25_language=config.text_search_extension_native_language,
                     bm25_min_score=bm25_min,
+                    pg_search_function_schema=config.text_search_extension_pg_search_function_schema,
                     extra_where=updated_range_clause,
                 )
             )

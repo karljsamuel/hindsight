@@ -68,7 +68,14 @@ def search(monkeypatch):
             return [embedding]
 
         monkeypatch.setattr(embedding_utils, "generate_embeddings_batch", fake_embed)
-        monkeypatch.setattr(engine_mod, "get_config", lambda: SimpleNamespace(text_search_extension="native"))
+        monkeypatch.setattr(
+            engine_mod,
+            "get_config",
+            lambda: SimpleNamespace(
+                text_search_extension="native",
+                text_search_extension_pg_search_function_schema="paradedb",
+            ),
+        )
         resolved.clear()
         resolved["enable_text_search"] = enable_text_search
         return await engine.search_knowledge_pages("bank-1", "some query", request_context=object())

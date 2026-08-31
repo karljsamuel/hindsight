@@ -15936,7 +15936,9 @@ class MemoryEngine(MemoryEngineInterface):
 
         # BM25 clauses for the configured text-search backend (same per-backend
         # dispatch the memory-recall BM25 arm uses — see knowledge_bm25_arm).
-        text_search_extension = get_config().text_search_extension
+        cfg = get_config()
+        text_search_extension = cfg.text_search_extension
+        pg_search_function_schema = cfg.text_search_extension_pg_search_function_schema
         # enable_text_search is per bank, so it is resolved rather than read off the
         # global config: a bank that switched the keyword arm off in recall must not
         # keep hitting a text index here. Costs one config round trip, the same one
@@ -15962,7 +15964,12 @@ class MemoryEngine(MemoryEngineInterface):
                 """
                 rows = await conn.fetch(sql, emb_str, bank_id)
             elif emb_str is not None:
-                bm25 = knowledge_bm25_arm(text_search_extension, table_alias="mm", text_param="$3")
+                bm25 = knowledge_bm25_arm(
+                    text_search_extension,
+                    table_alias="mm",
+                    text_param="$3",
+                    pg_search_function_schema=pg_search_function_schema,
+                )
                 # Vector arm (ANN over mm.embedding) + BM25 arm, each ranked
                 # independently, then RRF-fused (k=60) in SQL.
                 sql = f"""
@@ -15999,7 +16006,12 @@ class MemoryEngine(MemoryEngineInterface):
                 rows = await conn.fetch(sql, emb_str, bank_id, query)
             else:
                 # Embedding unavailable → BM25-only fallback (still useful).
-                bm25 = knowledge_bm25_arm(text_search_extension, table_alias="mm", text_param="$2")
+                bm25 = knowledge_bm25_arm(
+                    text_search_extension,
+                    table_alias="mm",
+                    text_param="$2",
+                    pg_search_function_schema=pg_search_function_schema,
+                )
                 sql = f"""
                     SELECT kp.id, kp.name, kp.mental_model_id,
                            LEFT(mm.content, 280) AS snippet, mm.last_refreshed_at AS updated_at,

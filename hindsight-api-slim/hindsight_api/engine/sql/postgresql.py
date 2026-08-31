@@ -33,6 +33,7 @@ def knowledge_bm25_arm(
     *,
     table_alias: str,
     text_param: str,
+    pg_search_function_schema: str = "paradedb",
 ) -> KnowledgeBm25Arm:
     """BM25 clauses for ``search_knowledge_pages`` on a given text-search backend.
 
@@ -72,13 +73,13 @@ def knowledge_bm25_arm(
     if text_search_extension == "pg_search":
         # ParadeDB pg_search: BM25 index over (id, name, content), key_field='id'.
         # Fan the query across both indexed text fields with paradedb.boolean.
-        score = f"paradedb.score({a}.id)"
+        score = f"{pg_search_function_schema}.score({a}.id)"
         return KnowledgeBm25Arm(
             score_expr=score,
             order_by=f"{score} DESC",
             match_filter=(
-                f"AND {a}.id @@@ paradedb.boolean(should => ARRAY["
-                f"paradedb.match('name', {p}), paradedb.match('content', {p})])"
+                f"AND {a}.id @@@ {pg_search_function_schema}.boolean(should => ARRAY["
+                f"{pg_search_function_schema}.match('name', {p}), {pg_search_function_schema}.match('content', {p})])"
             ),
         )
 
@@ -295,6 +296,7 @@ class PostgreSQLDialect(SQLDialect):
         text_search_extension: str = "native",
         bm25_language: str = "english",
         bm25_min_score: float = 0.0,
+        pg_search_function_schema: str = "paradedb",
         extra_where: str = "",
     ) -> str:
         if text_search_extension == "vchord":
@@ -326,13 +328,13 @@ class PostgreSQLDialect(SQLDialect):
             # with key_field='id'. The @@@ operator on the key_field requires a
             # field-qualified query (`text:foo`); to keep the bind-parameter form,
             # we fan the query out across all indexed text fields with paradedb.boolean.
-            bm25_score_expr = "paradedb.score(id)"
-            bm25_order_by = "paradedb.score(id) DESC"
+            bm25_score_expr = f"{pg_search_function_schema}.score(id)"
+            bm25_order_by = f"{pg_search_function_schema}.score(id) DESC"
             bm25_where_filter = (
-                f"AND id @@@ paradedb.boolean(should => ARRAY["
-                f"paradedb.match('text', {text_param}), "
-                f"paradedb.match('context', {text_param}), "
-                f"paradedb.match('text_signals', {text_param})"
+                f"AND id @@@ {pg_search_function_schema}.boolean(should => ARRAY["
+                f"{pg_search_function_schema}.match('text', {text_param}), "
+                f"{pg_search_function_schema}.match('context', {text_param}), "
+                f"{pg_search_function_schema}.match('text_signals', {text_param})"
                 f"])"
             )
         else:  # native tsvector

@@ -62,6 +62,7 @@ def _config() -> SimpleNamespace:
         bm25_min_score=0.0,
         text_search_extension="native",
         text_search_extension_native_language="english",
+        text_search_extension_pg_search_function_schema="paradedb",
         bm25_max_query_terms=16,
         bm25_selective_terms=True,
     )
