@@ -69,7 +69,6 @@ async def insert_facts_batch(
     document_id: str | None = None,
     ops=None,
     defer_index: bool = False,
-    txn=None,
 ) -> list[str]:
     """
     Store facts and return their unit ids, in order.
@@ -100,7 +99,6 @@ async def insert_facts_batch(
         facts=facts,
         document_id=document_id,
         defer_index=defer_index,
-        txn=txn,
     )
 
 
@@ -110,7 +108,6 @@ async def index_facts(
     facts: list[ProcessedFact],
     document_id: str | None = None,
     unit_entity_ids: dict[str, list[str]] | None = None,
-    txn=None,
 ) -> None:
     """Complete a deferred `insert_facts_batch`, now that the edges are known.
 
@@ -118,13 +115,12 @@ async def index_facts(
     relations are its edges; both travel with the memory for a store that owns
     them. A no-op for the Postgres store, which wrote all of it already.
 
-    ``txn`` rides a cross-store write-group handle so this single, entity-bearing
-    write commits (and becomes visible) atomically with the rest of the group —
-    the store-owned retain path writes facts ONCE here rather than write-then-reattach.
+    This is the single, entity-bearing write of the store-owned retain path: the facts
+    land ONCE here, complete, rather than write-then-reattach.
     """
     from ..memories import get_memories
 
-    await get_memories().index_facts(bank_id, unit_ids, facts, document_id, unit_entity_ids, txn=txn)
+    await get_memories().index_facts(bank_id, unit_ids, facts, document_id, unit_entity_ids)
 
 
 async def ensure_bank_exists(conn, bank_id: str, *, ops) -> None:
@@ -198,7 +194,6 @@ async def handle_document_tracking(
     document_tags: list[str] | None = None,
     ops=None,
     store_document_text: bool | None = None,
-    txn=None,
 ) -> None:
     """
     Handle document tracking in the database (full-replace mode).
@@ -295,7 +290,7 @@ async def handle_document_tracking(
         # catches units that have a non-NULL chunk_id FK. Units with chunk_id=NULL
         # (e.g. from partial writes or edge cases) would survive the cascade.
         # This explicit delete ensures complete cleanup.
-        await store.delete_document(conn=conn, fq_table=fq_table, bank_id=bank_id, document_id=document_id, txn=txn)
+        await store.delete_document(conn=conn, fq_table=fq_table, bank_id=bank_id, document_id=document_id)
         # Capture created_at before deletion so re-ingestion preserves it.
         preserved_created_at = await conn.fetchval(
             f"DELETE FROM {fq_table('documents')} WHERE id = $1 AND bank_id = $2 RETURNING created_at",
@@ -382,7 +377,7 @@ async def _upsert_document_row(
     # the bulky body is written to the store up front (orchestrator._store_document_bodies).
     from ..memories import get_memories
 
-    if get_memories().owns_document_store_for(bank_id):
+    if get_memories().store_owned_for(bank_id):
         original_text = None
     await conn.execute(
         f"""
@@ -431,7 +426,7 @@ async def update_memory_units_metadata_and_tags(
     from ..memories.base import META_METADATA_JSON
 
     store = get_memories()
-    if not store.writes_memory_rows_in_sql_for(bank_id):
+    if store.store_owned_for(bank_id):
         # A store that keeps memories outside SQL: page the document's memories and patch each
         # one's tags and metadata through the store — the UPDATE below is a no-op on its empty
         # memory_units.

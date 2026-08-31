@@ -226,8 +226,30 @@ async def get_bank_profile_if_exists(pool, bank_id: str) -> BankProfile | None:
     Returns:
         BankProfile if the bank exists, otherwise None.
     """
-    async with acquire_with_retry(pool) as conn:
-        return await get_bank_profile_if_exists_on_conn(conn, bank_id)
+    # Cached per process (see engine/bank_info_cache): on a hit this takes no pooled connection at
+    # all, which is what lets a store-owned retain -- one that writes nothing to Postgres -- run
+    # without touching the pool. A miss reads exactly as before.
+    from .. import bank_info_cache
+
+    async def _load() -> dict:
+        async with acquire_with_retry(pool) as conn:
+            profile = await get_bank_profile_if_exists_on_conn(conn, bank_id)
+        # "The bank does not exist" has to be representable as a cached value, or every miss for a
+        # missing bank re-reads it. `BankProfile` is a TypedDict, so the only thing that has to be
+        # unpacked is `disposition`, which is a pydantic model the cache would otherwise hand back
+        # by reference and let a caller mutate for every other holder of the entry.
+        if profile is None:
+            return {}
+        return {**profile, "disposition": profile["disposition"].model_dump()}
+
+    row = await bank_info_cache.get_or_load(bank_id, "profile", _load)
+    if not row:
+        return None
+    return BankProfile(
+        name=row["name"],
+        disposition=DispositionTraits(**row["disposition"]),
+        mission=row["mission"] or "",
+    )
 
 
 async def create_bank_row_on_conn(conn: "DatabaseConnection", bank_id: str, *, ops: "DataAccessOps") -> bool:
@@ -377,6 +399,11 @@ async def update_bank_disposition(pool, bank_id: str, disposition: dict[str, int
             json.dumps(disposition),
         )
 
+    # The profile row just changed; the next read must not serve the entry loaded before it.
+    from .. import bank_info_cache
+
+    await bank_info_cache.invalidate(bank_id, "profile")
+
 
 async def set_bank_mission(pool, bank_id: str, mission: str) -> None:
     """
@@ -401,6 +428,11 @@ async def set_bank_mission(pool, bank_id: str, mission: str) -> None:
             bank_id,
             mission,
         )
+
+    # The profile row just changed; the next read must not serve the entry loaded before it.
+    from .. import bank_info_cache
+
+    await bank_info_cache.invalidate(bank_id, "profile")
 
 
 async def merge_bank_mission(pool, llm_config, bank_id: str, new_info: str) -> dict:
@@ -438,6 +470,11 @@ async def merge_bank_mission(pool, llm_config, bank_id: str, new_info: str) -> d
             bank_id,
             merged_mission,
         )
+
+    # The profile row just changed; the next read must not serve the entry loaded before it.
+    from .. import bank_info_cache
+
+    await bank_info_cache.invalidate(bank_id, "profile")
 
     return {"mission": merged_mission}
 
@@ -633,7 +670,7 @@ async def _apply_store_last_write(banks: list[dict], sort_keys: "dict[str, datet
     from ..memories import get_memories
 
     store = get_memories()
-    external = [b for b in banks if not store.writes_memory_rows_in_sql_for(b["bank_id"])]
+    external = [b for b in banks if store.store_owned_for(b["bank_id"])]
     if not external:
         return
     ids = [b["bank_id"] for b in external]
@@ -682,21 +719,34 @@ async def _apply_store_last_write(banks: list[dict], sort_keys: "dict[str, datet
         sort_keys[bank["bank_id"]] = when
 
 
-async def apply_store_fact_counts(pool, banks: list[dict]) -> None:
+async def apply_store_fact_counts(banks: list[dict]) -> None:
     """Replace ``fact_count`` in-place for banks that keep their memories outside SQL.
 
-    Those banks leave the ``memory_units`` join empty, so the count has to come
-    from the store — one live count per bank, which is why this runs on a single
-    page of :func:`list_banks` rather than on every bank in the system.
+    Those banks leave the ``memory_units`` join empty, so the count has to come from the store.
+    Still page-scoped rather than system-wide, but ONE batched call for that page instead of a
+    round trip per bank: asking per bank made the page cost a network hop each, and on dev a
+    108-bank page took ~8s end-to-end, almost all of it those hops — most against banks with
+    nothing in them. :meth:`count_memories_many` is the same question asked once.
+
+    ``strong=True``, deliberately. The per-bank call this replaces reads the un-folded tail, so
+    anything weaker would fold a change in what a just-written bank REPORTS into what was meant to
+    be a change in how long it takes. The batched read applies the tail without opening a snapshot,
+    so a page of N banks still cannot admit N banks and evict whatever was warm.
+
+    A bank the store has no count for reports zero, per the interface's contract that absent means
+    nothing to count — so one bank cannot fail the page.
+
+    No connection is held across this: it is a network call to another service and nothing here
+    needs one. Holding a pooled connection across the per-bank loop was the other half of the cost
+    under load, and is the rule :func:`_apply_store_last_write` already follows.
     """
     from ..memories import get_memories
 
     store = get_memories()
-    external = [bank for bank in banks if not store.writes_memory_rows_in_sql_for(bank["bank_id"])]
+    external = [bank for bank in banks if store.store_owned_for(bank["bank_id"])]
     if not external:
         return
 
-    async with acquire_with_retry(pool) as conn:
-        for bank in external:
-            counts = await store.count_memories(conn=conn, fq_table=fq_table, bank_id=bank["bank_id"])
-            bank["fact_count"] = sum(counts.values())
+    counts = await store.count_memories_many(bank_ids=[bank["bank_id"] for bank in external], strong=True)
+    for bank in external:
+        bank["fact_count"] = sum(counts.get(bank["bank_id"], {}).values())
