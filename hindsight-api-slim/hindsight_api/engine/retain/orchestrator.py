@@ -362,6 +362,21 @@ def _resolve_narrator(profile_name: str, bank_id: str) -> str | None:
     return profile_name
 
 
+# What a reprocess must NOT replay, because it supplies its own: `content` is the
+# document's stored original_text, `document_id` and `update_mode` are set by the
+# reprocess itself, and `tags` live on the document row and are read from there.
+#
+# An EXCLUSION list rather than an inclusion one, deliberately. The inclusion list
+# this replaces silently dropped three fields in turn — `strategy`, `entities`, and
+# `resolve_entities` — each written by api_retain and each never captured, so a
+# reprocess re-extracted under the bank's default strategy with entity resolution
+# it was told not to do. Every one of those was invisible: the reprocess succeeds
+# and only the resulting facts are wrong. Inverting it makes the safe case the
+# default — a new retain field round-trips unless someone deliberately excludes it,
+# and the single source of truth becomes what api_retain puts on the content dict.
+_RETAIN_PARAMS_NOT_REPLAYED = frozenset({"content", "document_id", "update_mode", "tags"})
+
+
 def _build_retain_params(contents_dicts, document_tags=None, doc_contents=None):
     """Build retain_params and merged_tags from content dicts."""
     if doc_contents is not None:
@@ -379,18 +394,15 @@ def _build_retain_params(contents_dicts, document_tags=None, doc_contents=None):
     retain_params = {}
     if items:
         first_item = items[0]
-        if first_item.get("context"):
-            retain_params["context"] = first_item["context"]
-        if first_item.get("event_date"):
-            retain_params["event_date"] = (
-                first_item["event_date"].isoformat()
-                if hasattr(first_item["event_date"], "isoformat")
-                else str(first_item["event_date"])
-            )
-        if first_item.get("metadata"):
-            retain_params["metadata"] = first_item["metadata"]
-        if first_item.get("observation_scopes") is not None:
-            retain_params["observation_scopes"] = first_item["observation_scopes"]
+        for key, value in first_item.items():
+            if key in _RETAIN_PARAMS_NOT_REPLAYED or value is None:
+                continue
+            # event_date arrives as a datetime from some callers and a string from
+            # others; retain_params is JSON, so normalise here rather than at every
+            # reader.
+            if key == "event_date":
+                value = value.isoformat() if hasattr(value, "isoformat") else str(value)
+            retain_params[key] = value
 
     return retain_params, merged_tags
 

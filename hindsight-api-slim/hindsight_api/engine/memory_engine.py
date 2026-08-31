@@ -11161,21 +11161,28 @@ class MemoryEngine(MemoryEngineInterface):
             "document_id": document_id,
             "update_mode": "replace",
         }
-        if retain_params.get("context"):
-            content_dict["context"] = retain_params["context"]
-        if retain_params.get("event_date"):
-            content_dict["event_date"] = retain_params["event_date"]
-        if retain_params.get("metadata"):
-            content_dict["metadata"] = retain_params["metadata"]
-        if retain_params.get("entities"):
-            content_dict["entities"] = retain_params["entities"]
+        # Replay everything the original retain supplied. Enumerating fields here
+        # is what let `strategy`, `entities` and `resolve_entities` go missing one
+        # by one: each was written by api_retain, never captured, and a reprocess
+        # quietly re-extracted under the bank's default strategy instead of the
+        # document's own. retain_params now holds exactly the replayable set (see
+        # _RETAIN_PARAMS_NOT_REPLAYED), so take it whole.
+        # `strategy` rides on the dict as well as being pulled out below. Excluding
+        # it here made the round trip survive exactly one reprocess: the call
+        # argument applied the right strategy, but _build_retain_params never saw it
+        # on the item, so retain_params came back without it and the NEXT reprocess
+        # fell back to the bank default again.
+        content_dict.update(retain_params)
+        # These three are the reprocess's own and must win over anything stored.
+        content_dict["content"] = original_text
+        content_dict["document_id"] = document_id
+        content_dict["update_mode"] = "replace"
 
         tags = doc.get("tags") or []
         if tags:
             content_dict["tags"] = tags
-        if retain_params.get("observation_scopes") is not None:
-            content_dict["observation_scopes"] = retain_params["observation_scopes"]
 
+        # A call-level argument rather than an item field, so it is pulled out.
         strategy = retain_params.get("strategy")
 
         result = await self.submit_async_retain(

@@ -8240,6 +8240,12 @@ def _register_routes(app: FastAPI):
                     content_dict["observation_scopes"] = item.observation_scopes
                 if item.update_mode is not None:
                     content_dict["update_mode"] = item.update_mode
+                # Carried on the item, not just used as the grouping key: reprocess
+                # rebuilds its retain call from retain_params, so a strategy that
+                # never reaches the content dict never reaches retain_params either
+                # — and the reprocess silently re-extracts under the bank default.
+                if item.strategy:
+                    content_dict["strategy"] = item.strategy
                 strategy_groups[effective].append(content_dict)
 
             if request.async_:

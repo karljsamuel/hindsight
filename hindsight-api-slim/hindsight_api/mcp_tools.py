@@ -698,7 +698,11 @@ def _register_retain(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
                 result = await memory.submit_async_retain(
                     bank_id=target_bank,
                     contents=[content_dict],
-                    strategy=content_dict.pop("strategy", None),
+                    # `get`, not `pop`: the list above holds this same dict, so popping would
+                    # strip `strategy` off the item before the call runs and retain_params
+                    # would not capture it — a later reprocess then re-extracts under the
+                    # bank's default strategy.
+                    strategy=content_dict.get("strategy"),
                     request_context=request_context,
                 )
                 return {
@@ -753,7 +757,11 @@ def _register_retain(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
                 result = await memory.submit_async_retain(
                     bank_id=target_bank,
                     contents=[content_dict],
-                    strategy=content_dict.pop("strategy", None),
+                    # `get`, not `pop`: the list above holds this same dict, so popping would
+                    # strip `strategy` off the item before the call runs and retain_params
+                    # would not capture it — a later reprocess then re-extracts under the
+                    # bank's default strategy.
+                    strategy=content_dict.get("strategy"),
                     request_context=request_context,
                 )
                 return {
@@ -815,7 +823,11 @@ def _register_sync_retain(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsCo
                     bank_id=target_bank,
                     contents=[content_dict],
                     request_context=request_context,
-                    strategy=content_dict.pop("strategy", None),
+                    # `get`, not `pop`: the list above holds this same dict, so popping would
+                    # strip `strategy` off the item before the call runs and retain_params
+                    # would not capture it — a later reprocess then re-extracts under the
+                    # bank's default strategy.
+                    strategy=content_dict.get("strategy"),
                 )
                 memory_ids = [uid for batch in result for uid in batch]
                 return {
@@ -871,7 +883,11 @@ def _register_sync_retain(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsCo
                     bank_id=target_bank,
                     contents=[content_dict],
                     request_context=request_context,
-                    strategy=content_dict.pop("strategy", None),
+                    # `get`, not `pop`: the list above holds this same dict, so popping would
+                    # strip `strategy` off the item before the call runs and retain_params
+                    # would not capture it — a later reprocess then re-extracts under the
+                    # bank's default strategy.
+                    strategy=content_dict.get("strategy"),
                 )
                 memory_ids = [uid for batch in result for uid in batch]
                 return {
