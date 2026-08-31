@@ -19,7 +19,11 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from ..config import get_config
+from ..config import (
+    ENV_CONSOLIDATION_WALL_TIMEOUT,
+    ENV_RETAIN_WALL_TIMEOUT,
+    get_config,
+)
 from ..engine.schema import fq_table_explicit as fq_table
 from ..metrics import get_metrics_collector
 from .exceptions import DeferOperation, RetryTaskAt, format_task_error
@@ -30,6 +34,43 @@ from .stage import StageHolder, bind_holder
 # operation="retain" series the synchronous API path emits. Unknown types
 # pass through unchanged.
 _RETAIN_OP_TYPES = {"retain", "batch_retain", "file_convert_retain"}
+
+
+@dataclass(frozen=True)
+class _WallCeiling:
+    """How one task type's wall-clock ceiling is configured and enforced.
+
+    ``config_attr``/``env_var`` are kept together in a single record so the
+    value an operator reads in the failure message can never drift from the
+    value the ceiling was actually resolved from.
+
+    ``extends_on_progress`` picks the semantics:
+
+    * ``False`` (retain) — an absolute ceiling on total runtime. A retain is one
+      document; if it is still going an hour later, something is wrong.
+    * ``True`` (consolidation) — an *idle* ceiling. A consolidation job is a loop
+      over batches, each committing its own memories, and a big backlog is
+      legitimately long. Every committed batch bumps the task's stage, which
+      restarts the clock, so the ceiling only fires on a job that has stopped
+      making progress — a stall, not a slow bank.
+    """
+
+    config_attr: str
+    env_var: str
+    extends_on_progress: bool = False
+
+
+_WALL_CEILINGS: dict[str, _WallCeiling] = {
+    **dict.fromkeys(
+        _RETAIN_OP_TYPES,
+        _WallCeiling(config_attr="retain_wall_timeout", env_var=ENV_RETAIN_WALL_TIMEOUT),
+    ),
+    "consolidation": _WallCeiling(
+        config_attr="consolidation_wall_timeout",
+        env_var=ENV_CONSOLIDATION_WALL_TIMEOUT,
+        extends_on_progress=True,
+    ),
+}
 
 
 def _current_rss_bytes() -> int | None:
@@ -73,21 +114,41 @@ def _wall_timeout_for(task_type: str) -> float | None:
     LLM call or one query, never the whole task — this is the outer backstop
     that turns "wedged until restart" into "failed and retryable".
 
-    Only retain is bounded today; reflect self-bounds inside the engine
-    (``reflect_wall_timeout``) and the remaining types have no reported wedge.
+    For consolidation the ceiling bounds time *without progress* rather than
+    total runtime — see ``_WallCeiling.extends_on_progress``.
+
+    Reflect self-bounds inside the engine (``reflect_wall_timeout``); unmapped
+    task types remain unbounded until they get an explicit ceiling.
     """
-    if task_type in _RETAIN_OP_TYPES:
-        timeout = get_config().retain_wall_timeout
-        return float(timeout) if timeout > 0 else None
-    return None
+    ceiling = _WALL_CEILINGS.get(task_type)
+    if ceiling is None:
+        return None
+    timeout = getattr(get_config(), ceiling.config_attr)
+    return float(timeout) if timeout > 0 else None
 
 
 class _WallTimeoutExceeded(Exception):
     """A task was cancelled because it blew through its wall-clock ceiling."""
 
-    def __init__(self, timeout: float) -> None:
+    def __init__(self, timeout: float, ceiling: "_WallCeiling") -> None:
         super().__init__(f"wall-clock timeout after {timeout:.0f}s")
         self.timeout = timeout
+        self.ceiling = ceiling
+
+    def describe(self, task_type: str, stage: str) -> str:
+        """The operator-facing explanation: what fired, where, and which knob moves it."""
+        if self.ceiling.extends_on_progress:
+            what = (
+                f"Task made no progress for {self.timeout:.0f}s, its wall-clock limit "
+                f"for '{task_type}' (each committed batch restarts the clock, so this is "
+                f"a stall, not a slow job)"
+            )
+        else:
+            what = f"Task exceeded the {self.timeout:.0f}s wall-clock limit for '{task_type}'"
+        return (
+            f"{what} (stage={stage}) and was cancelled. Raise {self.ceiling.env_var} "
+            f"if this is a legitimately long operation, or set it to 0 to disable the limit."
+        )
 
 
 def _updated_row_count(result: Any) -> int:
@@ -228,6 +289,7 @@ class WorkerPoller:
         slot_reservations: dict[str, int] | None = None,
         consolidation_bank_priority: dict[str, int] | None = None,
         max_retries: int = 3,
+        on_wall_timeout: Callable[[dict[str, Any], str | None, str], Awaitable[None]] | None = None,
     ):
         """
         Initialize the worker poller.
@@ -252,10 +314,18 @@ class WorkerPoller:
                 pure created_at order. None or empty dict preserves current behavior.
             max_retries: Maximum retry attempts before a task is marked failed.
                 Must be >= 0. Default 3 (matches DEFAULT_WORKER_MAX_RETRIES).
+            on_wall_timeout: Optional async hook called with (task_dict, schema,
+                error_message) after a task is failed by its wall-clock ceiling.
+                The ceiling cancels the executor, so the engine's own failure
+                handling (which fires the consolidation failure webhook) never
+                runs for that outcome; this hook is how the engine still gets told.
+                Called after the operation row is already failed, and outside the
+                cancelled task, so it can safely do its own DB work.
         """
         self._backend = backend
         self._worker_id = worker_id
         self._executor = executor
+        self._on_wall_timeout = on_wall_timeout
         self._poll_interval_ms = poll_interval_ms
         self._schema = schema
         # Always set tenant extension (use DefaultTenantExtension if none provided)
@@ -958,25 +1028,64 @@ class WorkerPoller:
                     if self._in_flight_by_type[operation_type] == 0:
                         del self._in_flight_by_type[operation_type]
 
-    async def _run_executor(self, task: ClaimedTask, task_type: str) -> None:
+    async def _run_executor(self, task: ClaimedTask, task_type: str, holder: StageHolder | None = None) -> None:
         """Run the task executor under its type's wall-clock ceiling, if it has one."""
         wall_timeout = _wall_timeout_for(task_type)
         if wall_timeout is None:
             await self._executor(task.task_dict)
             return
 
+        ceiling = _WALL_CEILINGS[task_type]
+        # Only an idle ceiling listens for progress; retain's stays absolute.
+        progress_holder = holder if ceiling.extends_on_progress else None
+        loop = asyncio.get_running_loop()
+
         # asyncio.timeout() rather than wait_for(): `expired()` distinguishes our
         # ceiling firing from an inner TimeoutError merely bubbling out (an asyncpg
         # command timeout, say), which wait_for would surface as the same exception.
         # Reporting a task's own timeout as a wedge would send operators hunting for
-        # the wrong thing.
+        # the wrong thing. It also gives us reschedule(), which is what turns the
+        # consolidation ceiling from "total runtime" into "time without progress".
         try:
             async with asyncio.timeout(wall_timeout) as cm:
-                await self._executor(task.task_dict)
+                if progress_holder is not None:
+
+                    def _extend_deadline() -> None:
+                        # Every stage change is progress, so push the deadline out a
+                        # full ceiling from now. reschedule() raises once the timeout
+                        # has fired or the block has exited; by then there is nothing
+                        # left to extend, and set_stage must never raise into engine
+                        # code (a late breadcrumb from an unwinding task is normal).
+                        try:
+                            cm.reschedule(loop.time() + wall_timeout)
+                        except RuntimeError:
+                            pass
+
+                    progress_holder.on_progress = _extend_deadline
+                try:
+                    await self._executor(task.task_dict)
+                finally:
+                    if holder is not None:
+                        holder.on_progress = None
         except asyncio.TimeoutError as e:
             if cm.expired():
-                raise _WallTimeoutExceeded(wall_timeout) from e
+                raise _WallTimeoutExceeded(wall_timeout, ceiling) from e
             raise
+
+    async def _notify_wall_timeout(self, task: ClaimedTask, message: str) -> None:
+        """Tell the engine a task was failed by its ceiling. Never fatal.
+
+        The whole point of the ceiling is that it cancels the executor, which means
+        the engine's own ``except`` blocks — the ones that fire a consolidation
+        failure webhook — are skipped. Without this notification a timed-out
+        consolidation would be the single failure mode subscribers never hear about.
+        """
+        if self._on_wall_timeout is None:
+            return
+        try:
+            await self._on_wall_timeout(task.task_dict, task.schema, message)
+        except Exception as e:
+            logger.warning(f"Wall-timeout notification failed for task {task.operation_id}: {e}")
 
     async def _execute_task_inner(self, task: ClaimedTask, holder: StageHolder | None = None):
         """Inner task execution with retry/fail handling.
@@ -1020,7 +1129,7 @@ class WorkerPoller:
             logger.debug(f"Executing task {task.operation_id} (type={task_type}, bank={bank_id}{schema_info})")
             if task.schema:
                 task.task_dict["_schema"] = task.schema
-            await self._run_executor(task, task_type)
+            await self._run_executor(task, task_type, holder)
             logger.debug(f"Task {task.operation_id} execution finished")
             await self._mark_all_completed(task)
             terminal_success = True
@@ -1031,13 +1140,10 @@ class WorkerPoller:
             # so the stage that was current when the ceiling fired is preserved —
             # that breadcrumb is the only pointer to where the task was stuck.
             stage = holder.stage if holder is not None else "unknown"
-            message = (
-                f"Task exceeded the {e.timeout:.0f}s wall-clock limit for '{task_type}' "
-                f"(stage={stage}) and was cancelled. Raise HINDSIGHT_API_RETAIN_WALL_TIMEOUT "
-                f"if this is a legitimately long operation, or set it to 0 to disable the limit."
-            )
+            message = e.describe(task_type, stage)
             logger.error(f"Task {task.operation_id} timed out: {message}")
             await self._mark_all_failed(task, message)
+            await self._notify_wall_timeout(task, message)
             terminal_success = False
         except DeferOperation as e:
             # Deferral is not a terminal outcome — do not record a completion.

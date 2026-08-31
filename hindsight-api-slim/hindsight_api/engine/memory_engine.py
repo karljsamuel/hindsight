@@ -3370,6 +3370,30 @@ class MemoryEngine(MemoryEngineInterface):
                         )
                     raise
 
+    async def on_task_wall_timeout(self, task_dict: dict[str, Any], schema: str | None, error_message: str) -> None:
+        """Fire the failure notifications a wall-clock-cancelled task could not fire itself.
+
+        The worker's ceiling cancels the executor, so ``execute_task``'s ``except``
+        blocks never run — including the one that fires the consolidation failure
+        webhook on every *other* failure path (transient, deterministic, and
+        retry-exhausted alike). The poller calls this afterwards, from outside the
+        cancelled task, so a timed-out consolidation still reaches subscribers instead
+        of going silent. Best-effort: ``_fire_consolidation_webhook`` logs and swallows.
+        """
+        if task_dict.get("type") != "consolidation":
+            return
+        operation_id = task_dict.get("operation_id")
+        if not operation_id:
+            return
+        await self._fire_consolidation_webhook(
+            bank_id=task_dict.get("bank_id", ""),
+            operation_id=operation_id,
+            status="failed",
+            result=None,
+            error_message=error_message,
+            schema=schema,
+        )
+
     async def _fire_consolidation_webhook(
         self,
         bank_id: str,
