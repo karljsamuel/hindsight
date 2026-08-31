@@ -317,7 +317,11 @@ def _first_choice_or_error(response: Any, *, provider: str, model: str, scope: s
 
 
 def _content_or_error(response: Any, *, provider: str, model: str, scope: str) -> tuple[str, Any]:
-    """Extract message.content while turning provider shape issues into useful errors."""
+    """Extract message.content, turning provider shape issues into useful errors.
+
+    Raises ``OutputTooLongError`` on a token-limit truncation and
+    ``ProviderResponseError`` on every other unusable success shape.
+    """
 
     choice = _first_choice_or_error(response, provider=provider, model=model, scope=scope)
     message = _message_for_choice(choice)
@@ -327,6 +331,26 @@ def _content_or_error(response: Any, *, provider: str, model: str, scope: str) -
             f"Provider returned a choice without message ({provider}/{model}, scope={scope}, "
             f"finish_reason={finish_reason})",
             retryable=True,
+        )
+
+    # chat.completions.create() signals truncation only through finish_reason; unlike
+    # .parse(), it never raises LengthFinishReasonError for the handler in call() to convert.
+    # Checked before the content branch below: an empty response can still be a truncation,
+    # and reading it as empty content instead raises a *retryable* ProviderResponseError,
+    # which re-sends the same request against the same limit (#3811).
+    #
+    # Raised for every scope, not just the ones that recover from it. That matches the
+    # sibling OpenAI-shaped providers (litellm_llm, openai_responses_llm), and it means
+    # a truncated free-form answer — reflect synthesis, a mental-model page — now fails
+    # the call instead of being returned as if complete. Note this is the opposite of
+    # what gemini_llm does for the same signal (it logs a warning and returns the cut
+    # text, see #3365): there the truncation is common because reasoning tokens eat the
+    # visible budget, so failing every such call would be worse than surfacing it. The
+    # two can diverge only until one of them is shown wrong by a real workload.
+    if finish_reason == "length":
+        raise OutputTooLongError(
+            f"LLM output exceeded token limits ({provider}/{model}, scope={scope}). "
+            "Input may need to be split into smaller chunks."
         )
 
     content = _message_content(message)
