@@ -9,11 +9,11 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, get_args
+from typing import Any, Callable, Literal, get_args
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 from hindsight_api import MemoryEngine
 from hindsight_api.api import page_markdown
@@ -77,6 +77,173 @@ _ALL_TOOLS: frozenset[str] = frozenset(
 )
 
 logger = logging.getLogger(__name__)
+
+
+class MentalModelTriggerInput(BaseModel):
+    """The refresh policy of a mental model or knowledge page, as an MCP tool input.
+
+    Mirrors the HTTP ``MentalModelTrigger`` field for field — an agent that read
+    the API docs must not have a call rejected for naming a setting that exists.
+    ``tests/test_mcp_tools.py::test_trigger_input_covers_every_http_trigger_field``
+    fails if the two drift apart.
+
+    The one deliberate difference is that every field is optional with no default:
+    the HTTP model fills unset fields with its own defaults, which makes a partial
+    trigger silently reset the rest, while these tools send only what the caller
+    actually set (``model_dump(exclude_unset=True)``) and the engine merges that
+    over the stored trigger. Passing an explicit ``null`` still clears a setting.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["full", "delta"] | None = Field(
+        default=None,
+        description=(
+            "Refresh mode. 'full' regenerates the content from scratch on each refresh; 'delta' makes "
+            "surgical edits to the existing content, preserving unchanged sections byte-for-byte. Delta "
+            "falls back to a full regeneration when there is no existing content or the source_query changed."
+        ),
+    )
+    refresh_after_consolidation: bool | None = Field(
+        default=None,
+        description="Refresh automatically after observations are consolidated. Mutually exclusive with refresh_cron.",
+    )
+    refresh_cron: str | None = Field(
+        default=None,
+        description=(
+            "UTC five-field cron schedule, e.g. '0 3 * * *' for daily at 03:00 UTC. A scheduled refresh runs "
+            "only when the model is stale, so an unchanged scope costs no LLM call. Mutually exclusive with "
+            "refresh_after_consolidation. null = no schedule."
+        ),
+    )
+    min_refresh_interval_seconds: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Minimum seconds between two AUTOMATIC refreshes. A trigger that arrives sooner is queued and "
+            "parked until the window expires, and further triggers fold into that one queued refresh, so a "
+            "burst of retains costs one refresh. Explicit refreshes ignore it. 0 disables the floor; null "
+            "falls back to the bank/global setting."
+        ),
+    )
+    fact_types: list[Literal["world", "experience", "observation"]] | None = Field(
+        default=None,
+        description="Fact types to retrieve during refresh; null includes all of world, experience and observation.",
+    )
+    exclude_mental_models: bool | None = Field(
+        default=None,
+        description="Exclude ALL mental models from the refresh's reflect loop, so a model never reflects on its siblings.",
+    )
+    exclude_mental_model_ids: list[str] | None = Field(
+        default=None, description="Exclude specific mental models from the refresh's reflect loop, by ID."
+    )
+    tags_match: TagsMatch | None = Field(
+        default=None,
+        description=(
+            "How this model's tags select memories during refresh: any, all, any_strict, all_strict, or exact. "
+            "Unset means 'all_strict' for a tagged model and 'any' for an untagged one."
+        ),
+    )
+    tag_groups: list[TagGroup] | None = Field(
+        default=None,
+        description=(
+            "Compound boolean tag expressions (nested and/or/not) used during refresh INSTEAD of the model's "
+            "flat tags. When set, the model's own tags are not used for filtering."
+        ),
+    )
+    include_chunks: bool | None = Field(
+        default=None,
+        description="Override whether the refresh's internal recall returns raw chunk text. null = bank/global default.",
+    )
+    recall_max_tokens: int | None = Field(
+        default=None,
+        description="Override the token budget for facts from the refresh's internal recall. null = bank/global default.",
+    )
+    recall_chunks_max_tokens: int | None = Field(
+        default=None,
+        description="Override the token budget for raw chunks from the refresh's internal recall. null = bank/global default.",
+    )
+    response_schema: dict | None = Field(
+        default=None,
+        description=(
+            "JSON Schema for structured output. Each refresh then also stores a parsed result under "
+            "reflect_response.structured_output, alongside the markdown content."
+        ),
+    )
+    keep_trace: bool | None = Field(
+        default=None,
+        description=(
+            "Record how each refresh reached its result under reflect_response.trace (mode and why, resolved "
+            "scope and window, facts retrieved vs used, tool and LLM calls, delta operations). Only the latest "
+            "refresh's trace is kept. This is the only way to diagnose a cron- or consolidation-driven refresh, "
+            "since nobody watches those run."
+        ),
+    )
+
+    @field_validator("refresh_cron")
+    @classmethod
+    def validate_refresh_cron(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from croniter import croniter
+
+        # An empty string reads as "no schedule", not as a malformed one — same
+        # normalisation the HTTP model does, so the two accept the same input.
+        value = value.strip()
+        if not value:
+            return None
+        if not croniter.is_valid(value):
+            raise ValueError(f"refresh_cron is not a valid cron expression: {value!r}")
+        return value
+
+    @field_validator("fact_types")
+    @classmethod
+    def validate_fact_types(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None and not value:
+            raise ValueError("fact_types must not be empty; use null to include all fact types")
+        return value
+
+    @model_validator(mode="after")
+    def validate_refresh_exclusivity(self) -> "MentalModelTriggerInput":
+        if self.refresh_after_consolidation and self.refresh_cron:
+            raise ValueError(
+                "refresh_after_consolidation and refresh_cron are mutually exclusive: "
+                "a mental model refreshes either after consolidation or on a cron schedule, not both."
+            )
+        return self
+
+
+def _mental_model_trigger_patch(
+    trigger: MentalModelTriggerInput | None,
+    *,
+    tags_match: str | None = None,
+    refresh_after_consolidation: bool | None = None,
+) -> dict[str, Any] | None:
+    """The trigger patch to send down, folding in the legacy flat MCP arguments.
+
+    ``tags_match`` and ``trigger_refresh_after_consolidation`` predate the trigger
+    object and stay accepted as shorthands. Passing a shorthand AND the same field
+    inside ``trigger`` is a contradiction the caller has to resolve rather than one
+    of the two silently winning.
+    """
+    patch = trigger.model_dump(exclude_unset=True) if trigger is not None else {}
+    for field, param, legacy_value in (
+        ("tags_match", "tags_match", tags_match),
+        ("refresh_after_consolidation", "trigger_refresh_after_consolidation", refresh_after_consolidation),
+    ):
+        if legacy_value is None:
+            continue
+        if field in patch and patch[field] != legacy_value:
+            raise ValueError(
+                f"trigger.{field}={patch[field]!r} conflicts with {param}={legacy_value!r}; set it in one place"
+            )
+        patch[field] = legacy_value
+    if patch.get("refresh_after_consolidation") and patch.get("refresh_cron"):
+        raise ValueError(
+            "refresh_after_consolidation and refresh_cron are mutually exclusive: "
+            "a mental model refreshes either after consolidation or on a cron schedule, not both."
+        )
+    return patch or None
 
 
 @dataclass
@@ -1571,9 +1738,10 @@ def _register_create_mental_model(mcp: FastMCP, memory: MemoryEngine, config: MC
             source_query: str,
             mental_model_id: str | None = None,
             tags: list[str] | None = None,
+            trigger: MentalModelTriggerInput | None = None,
             tags_match: str | None = None,
             max_tokens: int = 2048,
-            trigger_refresh_after_consolidation: bool = False,
+            trigger_refresh_after_consolidation: bool | None = None,
             bank_id: str | None = None,
         ) -> str:
             """
@@ -1599,6 +1767,12 @@ def _register_create_mental_model(mcp: FastMCP, memory: MemoryEngine, config: MC
                     model defaults to 'all_strict' — a memory must carry EVERY one of the model's
                     tags to be included, which silently filters out memories that only carry a
                     subset. Pass 'any' when your memories use narrow single-topic tags.
+                trigger: Refresh policy for this model — when it rebuilds itself (mode,
+                    refresh_after_consolidation, refresh_cron) and what it rebuilds from
+                    (fact_types, tags_match, tag_groups, exclude_mental_models,
+                    recall_max_tokens, ...). Omitted fields use engine defaults. Prefer
+                    this over the flat tags_match/trigger_refresh_after_consolidation
+                    shorthands, which are kept only for existing integrations.
                 max_tokens: Maximum tokens for generated content (256-8192, default: 2048)
                 trigger_refresh_after_consolidation: If True, automatically refresh this model after memory consolidation. Default: False
                 bank_id: Optional bank (defaults to session bank). Use for cross-bank operations.
@@ -1615,9 +1789,13 @@ def _register_create_mental_model(mcp: FastMCP, memory: MemoryEngine, config: MC
                     return json.dumps({"error": validation_error})
 
                 request_context = _get_request_context(config)
-                trigger: dict[str, Any] = {"refresh_after_consolidation": trigger_refresh_after_consolidation}
-                if tags_match is not None:
-                    trigger["tags_match"] = tags_match
+                trigger_patch = _mental_model_trigger_patch(
+                    trigger,
+                    tags_match=tags_match,
+                    refresh_after_consolidation=trigger_refresh_after_consolidation,
+                )
+                if trigger_patch is None and trigger is None:
+                    trigger_patch = {"refresh_after_consolidation": False}
 
                 # Create with placeholder content
                 model = await memory.create_mental_model(
@@ -1628,7 +1806,7 @@ def _register_create_mental_model(mcp: FastMCP, memory: MemoryEngine, config: MC
                     mental_model_id=mental_model_id,
                     tags=tags,
                     max_tokens=max_tokens,
-                    trigger=trigger,
+                    trigger=trigger_patch,
                     request_context=request_context,
                 )
 
@@ -1664,9 +1842,10 @@ def _register_create_mental_model(mcp: FastMCP, memory: MemoryEngine, config: MC
             source_query: str,
             mental_model_id: str | None = None,
             tags: list[str] | None = None,
+            trigger: MentalModelTriggerInput | None = None,
             tags_match: str | None = None,
             max_tokens: int = 2048,
-            trigger_refresh_after_consolidation: bool = False,
+            trigger_refresh_after_consolidation: bool | None = None,
         ) -> dict:
             """
             Create a new mental model (pinned reflection).
@@ -1691,6 +1870,12 @@ def _register_create_mental_model(mcp: FastMCP, memory: MemoryEngine, config: MC
                     model defaults to 'all_strict' — a memory must carry EVERY one of the model's
                     tags to be included, which silently filters out memories that only carry a
                     subset. Pass 'any' when your memories use narrow single-topic tags.
+                trigger: Refresh policy for this model — when it rebuilds itself (mode,
+                    refresh_after_consolidation, refresh_cron) and what it rebuilds from
+                    (fact_types, tags_match, tag_groups, exclude_mental_models,
+                    recall_max_tokens, ...). Omitted fields use engine defaults. Prefer
+                    this over the flat tags_match/trigger_refresh_after_consolidation
+                    shorthands, which are kept only for existing integrations.
                 max_tokens: Maximum tokens for generated content (256-8192, default: 2048)
                 trigger_refresh_after_consolidation: If True, automatically refresh this model after memory consolidation. Default: False
             """
@@ -1706,9 +1891,13 @@ def _register_create_mental_model(mcp: FastMCP, memory: MemoryEngine, config: MC
                     return {"error": validation_error}
 
                 request_context = _get_request_context(config)
-                trigger: dict[str, Any] = {"refresh_after_consolidation": trigger_refresh_after_consolidation}
-                if tags_match is not None:
-                    trigger["tags_match"] = tags_match
+                trigger_patch = _mental_model_trigger_patch(
+                    trigger,
+                    tags_match=tags_match,
+                    refresh_after_consolidation=trigger_refresh_after_consolidation,
+                )
+                if trigger_patch is None and trigger is None:
+                    trigger_patch = {"refresh_after_consolidation": False}
 
                 model = await memory.create_mental_model(
                     bank_id=target_bank,
@@ -1718,7 +1907,7 @@ def _register_create_mental_model(mcp: FastMCP, memory: MemoryEngine, config: MC
                     mental_model_id=mental_model_id,
                     tags=tags,
                     max_tokens=max_tokens,
-                    trigger=trigger,
+                    trigger=trigger_patch,
                     request_context=request_context,
                 )
 
@@ -1756,6 +1945,8 @@ def _register_update_mental_model(mcp: FastMCP, memory: MemoryEngine, config: MC
             source_query: str | None = None,
             max_tokens: int | None = None,
             tags: list[str] | None = None,
+            trigger: MentalModelTriggerInput | None = None,
+            tags_match: str | None = None,
             trigger_refresh_after_consolidation: bool | None = None,
             bank_id: str | None = None,
         ) -> str:
@@ -1771,6 +1962,12 @@ def _register_update_mental_model(mcp: FastMCP, memory: MemoryEngine, config: MC
                 source_query: New source query (leave None to keep current)
                 max_tokens: New max tokens for content generation (256-8192, leave None to keep current)
                 tags: New tags (leave None to keep current)
+                trigger: Refresh policy fields to change — mode, refresh_after_consolidation,
+                    refresh_cron, fact_types, tags_match, tag_groups, exclude_mental_models,
+                    recall_max_tokens, and so on. This is a PATCH: fields you omit keep their
+                    current values, so setting a cron schedule does not reset the model's
+                    fact_types. Pass an explicit null to clear a setting.
+                tags_match: Legacy shorthand for trigger.tags_match
                 trigger_refresh_after_consolidation: If set, update whether this model auto-refreshes after consolidation
                 bank_id: Optional bank (defaults to session bank). Use for cross-bank operations.
             """
@@ -1780,10 +1977,16 @@ def _register_update_mental_model(mcp: FastMCP, memory: MemoryEngine, config: MC
                     return '{"error": "No bank_id configured"}'
 
                 validation_error = _validate_mental_model_inputs(
-                    name=name, source_query=source_query, max_tokens=max_tokens
+                    name=name, source_query=source_query, max_tokens=max_tokens, tags_match=tags_match
                 )
                 if validation_error:
                     return json.dumps({"error": validation_error})
+
+                trigger_patch = _mental_model_trigger_patch(
+                    trigger,
+                    tags_match=tags_match,
+                    refresh_after_consolidation=trigger_refresh_after_consolidation,
+                )
 
                 update_kwargs: dict[str, Any] = {
                     "bank_id": target_bank,
@@ -1794,8 +1997,8 @@ def _register_update_mental_model(mcp: FastMCP, memory: MemoryEngine, config: MC
                     "tags": tags,
                     "request_context": _get_request_context(config),
                 }
-                if trigger_refresh_after_consolidation is not None:
-                    update_kwargs["trigger"] = {"refresh_after_consolidation": trigger_refresh_after_consolidation}
+                if trigger_patch is not None:
+                    update_kwargs["trigger"] = trigger_patch
 
                 model = await memory.update_mental_model(**update_kwargs)
                 if model is None:
@@ -1817,6 +2020,8 @@ def _register_update_mental_model(mcp: FastMCP, memory: MemoryEngine, config: MC
             source_query: str | None = None,
             max_tokens: int | None = None,
             tags: list[str] | None = None,
+            trigger: MentalModelTriggerInput | None = None,
+            tags_match: str | None = None,
             trigger_refresh_after_consolidation: bool | None = None,
         ) -> dict:
             """
@@ -1831,6 +2036,12 @@ def _register_update_mental_model(mcp: FastMCP, memory: MemoryEngine, config: MC
                 source_query: New source query (leave None to keep current)
                 max_tokens: New max tokens for content generation (256-8192, leave None to keep current)
                 tags: New tags (leave None to keep current)
+                trigger: Refresh policy fields to change — mode, refresh_after_consolidation,
+                    refresh_cron, fact_types, tags_match, tag_groups, exclude_mental_models,
+                    recall_max_tokens, and so on. This is a PATCH: fields you omit keep their
+                    current values, so setting a cron schedule does not reset the model's
+                    fact_types. Pass an explicit null to clear a setting.
+                tags_match: Legacy shorthand for trigger.tags_match
                 trigger_refresh_after_consolidation: If set, update whether this model auto-refreshes after consolidation
             """
             try:
@@ -1839,10 +2050,16 @@ def _register_update_mental_model(mcp: FastMCP, memory: MemoryEngine, config: MC
                     return {"error": "No bank_id configured"}
 
                 validation_error = _validate_mental_model_inputs(
-                    name=name, source_query=source_query, max_tokens=max_tokens
+                    name=name, source_query=source_query, max_tokens=max_tokens, tags_match=tags_match
                 )
                 if validation_error:
                     return {"error": validation_error}
+
+                trigger_patch = _mental_model_trigger_patch(
+                    trigger,
+                    tags_match=tags_match,
+                    refresh_after_consolidation=trigger_refresh_after_consolidation,
+                )
 
                 update_kwargs: dict[str, Any] = {
                     "bank_id": target_bank,
@@ -1853,8 +2070,8 @@ def _register_update_mental_model(mcp: FastMCP, memory: MemoryEngine, config: MC
                     "tags": tags,
                     "request_context": _get_request_context(config),
                 }
-                if trigger_refresh_after_consolidation is not None:
-                    update_kwargs["trigger"] = {"refresh_after_consolidation": trigger_refresh_after_consolidation}
+                if trigger_patch is not None:
+                    update_kwargs["trigger"] = trigger_patch
 
                 model = await memory.update_mental_model(**update_kwargs)
                 if model is None:
@@ -2183,18 +2400,6 @@ def _knowledge_tree_json(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return roots
 
 
-def _page_trigger_patch(refresh_after_consolidation: bool | None) -> dict[str, Any] | None:
-    """Build the trigger patch for the one refresh setting exposed over MCP.
-
-    The engine merges a patch over the page's defaults (create) or its current
-    trigger (update), so sending only this field leaves the rest — delta mode,
-    observation-only facts — as they were.
-    """
-    if refresh_after_consolidation is None:
-        return None
-    return {"refresh_after_consolidation": refresh_after_consolidation}
-
-
 async def _do_get_knowledge_base_tree(
     memory: MemoryEngine, target_bank: str, request_context: RequestContext
 ) -> dict[str, Any]:
@@ -2259,6 +2464,7 @@ async def _do_create_knowledge_page(
     parent_id: str | None,
     tags: list[str] | None,
     max_tokens: int | None,
+    trigger: MentalModelTriggerInput | None,
     refresh_after_consolidation: bool | None,
 ) -> dict[str, Any]:
     """Shared implementation for the create_knowledge_page MCP tool variants."""
@@ -2270,7 +2476,10 @@ async def _do_create_knowledge_page(
         parent_id=parent_id,
         tags=tags or None,
         max_tokens=max_tokens,
-        trigger=_page_trigger_patch(refresh_after_consolidation),
+        # Only the fields the caller stated: the engine merges them over
+        # KNOWLEDGE_PAGE_DEFAULT_TRIGGER, so an unmentioned setting keeps the page
+        # contract (delta mode, observation-only facts, sibling pages excluded).
+        trigger=_mental_model_trigger_patch(trigger, refresh_after_consolidation=refresh_after_consolidation),
         request_context=request_context,
     )
     if node is None:
@@ -2298,6 +2507,7 @@ async def _do_update_knowledge_node(
     source_query: str | None,
     tags: list[str] | None,
     max_tokens: int | None,
+    trigger: MentalModelTriggerInput | None,
     refresh_after_consolidation: bool | None,
 ) -> dict[str, Any]:
     """Shared implementation for the update_knowledge_node MCP tool variants.
@@ -2305,12 +2515,14 @@ async def _do_update_knowledge_node(
     Each field is applied only when provided, so a rename never resets a page's
     query and moving a page never drops its tags.
     """
-    trigger = _page_trigger_patch(refresh_after_consolidation)
-    page_update = source_query is not None or tags is not None or max_tokens is not None or trigger is not None
+    # A patch, merged over the page's CURRENT trigger by the engine, so putting a
+    # page on a cron schedule does not reset how or from what it rebuilds.
+    trigger_patch = _mental_model_trigger_patch(trigger, refresh_after_consolidation=refresh_after_consolidation)
+    page_update = source_query is not None or tags is not None or max_tokens is not None or trigger_patch is not None
     if name is None and parent_id is None and not page_update:
         return {
             "error": "Provide name, parent_id, source_query, tags, max_tokens, "
-            "and/or refresh_after_consolidation to update"
+            "trigger, and/or refresh_after_consolidation to update"
         }
 
     # One call, one transaction: a rename must not survive the move that fails
@@ -2324,7 +2536,7 @@ async def _do_update_knowledge_node(
         source_query=source_query,
         tags=tags,
         max_tokens=max_tokens,
-        trigger=trigger,
+        trigger=trigger_patch,
         request_context=request_context,
     )
     if updated is None:
@@ -2639,6 +2851,7 @@ def _register_create_knowledge_page(mcp: FastMCP, memory: MemoryEngine, config: 
             parent_id: str | None = None,
             tags: list[str] | None = None,
             max_tokens: int | None = None,
+            trigger: MentalModelTriggerInput | None = None,
             refresh_after_consolidation: bool | None = None,
             bank_id: str | None = None,
         ) -> str:
@@ -2660,8 +2873,14 @@ def _register_create_knowledge_page(mcp: FastMCP, memory: MemoryEngine, config: 
                 parent_id: Optional parent folder id (a `kf-...` node id). Omit to create at the top level.
                 tags: Optional tags scoping which memories the page is built from
                 max_tokens: Maximum tokens for the generated content (default: 4096)
-                refresh_after_consolidation: Whether the page rebuilds itself after each memory
-                    consolidation. Omit to keep the knowledge-page default (True).
+                trigger: Refresh policy for this page — when it rebuilds itself (mode,
+                    refresh_after_consolidation, refresh_cron) and what it rebuilds from
+                    (fact_types, tags_match, tag_groups, exclude_mental_models,
+                    recall_max_tokens, ...). Omitted fields keep the knowledge-page
+                    defaults: incremental (delta) rebuilds from consolidated observations
+                    after each consolidation, ignoring sibling pages. Set refresh_cron
+                    instead to move the page onto a fixed UTC schedule.
+                refresh_after_consolidation: Legacy shorthand for trigger.refresh_after_consolidation.
                 bank_id: Optional bank (defaults to session bank). Use for cross-bank operations.
             """
             try:
@@ -2678,6 +2897,7 @@ def _register_create_knowledge_page(mcp: FastMCP, memory: MemoryEngine, config: 
                     parent_id=parent_id,
                     tags=tags,
                     max_tokens=max_tokens,
+                    trigger=trigger,
                     refresh_after_consolidation=refresh_after_consolidation,
                 )
                 return json.dumps(result, indent=2, default=str)
@@ -2699,6 +2919,7 @@ def _register_create_knowledge_page(mcp: FastMCP, memory: MemoryEngine, config: 
             parent_id: str | None = None,
             tags: list[str] | None = None,
             max_tokens: int | None = None,
+            trigger: MentalModelTriggerInput | None = None,
             refresh_after_consolidation: bool | None = None,
         ) -> dict:
             """
@@ -2719,8 +2940,14 @@ def _register_create_knowledge_page(mcp: FastMCP, memory: MemoryEngine, config: 
                 parent_id: Optional parent folder id (a `kf-...` node id). Omit to create at the top level.
                 tags: Optional tags scoping which memories the page is built from
                 max_tokens: Maximum tokens for the generated content (default: 4096)
-                refresh_after_consolidation: Whether the page rebuilds itself after each memory
-                    consolidation. Omit to keep the knowledge-page default (True).
+                trigger: Refresh policy for this page — when it rebuilds itself (mode,
+                    refresh_after_consolidation, refresh_cron) and what it rebuilds from
+                    (fact_types, tags_match, tag_groups, exclude_mental_models,
+                    recall_max_tokens, ...). Omitted fields keep the knowledge-page
+                    defaults: incremental (delta) rebuilds from consolidated observations
+                    after each consolidation, ignoring sibling pages. Set refresh_cron
+                    instead to move the page onto a fixed UTC schedule.
+                refresh_after_consolidation: Legacy shorthand for trigger.refresh_after_consolidation.
             """
             try:
                 target_bank = config.bank_id_resolver()
@@ -2736,6 +2963,7 @@ def _register_create_knowledge_page(mcp: FastMCP, memory: MemoryEngine, config: 
                     parent_id=parent_id,
                     tags=tags,
                     max_tokens=max_tokens,
+                    trigger=trigger,
                     refresh_after_consolidation=refresh_after_consolidation,
                 )
             except OperationValidationError as e:
@@ -2761,6 +2989,7 @@ def _register_update_knowledge_node(mcp: FastMCP, memory: MemoryEngine, config: 
             source_query: str | None = None,
             tags: list[str] | None = None,
             max_tokens: int | None = None,
+            trigger: MentalModelTriggerInput | None = None,
             refresh_after_consolidation: bool | None = None,
             bank_id: str | None = None,
         ) -> str:
@@ -2778,8 +3007,14 @@ def _register_update_knowledge_node(mcp: FastMCP, memory: MemoryEngine, config: 
                 source_query: Pages only — the new question the page answers
                 tags: Pages only — replacement tag list (pass [] to clear)
                 max_tokens: Pages only — new maximum tokens for the generated content
-                refresh_after_consolidation: Pages only — whether the page rebuilds itself
-                    after each memory consolidation
+                trigger: Pages only — refresh policy fields to change: mode,
+                    refresh_after_consolidation, refresh_cron, fact_types, tags_match,
+                    tag_groups, exclude_mental_models, recall_max_tokens, and so on. This
+                    is a PATCH: fields you omit keep their current values, so putting a
+                    page on a cron schedule does not reset its delta mode or its
+                    observation-only scope.
+                refresh_after_consolidation: Pages only — legacy shorthand for
+                    trigger.refresh_after_consolidation
                 bank_id: Optional bank (defaults to session bank). Use for cross-bank operations.
             """
             try:
@@ -2797,6 +3032,7 @@ def _register_update_knowledge_node(mcp: FastMCP, memory: MemoryEngine, config: 
                     source_query=source_query,
                     tags=tags,
                     max_tokens=max_tokens,
+                    trigger=trigger,
                     refresh_after_consolidation=refresh_after_consolidation,
                 )
                 return json.dumps(result, indent=2, default=str)
@@ -2819,6 +3055,7 @@ def _register_update_knowledge_node(mcp: FastMCP, memory: MemoryEngine, config: 
             source_query: str | None = None,
             tags: list[str] | None = None,
             max_tokens: int | None = None,
+            trigger: MentalModelTriggerInput | None = None,
             refresh_after_consolidation: bool | None = None,
         ) -> dict:
             """
@@ -2835,8 +3072,14 @@ def _register_update_knowledge_node(mcp: FastMCP, memory: MemoryEngine, config: 
                 source_query: Pages only — the new question the page answers
                 tags: Pages only — replacement tag list (pass [] to clear)
                 max_tokens: Pages only — new maximum tokens for the generated content
-                refresh_after_consolidation: Pages only — whether the page rebuilds itself
-                    after each memory consolidation
+                trigger: Pages only — refresh policy fields to change: mode,
+                    refresh_after_consolidation, refresh_cron, fact_types, tags_match,
+                    tag_groups, exclude_mental_models, recall_max_tokens, and so on. This
+                    is a PATCH: fields you omit keep their current values, so putting a
+                    page on a cron schedule does not reset its delta mode or its
+                    observation-only scope.
+                refresh_after_consolidation: Pages only — legacy shorthand for
+                    trigger.refresh_after_consolidation
             """
             try:
                 target_bank = config.bank_id_resolver()
@@ -2853,6 +3096,7 @@ def _register_update_knowledge_node(mcp: FastMCP, memory: MemoryEngine, config: 
                     source_query=source_query,
                     tags=tags,
                     max_tokens=max_tokens,
+                    trigger=trigger,
                     refresh_after_consolidation=refresh_after_consolidation,
                 )
             except OperationValidationError as e:

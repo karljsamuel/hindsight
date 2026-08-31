@@ -23,7 +23,7 @@ import sys
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, ParamSpec, TypeVar, cast, overload
@@ -15317,7 +15317,9 @@ class MemoryEngine(MemoryEngineInterface):
             if embedding:
                 new_embedding_str = str(embedding[0])
 
-        async with use_or_acquire(backend, conn) as conn:
+        # The exit stack carries the row lock a trigger patch takes below; it stays
+        # empty (and free) on every other update.
+        async with use_or_acquire(backend, conn) as conn, AsyncExitStack() as stack:
             # If content is changing, fetch current content + reflect_response to record history
             previous_content: str | None = None
             previous_reflect_response: dict[str, Any] | None = None
@@ -15338,15 +15340,22 @@ class MemoryEngine(MemoryEngineInterface):
             # A supplied trigger PATCHES the stored one (see _merge_trigger): callers
             # send only the fields they set, so the rest have to be read back rather
             # than defaulted. Only paid for when a trigger is actually being changed.
+            #
+            # Read-modify-write, so the row is locked for the rest of the statement:
+            # two concurrent patches (an agent setting a cron while another flips
+            # fact_types) would otherwise both merge onto the same pre-image and the
+            # later write would drop the earlier one. Only this path takes the lock —
+            # a refresh passes no trigger and stays lock-free.
             if trigger is not None:
+                await stack.enter_async_context(conn.transaction())
                 trigger_row = await conn.fetchrow(
-                    f"SELECT trigger FROM {fq_table('mental_models')} WHERE bank_id = $1 AND id = $2",
+                    f"SELECT trigger FROM {fq_table('mental_models')} WHERE bank_id = $1 AND id = $2 FOR UPDATE",
                     bank_id,
                     mental_model_id,
                 )
-                trigger = self._merge_trigger(
-                    trigger, base=self._stored_trigger(trigger_row["trigger"]) if trigger_row else {}
-                )
+                if trigger_row is None:
+                    return None
+                trigger = self._merge_trigger(trigger, base=self._stored_trigger(trigger_row["trigger"]))
 
             # Build dynamic update
             updates = []
@@ -15723,9 +15732,15 @@ class MemoryEngine(MemoryEngineInterface):
         producing a combination no request could have expressed. That matters in
         both directions on update — moving a page onto a cron schedule has to clear
         the auto-refresh it was created with, and moving it back has to clear the
-        cron.
+        cron. A patch that states BOTH is not a merge question but a contradictory
+        request, and is rejected rather than stored as a pair the API itself refuses.
         """
         supplied = trigger or {}
+        if supplied.get("refresh_after_consolidation") and supplied.get("refresh_cron"):
+            raise ValueError(
+                "refresh_after_consolidation and refresh_cron are mutually exclusive: "
+                "a mental model refreshes either after consolidation or on a cron schedule, not both."
+            )
         merged = {**(self.KNOWLEDGE_PAGE_DEFAULT_TRIGGER if base is None else base), **supplied}
         if supplied.get("refresh_cron") and "refresh_after_consolidation" not in supplied:
             merged.pop("refresh_after_consolidation", None)
