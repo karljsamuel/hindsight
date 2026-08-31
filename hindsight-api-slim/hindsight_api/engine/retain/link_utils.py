@@ -8,6 +8,8 @@ import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
+import numpy as np
+
 from ..._vector_index import ann_search_tuning_settings, configured_vector_extension
 from ..causal_links import (
     CANONICAL_CAUSAL_LINK_TYPES,
@@ -740,8 +742,6 @@ def compute_semantic_links_within_batch(
     """
     if len(unit_ids) < 2:
         return []
-
-    import numpy as np
 
     links = []
     new_embeddings_matrix = np.asarray(embeddings, dtype=float)
