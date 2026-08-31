@@ -13908,6 +13908,18 @@ class MemoryEngine(MemoryEngineInterface):
 
         """
         await self._authenticate_tenant(request_context)
+        # Suppressed under _authorize_nested_operations: export_knowledge_base reads
+        # every page's history under its own single EXPORT_KNOWLEDGE_BASE gate, and
+        # must not bill one read per page on top of it.
+        if self._operation_validator and not _nested_operation_authorized.get():
+            from hindsight_api.extensions import BankReadContext, BankReadOperation
+
+            ctx = BankReadContext(
+                bank_id=bank_id,
+                operation=BankReadOperation.GET_MENTAL_MODEL_HISTORY,
+                request_context=request_context,
+            )
+            await self._validate_operation(self._operation_validator.validate_bank_read(ctx))
         backend = await self._get_backend()
         async with acquire_with_retry(backend) as conn:
             exists = await conn.fetchrow(
