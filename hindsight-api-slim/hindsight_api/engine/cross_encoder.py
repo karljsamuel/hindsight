@@ -244,9 +244,12 @@ class LocalSTCrossEncoder(CrossEncoderModel):
                 max_workers=LocalSTCrossEncoder._max_concurrent,
                 thread_name_prefix="reranker",
             )
-            logger.info(f"Reranker: local provider initialized (max_concurrent={LocalSTCrossEncoder._max_concurrent})")
+            logger.info(
+                f"Reranker: local provider initialized "
+                f"(device: {self._device_type}, max_concurrent={LocalSTCrossEncoder._max_concurrent})"
+            )
         else:
-            logger.info("Reranker: local provider initialized (using existing executor)")
+            logger.info(f"Reranker: local provider initialized (device: {self._device_type}, using existing executor)")
 
     def _predict_sync(self, pairs: list[tuple[str, str]]) -> list[float]:
         """Synchronous prediction wrapper for thread pool execution.

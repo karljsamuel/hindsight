@@ -111,6 +111,20 @@ The slim image corresponds to the [`hindsight-api-slim`](#bare-metal-pip) pip pa
 
 Neither image bundles llama.cpp, so the built-in `llamacpp` provider is not available in Docker. To run inference locally, start llama.cpp (or Ollama, LM Studio, vLLM) alongside Hindsight and point `HINDSIGHT_API_LLM_BASE_URL` at it — see [`docker/docker-compose/local-llm/`](https://github.com/vectorize-io/hindsight/tree/main/docker/docker-compose/local-llm) for a working compose file.
 
+### NVIDIA GPU Acceleration (CUDA)
+
+To run in-process local embedding and reranker models on an NVIDIA GPU, build a custom CUDA-enabled image using the recipe in [`docker/docker-compose/cuda/`](https://github.com/vectorize-io/hindsight/tree/main/docker/docker-compose/cuda):
+
+```bash
+docker compose -f docker/docker-compose/cuda/docker-compose.yaml up --build
+```
+
+The recipe upgrades in-process PyTorch to CUDA 12.6 and configures GPU passthrough via the NVIDIA Container Toolkit. Build it on the machine that will run it — an emulated cross-architecture image cannot reach the GPU.
+
+The CUDA runtime is additive: the base image's CPU PyTorch wheel stays in the lower layers, so the result is **roughly 11 GB on disk** against the ~9 GB Full image. This is why no CUDA image is published — the cost is only worth paying when you actually have a GPU to use.
+
+See [`docker/docker-compose/cuda/README.md`](https://github.com/vectorize-io/hindsight/tree/main/docker/docker-compose/cuda) for prerequisites, manual build steps, and verification.
+
 ### Bundling Custom Models in a Custom Image
 
 :::tip Production deployments with non-default local models
