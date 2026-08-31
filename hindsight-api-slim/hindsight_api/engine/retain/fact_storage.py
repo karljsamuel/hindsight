@@ -13,7 +13,7 @@ from typing import Any
 from ...config import _get_raw_config
 from ..memory_engine import fq_table
 from ..metadata_utils import drop_null_values
-from .bank_utils import DEFAULT_DISPOSITION, create_bank_vector_indexes
+from .bank_utils import create_bank_row_on_conn
 from .fact_extraction import _sanitize_text
 from .types import ProcessedFact
 
@@ -131,7 +131,10 @@ async def ensure_bank_exists(conn, bank_id: str, *, ops) -> None:
     """
     Ensure bank exists in the database.
 
-    Creates bank with default values if it doesn't exist.
+    Creates bank with default values if it doesn't exist. Retain's entry point
+    into the lazy bank-create; the row and its per-bank vector indexes are
+    written by ``bank_utils.create_bank_row_on_conn`` so that a bank born here
+    is byte-for-byte the same as one born through ``get_or_create_bank_profile``.
 
     Args:
         conn: Database connection
@@ -141,28 +144,7 @@ async def ensure_bank_exists(conn, bank_id: str, *, ops) -> None:
             than defaulting to None, because it is dereferenced only in that
             branch — a caller that omitted it worked until the threshold was off.
     """
-    # internal_id is generated here rather than defaulted server-side so the
-    # value is known without a RETURNING round-trip: the index names derive
-    # from it.
-    internal_id = uuid.uuid4()
-    inserted = await conn.fetchval(
-        f"""
-        INSERT INTO {fq_table("banks")} (bank_id, name, disposition, mission, internal_id)
-        VALUES ($1, $2, $3::jsonb, $4, $5)
-        ON CONFLICT (bank_id) DO NOTHING
-        RETURNING bank_id
-        """,
-        bank_id,
-        bank_id,  # Default name is the bank_id (matches get_or_create_bank_profile)
-        json.dumps(DEFAULT_DISPOSITION),
-        "",
-        internal_id,
-    )
-    if inserted:
-        # Fresh insert — create per-bank vector indexes. A no-op unless the size
-        # threshold is off, in which case the maintenance operation owns them;
-        # see create_bank_vector_indexes.
-        await create_bank_vector_indexes(conn, bank_id, str(internal_id), ops=ops)
+    await create_bank_row_on_conn(conn, bank_id, ops=ops)
 
 
 async def delete_stale_observations_for_memories(
