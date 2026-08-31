@@ -36,7 +36,8 @@ def test_native_uses_tsvector_operators():
 def test_pgroonga_uses_multilingual_expression_index():
     arm = _arm("pgroonga")
     assert arm.score_expr == "pgroonga_score(mm.tableoid, mm.ctid)"
-    assert arm.match_filter == "AND (COALESCE(mm.name, '') || ' ' || mm.content) &@~ pgroonga_query_escape($3)"
+    assert "pgroonga_tokenize($3, 'tokenizer', 'TokenBigram', 'normalizer', 'NormalizerNFKC150')" in arm.match_filter
+    assert "string_agg(pgroonga_query_escape(elem->>'value'), ' OR ')" in arm.match_filter
     # pgroonga_score() reads 0 off any plan that did not use the pgroonga index,
     # so the ordering carries a tiebreak instead of collapsing to input order.
     assert arm.order_by == "pgroonga_score(mm.tableoid, mm.ctid) DESC, mm.id"

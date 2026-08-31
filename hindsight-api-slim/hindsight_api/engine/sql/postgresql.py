@@ -101,13 +101,20 @@ def knowledge_bm25_arm(
         # pgroonga_score() only returns a real score off a pgroonga index scan and
         # silently reads 0 for every row otherwise, so the id tiebreak keeps the
         # arm's ordering deterministic if the planner ever picks another plan.
-        # pgroonga_query_escape neutralises operator characters in user text.
+        # Tokenize with pgroonga_tokenize (TokenBigram + NormalizerNFKC150) and join
+        # with disjunctive OR. Joining with OR aligns candidate recall with native
+        # tsvector's '|' recall strategy; precision is restored downstream via BM25
+        # ranking, RRF fusion, and Cross-Encoder reranking.
         score = f"pgroonga_score({a}.tableoid, {a}.ctid)"
         document = mental_models_text_document(a)
+        query_expr = (
+            f"(SELECT string_agg(pgroonga_query_escape(elem->>'value'), ' OR ') "
+            f"FROM unnest(pgroonga_tokenize({p}, 'tokenizer', 'TokenBigram', 'normalizer', 'NormalizerNFKC150')) AS elem)"
+        )
         return KnowledgeBm25Arm(
             score_expr=score,
             order_by=f"{score} DESC, {a}.id",
-            match_filter=f"AND {document} &@~ pgroonga_query_escape({p})",
+            match_filter=f"AND {document} &@~ {query_expr}",
         )
 
     # native: generated tsvector over name + content.
@@ -314,14 +321,22 @@ class PostgreSQLDialect(SQLDialect):
             bm25_order_by = f"text <@> to_bm25query({text_param}, 'idx_memory_units_text_search') ASC"
             bm25_where_filter = ""
         elif text_search_extension == "pgroonga":
-            # &@~ accepts pgroonga's query syntax. Escape the bind parameter so
-            # literal memory text containing operators like ">" or "(" is not
-            # parsed as a malformed query expression.
+            # &@~ accepts pgroonga's query syntax. Tokenize the raw query with
+            # pgroonga_tokenize using TokenBigram + NormalizerNFKC150 (the same
+            # configuration as the index DDL) and aggregate tokens with disjunctive OR.
+            # Joining with OR aligns PGroonga with native tsvector's '|' candidate
+            # generation strategy (broadening recall across all scripts); precision
+            # is restored downstream via BM25 score ranking, multi-arm RRF fusion,
+            # and Cross-Encoder reranking.
             bm25_score_expr = "pgroonga_score(tableoid, ctid)"
             bm25_order_by = f"{bm25_score_expr} DESC"
+            query_expr = (
+                f"(SELECT string_agg(pgroonga_query_escape(elem->>'value'), ' OR ') "
+                f"FROM unnest(pgroonga_tokenize({text_param}, 'tokenizer', 'TokenBigram', 'normalizer', 'NormalizerNFKC150')) AS elem)"
+            )
             bm25_where_filter = (
                 f"AND (COALESCE(text, '') || ' ' || COALESCE(context, '') || ' ' || COALESCE(text_signals, '')) "
-                f"&@~ pgroonga_query_escape({text_param})"
+                f"&@~ {query_expr}"
             )
         elif text_search_extension == "pg_search":
             # ParadeDB pg_search: BM25 index over (id, text, context, text_signals)
@@ -368,7 +383,7 @@ class PostgreSQLDialect(SQLDialect):
         text_search_extension: str = "native",
         max_query_terms: int | None = None,
     ) -> str:
-        if text_search_extension in ("vchord", "pg_textsearch", "pgroonga", "pg_search"):
+        if text_search_extension in ("vchord", "pg_textsearch", "pg_search", "pgroonga"):
             return query_text
         if max_query_terms is not None and max_query_terms > 0:
             tokens = tokens[:max_query_terms]

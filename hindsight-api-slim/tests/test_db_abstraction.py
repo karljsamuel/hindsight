@@ -312,11 +312,10 @@ class TestPostgreSQLDialect:
             text_param="$4",
             text_search_extension="pgroonga",
         )
-        # pgroonga uses the &@~ operator + pgroonga_score for ranking. Escape
-        # the query parameter so literal text containing pgroonga operators is
-        # not parsed as query syntax.
-        assert "&@~ pgroonga_query_escape($4)" in arm
-        assert "&@~ $4" not in arm
+        # pgroonga uses the &@~ operator + pgroonga_score for ranking with inline
+        # pgroonga_tokenize aggregation.
+        assert "&@~ (SELECT string_agg(pgroonga_query_escape(elem->>'value'), ' OR ')" in arm
+        assert "pgroonga_tokenize($4, 'tokenizer', 'TokenBigram', 'normalizer', 'NormalizerNFKC150')" in arm
         assert "pgroonga_score(tableoid, ctid)" in arm
         assert "to_tsquery" not in arm
 
@@ -384,10 +383,11 @@ class TestPostgreSQLDialect:
         assert result == "hello world"
 
     def test_prepare_bm25_text_pgroonga(self, d):
-        # Keep the user's text unchanged here; the SQL builder escapes the bind
-        # parameter at query time before invoking pgroonga's query parser.
         result = d.prepare_bm25_text(["hello", "world"], "hello world", text_search_extension="pgroonga")
         assert result == "hello world"
+
+        result = d.prepare_bm25_text(["网关计划任务"], "网关计划任务", text_search_extension="pgroonga")
+        assert result == "网关计划任务"
 
     def test_prepare_bm25_text_pg_search(self, d):
         result = d.prepare_bm25_text(["hello", "world"], "hello world", text_search_extension="pg_search")

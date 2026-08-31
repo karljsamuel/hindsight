@@ -372,9 +372,24 @@ def test_postgresql_extension_bm25_keeps_raw_query_text():
     query = "Alpha beta alpha, gamma delta beta epsilon"
     tokens = tokenize_query(query)
 
-    assert (
-        PostgreSQLDialect().prepare_bm25_text(tokens, query, text_search_extension="vchord", max_query_terms=3) == query
+    for ext in ("vchord", "pg_search", "pg_textsearch", "pgroonga"):
+        assert (
+            PostgreSQLDialect().prepare_bm25_text(tokens, query, text_search_extension=ext, max_query_terms=3) == query
+        )
+
+
+def test_postgresql_pgroonga_bm25_arm_uses_pgroonga_tokenize():
+    arm = PostgreSQLDialect().build_bm25_arm(
+        table="memory_units",
+        cols="id, text",
+        fact_type="world",
+        bank_id_param="$2",
+        limit_param="$3",
+        text_param="$4",
+        text_search_extension="pgroonga",
     )
+    assert "pgroonga_tokenize($4, 'tokenizer', 'TokenBigram', 'normalizer', 'NormalizerNFKC150')" in arm
+    assert "string_agg(pgroonga_query_escape(elem->>'value'), ' OR ')" in arm
 
 
 @pytest.mark.asyncio
