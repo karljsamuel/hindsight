@@ -20,6 +20,7 @@ from .prompts import (
     _SPLIT_SYNTHESIS_WARN_CHUNKS,
     CLAIMS_SYSTEM_PROMPT,
     _extract_directive_rules,
+    build_agent_user_prompt,
     build_chunk_claims_prompt,
     build_final_prompt,
     build_final_system_prompt,
@@ -522,6 +523,7 @@ async def _run_reflect_agent_inner(
         include_recall=include_recall,
         include_expand=include_expand,
         answer_as_document=answer_as_document,
+        llm_output_language=llm_output_language,
     )
     # Build set of enabled tool names to guard against LLM hallucinating disabled tool calls
     enabled_tools: frozenset[str] = frozenset(t["function"]["name"] for t in tools if t.get("type") == "function")
@@ -535,10 +537,11 @@ async def _run_reflect_agent_inner(
         include_observations=include_observations,
         budget=budget,
         answer_as_document=answer_as_document,
+        llm_output_language=llm_output_language,
     )
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": query},
+        {"role": "user", "content": build_agent_user_prompt(query, llm_output_language)},
     ]
 
     # Step-by-step context caching for the agentic tool loop.
@@ -729,6 +732,7 @@ async def _run_reflect_agent_inner(
                 context,
                 max_context_tokens=max_context_tokens,
                 max_tokens=max_tokens,
+                llm_output_language=llm_output_language,
             )
             answer = await _tracked_llm_call(prompt, "final", final_system, synthesis_max_completion_tokens)
         else:
@@ -750,7 +754,14 @@ async def _run_reflect_agent_inner(
                 )
             )
             # Reduce: one synthesis call over every chunk's claims.
-            prompt = build_reduce_prompt(query, list(claim_sections), bank_profile, context, max_tokens=max_tokens)
+            prompt = build_reduce_prompt(
+                query,
+                list(claim_sections),
+                bank_profile,
+                context,
+                max_tokens=max_tokens,
+                llm_output_language=llm_output_language,
+            )
             answer = await _tracked_llm_call(prompt, "final", final_system, synthesis_max_completion_tokens)
 
         if not (answer or "").strip():

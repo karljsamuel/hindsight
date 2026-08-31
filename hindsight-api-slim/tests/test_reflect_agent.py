@@ -284,6 +284,54 @@ class TestReflectAgentMocked:
         assert "name" not in tool_result
 
     @pytest.mark.asyncio
+    async def test_output_language_reaches_the_done_path(self, mock_llm, mock_functions):
+        """The tool-calling model — the one that writes done() — sees the configured
+        language: its system prompt drops the answer-in-the-question's-language rule and
+        the directive closes the user message. Forced synthesis is never reached here, so
+        fixing ``build_final_system_prompt`` alone would leave this call untouched (#3776).
+        """
+        mock_functions["search_mental_models_fn"].return_value = {
+            "mental_models": [{"id": "mm-1", "name": "User prefs", "content": "Fresh content.", "is_stale": False}]
+        }
+        mock_llm.call_with_tools.side_effect = [
+            self._mm_call(),
+            LLMToolCallResult(
+                tool_calls=[
+                    LLMToolCall(id="2", name="done", arguments={"answer": "Done.", "mental_model_ids": ["mm-1"]})
+                ],
+                finish_reason="tool_calls",
+            ),
+        ]
+
+        result = await run_reflect_agent(
+            llm_config=mock_llm,
+            bank_id="test-bank",
+            query="张伟负责什么工作？",
+            bank_profile={"name": "Test", "mission": ""},
+            has_mental_models=True,
+            budget="low",
+            max_iterations=5,
+            llm_output_language="English",
+            **mock_functions,
+        )
+
+        assert result.text == "Done."
+        mock_llm.call.assert_not_called()  # answered via done(), not forced synthesis
+        for call in mock_llm.call_with_tools.await_args_list:
+            messages = call.kwargs["messages"]
+            assert messages[0]["role"] == "system"
+            assert "respond in that SAME language" not in messages[0]["content"]
+            assert "Respond exclusively in English" not in messages[0]["content"]
+            assert messages[1]["role"] == "user"
+            assert messages[1]["content"].startswith("张伟负责什么工作？")
+            assert "Respond exclusively in English" in messages[1]["content"]
+            # The done tool schema is the last thing the model reads before writing the
+            # answer; its own "SAME language" rule has to go too, or it wins from there.
+            done_tool = next(t for t in call.kwargs["tools"] if t["function"]["name"] == "done")
+            assert "SAME language" not in done_tool["function"]["parameters"]["properties"]["answer"]["description"]
+            assert "exclusively in English" in done_tool["function"]["description"]
+
+    @pytest.mark.asyncio
     async def test_done_tool_answer_respects_max_tokens(self, mock_llm, mock_functions):
         mock_functions["search_mental_models_fn"].return_value = {
             "mental_models": [{"id": "mm-1", "name": "User prefs", "content": "Fresh content.", "is_stale": False}]
