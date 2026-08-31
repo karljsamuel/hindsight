@@ -177,6 +177,27 @@ class TestReflectStructuredOutput:
         assert call_kwargs["max_completion_tokens"] == 4096
 
     @pytest.mark.asyncio
+    async def test_structured_output_uses_deterministic_temperature(self, monkeypatch):
+        """Structured extraction is deterministic even when reflect generation is not."""
+        config = MagicMock(llm_temperature_reflect=0.17, llm_strict_schema_reflect=False)
+        monkeypatch.setattr("hindsight_api.engine.reflect.agent.get_config", lambda: config)
+        llm = MagicMock()
+        llm.call = AsyncMock(side_effect=RuntimeError("stop after request capture"))
+
+        await _generate_structured_output(
+            answer="Alice prefers concise engineering updates.",
+            response_schema={
+                "type": "object",
+                "properties": {"summary": {"type": "string"}},
+                "required": ["summary"],
+            },
+            llm_config=llm,
+            reflect_id="test-reflect",
+        )
+
+        assert llm.call.await_args.kwargs["temperature"] == 0.0
+
+    @pytest.mark.asyncio
     async def test_structured_output_omits_budget_when_unset(self):
         """With no max_tokens (default), the structured call forwards
         max_completion_tokens=None -- which LLMProvider.call omits, exactly like
@@ -332,7 +353,13 @@ class TestReflectAgentMocked:
             assert "exclusively in English" in done_tool["function"]["description"]
 
     @pytest.mark.asyncio
-    async def test_done_tool_answer_respects_max_tokens(self, mock_llm, mock_functions):
+    async def test_done_tool_answer_respects_max_tokens(self, mock_llm, mock_functions, monkeypatch):
+        config = MagicMock(
+            reflect_prompt_cache_enabled=False,
+            reflect_max_completion_tokens=None,
+            llm_temperature_reflect=0.17,
+        )
+        monkeypatch.setattr("hindsight_api.engine.reflect.agent.get_config", lambda: config)
         mock_functions["search_mental_models_fn"].return_value = {
             "mental_models": [{"id": "mm-1", "name": "User prefs", "content": "Fresh content.", "is_stale": False}]
         }
@@ -368,6 +395,8 @@ class TestReflectAgentMocked:
         # so thinking models don't truncate the rewrite mid-word (#3365), while the
         # target still reaches the model through the prompt.
         assert mock_llm.call.await_args.kwargs["max_completion_tokens"] is None
+        assert mock_llm.call.await_args.kwargs["temperature"] == 0.17
+        assert all(call.kwargs["temperature"] == 0.17 for call in mock_llm.call_with_tools.await_args_list)
         rewrite_user_msg = mock_llm.call.await_args.kwargs["messages"][1]["content"]
         assert "Target budget: 8 tokens" in rewrite_user_msg
         assert result.usage.total_tokens == 150

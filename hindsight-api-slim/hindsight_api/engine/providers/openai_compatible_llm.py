@@ -1406,7 +1406,7 @@ class OpenAICompatibleLLM(LLMInterface):
 
         if max_completion_tokens is not None:
             call_params[self._max_tokens_param_name()] = max_completion_tokens
-        if temperature is not None:
+        if temperature is not None and not self._supports_reasoning_model():
             # MiniMax requires temperature in (0.0, 1.0] — clamp accordingly
             if self.provider == "minimax":
                 temperature = max(0.01, min(temperature, 1.0))

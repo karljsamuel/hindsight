@@ -247,6 +247,9 @@ OUTPUT:"""
             response_format=DynamicModel,
             scope="reflect_structured",
             strict_schema=get_config().llm_strict_schema_reflect,
+            # Schema extraction should be deterministic. The configured reflect
+            # temperature applies to answer generation, not this parsing pass.
+            temperature=0.0,
             max_completion_tokens=max_tokens,
             max_retries=1,
             initial_backoff=0.25,
@@ -687,6 +690,7 @@ async def _run_reflect_agent_inner(
                 {"role": "user", "content": prompt},
             ],
             scope="reflect",
+            temperature=get_config().llm_temperature_reflect,
             max_completion_tokens=completion_cap,
             return_usage=True,
         )
@@ -878,6 +882,7 @@ async def _run_reflect_agent_inner(
                 tools=tools,
                 scope="reflect_tool_call",
                 tool_choice=iter_tool_choice,
+                temperature=get_config().llm_temperature_reflect,
             )
             if incremental_caching and iter_tool_choice is LLM_TOOL_CHOICE_AUTO and rolling_cache_name is not None:
                 ct_kwargs["cached_prefix"] = rolling_cache_name
@@ -1307,6 +1312,7 @@ async def _process_done_tool(
                 {"role": "user", "content": rewrite_user},
             ],
             scope="reflect",
+            temperature=get_config().llm_temperature_reflect,
             max_completion_tokens=get_config().reflect_max_completion_tokens,
             return_usage=True,
         )
