@@ -493,7 +493,7 @@ def tail_log(name: str, lines: int = 200, source: str = "daemon") -> LogTailView
         return LogTailView(path=str(path), exists=False, content="")
     # Small logs — reading then slicing is simpler than seeking and is fine for
     # the interactive tail in the UI.
-    tail = path.read_text(errors="replace").splitlines()[-max(lines, 1) :]
+    tail = path.read_text(encoding="utf-8", errors="replace").splitlines()[-max(lines, 1) :]
     return LogTailView(path=str(path), exists=True, content="\n".join(tail))
 
 

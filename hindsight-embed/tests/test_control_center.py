@@ -137,6 +137,24 @@ class TestService:
         assert daemon.path.endswith(".log") and not daemon.path.endswith(".ui.log")
         assert ui.path.endswith(".ui.log")
 
+    def test_tail_log_reads_utf8_regardless_of_locale(self, temp_hindsight_dir, monkeypatch):
+        import io
+
+        from hindsight_embed.profile_manager import ProfileManager
+
+        path = ProfileManager().resolve_profile_paths("").log
+        path.write_bytes("retained — 保存\n".encode())
+        real_open = io.open
+
+        def narrow_open(file, mode="r", buffering=-1, encoding=None, errors=None, newline=None, *args, **kwargs):
+            if "b" not in mode and encoding in (None, "locale"):
+                encoding = "ascii"
+            return real_open(file, mode, buffering, encoding, errors, newline, *args, **kwargs)
+
+        monkeypatch.setattr(io, "open", narrow_open)
+
+        assert service.tail_log("", 10).content == "retained — 保存"
+
     def test_delete_named_profile(self, temp_hindsight_dir):
         service.save_llm_config("scratch", "openai", "sk-key1234567890", "", "")
         assert (temp_hindsight_dir / "profiles" / "scratch.env").exists()
