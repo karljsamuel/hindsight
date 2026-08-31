@@ -104,7 +104,7 @@ def load_config_file():
 
     # Load ONLY this profile's config, never fall back to default
     if config_path.exists():
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
@@ -255,7 +255,7 @@ def _do_configure_from_env():
 
     from .env_template import render_config
 
-    CONFIG_FILE.write_text(render_config(config_values))
+    CONFIG_FILE.write_text(render_config(config_values), encoding="utf-8")
     CONFIG_FILE.chmod(0o600)
 
     print()
@@ -442,7 +442,7 @@ def _do_configure_interactive(profile_name: str | None = None, port: int | None 
         # Save to default profile
         from .env_template import render_config
 
-        CONFIG_FILE.write_text(render_config(config_dict))
+        CONFIG_FILE.write_text(render_config(config_dict), encoding="utf-8")
         CONFIG_FILE.chmod(0o600)
 
     # Stop existing daemon if running (it needs to pick up new config)
@@ -676,7 +676,7 @@ def do_daemon(args, config: dict, logger):
         else:
             # Show last N lines
             try:
-                with open(daemon_log_path) as f:
+                with open(daemon_log_path, encoding="utf-8", errors="replace") as f:
                     lines = f.readlines()
                     for line in lines[-args.lines :]:
                         print(line, end="")
@@ -838,7 +838,7 @@ def do_ui(args, config: dict, logger):
             return 0
         else:
             try:
-                with open(ui_log_path) as f:
+                with open(ui_log_path, encoding="utf-8", errors="replace") as f:
                     lines = f.readlines()
                     for line in lines[-args.lines :]:
                         print(line, end="")
@@ -1057,7 +1057,7 @@ def do_control(args) -> int:
             except KeyboardInterrupt:
                 pass
             return 0
-        with open(log_path) as f:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
             for line in f.readlines()[-getattr(args, "lines", 50) :]:
                 print(line, end="")
         return 0
@@ -1216,7 +1216,7 @@ def do_profile_command(args: list[str]) -> int:
                 config_path = CONFIG_FILE
 
             if config_path.exists():
-                for line in config_path.read_text().splitlines():
+                for line in config_path.read_text(encoding="utf-8").splitlines():
                     line = line.strip()
                     if line and not line.startswith("#") and "=" in line:
                         k, v = line.split("=", 1)
@@ -1268,7 +1268,7 @@ def do_profile_command(args: list[str]) -> int:
         # Parse existing config
         config = {}
         if config_path.exists():
-            for line in config_path.read_text().splitlines():
+            for line in config_path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
@@ -1313,7 +1313,7 @@ def do_profile_command(args: list[str]) -> int:
         # Parse existing config
         config = {}
         if config_path.exists():
-            for line in config_path.read_text().splitlines():
+            for line in config_path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
