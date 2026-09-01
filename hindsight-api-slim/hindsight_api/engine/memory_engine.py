@@ -12592,12 +12592,24 @@ class MemoryEngine(MemoryEngineInterface):
         """
         await self._authenticate_tenant(request_context)
         if self._operation_validator:
-            from hindsight_api.extensions import BankWriteContext, BankWriteOperation
+            from hindsight_api.extensions import (
+                BankReadContext,
+                BankReadOperation,
+                BankWriteContext,
+                BankWriteOperation,
+            )
 
             ctx = BankWriteContext(
                 bank_id=bank_id, operation=BankWriteOperation.UPDATE_BANK_DISPOSITION, request_context=request_context
             )
             await self._validate_operation(self._operation_validator.validate_bank_write(ctx))
+
+            ctx_read = BankReadContext(
+                bank_id=bank_id, operation=BankReadOperation.GET_BANK_PROFILE, request_context=request_context
+            )
+            await self._validate_operation(self._operation_validator.validate_bank_read(ctx_read))
+
+        await self._ensure_bank_exists(bank_id, request_context)
         await self._get_backend()
         await bank_utils.update_bank_disposition(self._backend, bank_id, disposition)
 
@@ -12627,6 +12639,8 @@ class MemoryEngine(MemoryEngineInterface):
                 bank_id=bank_id, operation=BankWriteOperation.SET_BANK_MISSION, request_context=request_context
             )
             await self._validate_operation(self._operation_validator.validate_bank_write(ctx))
+
+        await self._ensure_bank_exists(bank_id, request_context)
         await self._get_backend()
         await bank_utils.set_bank_mission(self._backend, bank_id, mission)
         return {"bank_id": bank_id, "mission": mission}
@@ -12652,12 +12666,24 @@ class MemoryEngine(MemoryEngineInterface):
         """
         await self._authenticate_tenant(request_context)
         if self._operation_validator:
-            from hindsight_api.extensions import BankWriteContext, BankWriteOperation
+            from hindsight_api.extensions import (
+                BankReadContext,
+                BankReadOperation,
+                BankWriteContext,
+                BankWriteOperation,
+            )
 
             ctx = BankWriteContext(
                 bank_id=bank_id, operation=BankWriteOperation.MERGE_BANK_MISSION, request_context=request_context
             )
             await self._validate_operation(self._operation_validator.validate_bank_write(ctx))
+
+            ctx_read = BankReadContext(
+                bank_id=bank_id, operation=BankReadOperation.GET_BANK_PROFILE, request_context=request_context
+            )
+            await self._validate_operation(self._operation_validator.validate_bank_read(ctx_read))
+
+        await self._ensure_bank_exists(bank_id, request_context)
         await self._get_backend()
         return await bank_utils.merge_bank_mission(self._backend, self._reflect_llm_config, bank_id, new_info)
 
