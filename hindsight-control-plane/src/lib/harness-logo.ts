@@ -13,7 +13,9 @@
  * The ids below are exactly the ones that integration emits — see its
  * `src/harness/hook-lifecycle.ts` (one HookSpec per hook-driven agent) and
  * `src/harness/registry.ts` (the persistent-plugin agents, whose id is the
- * `createPluginEntry(...)` argument of their entrypoint). Do not add entries for
+ * argument their entrypoint passes to the shared factory it builds on —
+ * `createPluginEntry(...)` for the opencode family, `createPiExtension(...)` for
+ * the pi family). Do not add entries for
  * agents that cannot appear yet: an id nothing writes is a logo nothing renders.
  * When that integration gains a harness, add it here in the same change — drop
  * its icon in `public/img/harness/` (copied from
@@ -92,6 +94,10 @@ export const HARNESS_LOGO_REGISTRY: Record<string, HarnessLogoEntry> = {
   // its own harness id, but it is the same product — so it deliberately shares
   // v1's brand mark rather than inventing a second one.
   opencode2: { id: "opencode2", label: "OpenCode 2", src: "/img/harness/opencode.png" },
+  // pi ships no brand mark of its own, so this is the letter the agent is named
+  // for, drawn in the same monochrome style as the Prime Agent mark below (the
+  // fork of pi) rather than a logo invented for it.
+  pi: { id: "pi", label: "pi", src: "/img/harness/pi.svg", invertOnDark: true },
   "qwen-code": { id: "qwen-code", label: "Qwen Code", src: "/img/harness/qwen-code.svg" },
   "prime-agent": {
     id: "prime-agent",

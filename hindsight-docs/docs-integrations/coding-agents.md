@@ -9,7 +9,7 @@ description: "One Hindsight memory plugin for coding agents — per-repo memory 
 
 Long-term project memory for **coding agents**, backed by [Hindsight](https://vectorize.io/hindsight).
 One package, several agents: a shared reflect-and-inject core with a thin entry point per agent
-(**opencode**, **opencode 2**, **Kilo CLI**, **Cline CLI**, **Prime Agent**, **DeepSeek Harness**, **Claude Code**, **Codex CLI**, **DeepAgents Dcode**, **Antigravity CLI**, **Cursor CLI**, **GitHub Copilot CLI**, **Devin CLI**, **Grok Build**). Ingestion is fully
+(**opencode**, **opencode 2**, **Kilo CLI**, **Cline CLI**, **pi**, **Prime Agent**, **DeepSeek Harness**, **Claude Code**, **Codex CLI**, **DeepAgents Dcode**, **Antigravity CLI**, **Cursor CLI**, **GitHub Copilot CLI**, **Devin CLI**, **Grok Build**). Ingestion is fully
 automatic — there is no setup command: a repo's git history and conversations flow into its memory
 bank in the background as you work.
 
@@ -179,14 +179,35 @@ npx @vectorize-io/hindsight-coding-agents install cline-cli
 
 A native plugin via `cline plugin install`, plus MCP and the companion skill.
 
+#### <img src="/img/harness/pi.svg" alt="" width="20" height="20" /> pi
+
+```bash
+npx @vectorize-io/hindsight-coding-agents install pi
+```
+
+An extension entry in `~/.pi/agent/settings.json`, plus the companion skill in
+`~/.pi/agent/skills` — native tools, no MCP needed.
+
+This command is the only supported route, for pi and for Prime Agent below. Installing us as a pi
+package (`pi install npm:@vectorize-io/hindsight-coding-agents`) is deliberately not wired: both
+hosts read the same `pi` key of a package's `package.json`, and that key can only name one entry —
+whichever host it did not name would load the other's bundle and report itself as the wrong agent,
+taking that harness's config section and stamping every document it retains with it. So the package
+carries no `pi` key at all, and each host is pointed at its own bundle by the install command above.
+
 #### <img src="/img/harness/prime-agent.svg" alt="" width="20" height="20" /> Prime Agent
 
 ```bash
 npx @vectorize-io/hindsight-coding-agents install prime-agent
 ```
 
-An extension entry in `~/.prime/agent/settings.json` — native tools, no MCP needed — plus the
-companion skill in `~/.prime/agent/skills`.
+Prime Agent is a fork of pi, so it is wired the same way: an extension entry, here in
+`~/.prime/agent/settings.json`, plus the companion skill in `~/.prime/agent/skills` — native tools,
+no MCP needed. Installing both is fine and expected:
+each host loads its own entry from its own settings file, and like every other pair of agents they
+**share one bank per repo** (the default `coding-agent::{gitProject}`), so what you tell pi is there
+when you open Prime Agent. Separate entries are what keeps each side attributable — its own
+`harnesses.<name>` config section, and its own agent stamped on every document it retains.
 
 #### <img src="/img/harness/dsh.svg" alt="" width="20" height="20" /> DeepSeek Harness
 
@@ -274,7 +295,8 @@ transcripts are needed either way; going through them directly is simply the sho
 **How sessions are matched.** A conversation is imported only when the session itself records the
 directory it ran in — never inferred from a file or folder name. Claude Code writes that directory
 on its entries, Codex in its `session_meta` header and DeepSeek Harness in its session-log header,
-so all three can be attributed exactly, including sessions started in a subdirectory of the repo. Guessing was tempting (Claude names its history
+and pi and Prime Agent in their session header, so all five can be attributed exactly, including
+sessions started in a subdirectory of the repo. Guessing was tempting (Claude names its history
 folders after the project path) but unsafe: `/` and `.` both encode to `-`, so `repo-sub` is either
 the subdirectory `repo/sub` or an unrelated sibling repo — and a wrong guess files someone else's
 conversation into your bank. Sessions that record nothing are skipped and the count is reported.
@@ -384,7 +406,7 @@ what reads it:
 | host                                                                                                        | reads the file                                                      | an edit applies            |
 | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | -------------------------- |
 | hook harnesses (Claude Code, Codex CLI, Cursor CLI, GitHub Copilot CLI, Grok Build, Antigravity CLI, Devin) | once per hook invocation — each hook is its own short-lived process | on your next prompt        |
-| persistent plugins (opencode, opencode 2, Kilo CLI, Cline CLI, Prime Agent, DeepSeek Harness)               | once per workspace, when the host loads the plugin                  | after restarting the agent |
+| persistent plugins (opencode, opencode 2, Kilo CLI, Cline CLI, pi, Prime Agent, DeepSeek Harness)           | once per workspace, when the host loads the plugin                  | after restarting the agent |
 | the MCP server behind the `hindsight_*` tools                                                               | once at startup                                                     | in your next session       |
 
 `apiToken` is the exception. Every host re-reads it when the server rejects a request, so enabling
