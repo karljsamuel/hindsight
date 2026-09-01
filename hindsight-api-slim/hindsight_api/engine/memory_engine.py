@@ -12282,6 +12282,41 @@ class MemoryEngine(MemoryEngineInterface):
         finally:
             _bank_template_import_authorization.reset(token)
 
+    async def authorize_bank_template_import_write(
+        self,
+        bank_id: str,
+        operation: "BankWriteOperation",
+        *,
+        target: str | None = None,
+        request_context: "RequestContext",
+    ) -> None:
+        """Reserve one import write, validating it only if it was not preauthorized.
+
+        The import preauthorizes the operation each resource needed when the
+        manifest was classified. A concurrent create or delete can flip that
+        classification before the write runs, and the flipped operation deserves
+        its own decision rather than a blanket grant for both outcomes: a
+        validator that meters creations separately from updates must not be
+        charged for a create the import never performs.
+        """
+        state = self._get_bank_template_import_authorization_state(bank_id, request_context)
+        if state is None:
+            # No import scope: the engine call validates the write itself.
+            return
+        write = BankTemplateImportWrite(operation=operation, target=target)
+        if state.bank_write_remaining.get(write, 0) > 0:
+            return
+        if self._operation_validator:
+            from hindsight_api.extensions import BankWriteContext
+
+            context = BankWriteContext(
+                bank_id=bank_id,
+                operation=operation,
+                request_context=request_context,
+            )
+            await self._validate_operation(self._operation_validator.validate_bank_write(context))
+        state.bank_write_remaining[write] = 1
+
     def _consume_preauthorized_bank_write(
         self,
         bank_id: str,

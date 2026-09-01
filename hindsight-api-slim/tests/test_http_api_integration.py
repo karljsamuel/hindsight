@@ -1907,6 +1907,94 @@ async def test_import_reuses_each_preauthorization_once(api_client, memory, monk
 
 
 @pytest.mark.asyncio
+async def test_import_updating_existing_resources_asks_only_for_update(api_client, memory, monkeypatch):
+    """An import that only updates never spends a create decision."""
+    bank_id = f"import_update_only_authorization_{datetime.now().timestamp()}"
+    await memory.create_mental_model(
+        bank_id=bank_id,
+        mental_model_id="import-model",
+        name="Import",
+        source_query="test",
+        content="content",
+        request_context=RequestContext(),
+    )
+    await memory.create_directive(
+        bank_id=bank_id,
+        name="Be concise",
+        content="Prefer short answers.",
+        request_context=RequestContext(),
+    )
+    # A validator that meters creations must not be charged for creates this
+    # import does not perform.
+    validator = _make_operation_validator(reject_bank_write=BankWriteOperation.CREATE_MENTAL_MODEL)
+    monkeypatch.setattr(memory, "_operation_validator", validator)
+    monkeypatch.setattr(
+        memory,
+        "_submit_async_operation",
+        AsyncMock(return_value={"operation_id": "import-refresh"}),
+    )
+
+    response = await api_client.post(
+        f"/v1/default/banks/{bank_id}/import",
+        json={
+            "version": "1",
+            "mental_models": [{"id": "import-model", "name": "Import", "source_query": "test"}],
+            "directives": [{"name": "Be concise", "content": "Prefer short answers."}],
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert [call.args[0].operation for call in validator.validate_bank_write.await_args_list] == [
+        BankWriteOperation.UPDATE_MENTAL_MODEL,
+        BankWriteOperation.UPDATE_DIRECTIVE,
+    ]
+    await memory.delete_bank(bank_id, request_context=RequestContext())
+
+
+@pytest.mark.asyncio
+async def test_import_validates_the_operation_a_concurrent_write_flipped_it_to(api_client, memory, monkeypatch):
+    """A create that a concurrent write turns into an update is decided as an update."""
+    bank_id = f"import_flipped_authorization_{datetime.now().timestamp()}"
+    validator = _make_operation_validator(
+        reject_bank_write=BankWriteOperation.UPDATE_MENTAL_MODEL,
+        reason="updates are forbidden",
+    )
+    monkeypatch.setattr(memory, "_operation_validator", validator)
+    ensure_bank_exists = memory._ensure_bank_exists
+
+    async def create_the_model_first(*args, **kwargs):
+        # Restore first: creating a mental model lazily ensures the bank itself.
+        monkeypatch.setattr(memory, "_ensure_bank_exists", ensure_bank_exists)
+        result = await ensure_bank_exists(*args, **kwargs)
+        await memory.create_mental_model(
+            bank_id=bank_id,
+            mental_model_id="import-model",
+            name="Import",
+            source_query="test",
+            content="content",
+            request_context=RequestContext(),
+        )
+        return result
+
+    monkeypatch.setattr(memory, "_ensure_bank_exists", create_the_model_first)
+
+    response = await api_client.post(
+        f"/v1/default/banks/{bank_id}/import",
+        json={
+            "version": "1",
+            "mental_models": [{"id": "import-model", "name": "Import", "source_query": "test"}],
+        },
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == "updates are forbidden"
+    operations = [call.args[0].operation for call in validator.validate_bank_write.await_args_list]
+    # Preauthorized as a create, then re-decided as the update the fresh state calls
+    # for. (The injected create validates itself in between.)
+    assert operations[0] is BankWriteOperation.CREATE_MENTAL_MODEL
+    assert operations[-1] is BankWriteOperation.UPDATE_MENTAL_MODEL
+    await memory.delete_bank(bank_id, request_context=RequestContext())
+
+
+@pytest.mark.asyncio
 async def test_import_write_preauthorization_is_bound_to_resource_context_and_task(memory, monkeypatch):
     """A cached grant can only be spent by its exact resource and task."""
     bank_id = f"import_scoped_authorization_{datetime.now().timestamp()}"
