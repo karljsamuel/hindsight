@@ -22,6 +22,7 @@ import { readFileSync } from "node:fs";
 import { gitHeadSha, hasGitHistory, commitsSince, repoNameOf } from "./git";
 import { DEEPEN_DIFF_TARGET } from "./status";
 import { startBackgroundSeed } from "./seed";
+import { maybeAutoUpdate } from "./auto-update";
 import { syncCompanionSkill } from "./skill-sync";
 import { SURVEY_DOC_IDS, startCodebaseSurvey, type SurveyHarness } from "./survey";
 import { applyBankConfig, loadConfig } from "./config";
@@ -352,6 +353,12 @@ export async function runSessionStartHook(
     setLogLevel(cfg.logLevel);
     syncCompanionSkill(harness); // keep the installed skill current with the package version
     if (cfg.disabled) return;
+    // …and keep the package itself current. AFTER the disabled check, unlike the skill sync above:
+    // `disabled` means an inert plugin, and a network call plus a background npm install is not
+    // inert. It also keeps the two harness families symmetric — the plugin hosts never construct a
+    // RuntimeCore when disabled (harness/plugin-entry.ts), so they already skip this.
+    // Detached and rate-limited to once a day; the update lands for the NEXT session.
+    void maybeAutoUpdate(cfg);
 
     // Recorded HERE, on the session's first hook, so every later hook of this session resolves the
     // same bank however far the agent navigates (#3563).

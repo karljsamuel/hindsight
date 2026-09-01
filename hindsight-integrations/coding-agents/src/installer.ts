@@ -716,6 +716,9 @@ export function runtimeDir(home: string): string {
   return join(home, ".hindsight", "coding-agents");
 }
 
+/** Names the directory `stageRuntime` copied from — read by core/auto-update.ts. */
+export const ORIGIN_FILE = ".install-origin.json";
+
 /**
  * Copy the runtime out of wherever this was executed from and into a stable location, then point
  * the wiring at the copy.
@@ -759,6 +762,16 @@ function stageRuntime(c: InstallCtx): InstallCtx {
       const source = join(c.pkgRoot, resource);
       if (existsSync(source)) cpSync(source, join(target, resource), { recursive: true });
     }
+    // Record WHERE this copy came from, LAST — the marker means "a complete copy landed here".
+    // core/auto-update.ts will only replace a runtime it can prove was downloaded by npx: a copy
+    // staged from a global `npm i -g`, a project dependency or a local checkout belongs to whoever
+    // manages that source, and silently overwriting it would either fight their package manager
+    // (leaving `npm ls -g` reporting a version that is no longer what runs) or destroy a
+    // developer's locally-built dist.
+    writeFileSync(
+      join(target, ORIGIN_FILE),
+      JSON.stringify({ source: c.pkgRoot, stagedAt: new Date().toISOString() })
+    );
     c.log?.(`runtime staged at ${target}`);
     return { ...c, pkgRoot: target, dist: join(target, "dist") };
   } catch (error) {
@@ -1499,14 +1512,33 @@ export function run(argv: string[], ctxIn: InstallCtx): number {
   // why installing from a cache used to be refused outright. Copying the runtime somewhere stable
   // first removes the problem instead of pushing it onto the user: `npx` now works, and nobody has
   // to keep a global install of a tool whose only job is to set other tools up.
-  if (command === "install") ctx = stageRuntime(ctx);
+  if (command === "install" || command === "update") ctx = stageRuntime(ctx);
+  // `update` is `install`'s staging half and nothing else: it replaces the runtime every wired
+  // agent already points at (~/.hindsight/coding-agents/dist, a path that is stable across
+  // versions) and writes to NO host config. That separation is what makes it safe to run
+  // unattended from `core/auto-update.ts` — an `install` would need a harness list, and choosing
+  // one on the user's behalf would rewire agents they never asked us to touch.
+  //
+  // The cost of not rewiring: a version that introduces a NEW hook entry point is staged but not
+  // referenced, so that one feature waits for a manual `install`. Every existing entry point picks
+  // the new code up on its next spawn.
+  if (command === "update") {
+    ctx.log?.(
+      ctx.pkgRoot === ctxIn.pkgRoot
+        ? "runtime already up to date — nothing staged"
+        : "runtime updated — every wired agent picks it up on its next session"
+    );
+    return 0;
+  }
   if (command !== "install" && command !== "uninstall") {
     ctx.log?.(
       `usage: hindsight-coding-agents <install|uninstall> <all|harness...>\n` +
+        `       hindsight-coding-agents update\n` +
         `       [--server cloud|self-hosted|daemon] [--api-url <url>] [--api-token <token>]\n` +
         `       [--import-conversations]\n` +
         `  all      every agent detected on this machine\n` +
         `  harness  ${INSTALLERS.map((i) => i.name).join(", ")} (agy aliases antigravity-cli)\n` +
+        `  update   re-stage the runtime only, leaving every host config untouched\n` +
         `  agents/CI: without a TTY nothing ever prompts — pass --server (and --api-url/--api-token) to choose`
     );
     return command ? 1 : 0;
