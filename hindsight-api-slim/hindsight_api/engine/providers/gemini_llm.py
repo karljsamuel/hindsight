@@ -26,6 +26,7 @@ from hindsight_api.engine.llm_trace import LLMResponseUsage, stash_response_usag
 from hindsight_api.engine.llm_wrapper import parse_llm_json
 from hindsight_api.engine.providers.llm_debug import dump_request_on_4xx
 from hindsight_api.engine.response_models import LLMToolCall, LLMToolCallResult, TokenUsage
+from hindsight_api.engine.structured_output import has_tagged_union, provider_json_schema
 from hindsight_api.metrics import get_metrics_collector
 from hindsight_api.worker.stage import set_stage
 
@@ -64,6 +65,35 @@ def _usage_from_gemini_response(response: Any) -> LLMResponseUsage:
         output_tokens=usage.candidates_token_count or 0,
         cached_tokens=getattr(usage, "cached_content_token_count", 0) or 0,
     )
+
+
+def _gemini_dict_schema(response_format: Any) -> dict[str, Any]:
+    """Serialize a model to a schema dict Gemini's *API* accepts, not just its SDK.
+
+    Handing the SDK a dict is not the same as handing it the pydantic class. The
+    class path quietly drops keys the backend has no field for; the dict path maps
+    them faithfully, so ``extra="forbid"`` — which every delta operation model sets
+    — arrives as ``additionalProperties: false``, becomes ``Schema.additional_properties``,
+    and Vertex rejects the whole request:
+
+        400 INVALID_ARGUMENT: Unknown name "additional_properties" at
+        'generation_config.response_schema': Cannot find field.
+
+    The SDK builds that request without complaint, which is why this needed a real
+    call to find (#3937). Strip the key on the way out: it carries no meaning for a
+    backend that has nowhere to put it, and the model still cannot invent fields —
+    the delta parser validates against the pydantic model regardless.
+    """
+    schema = provider_json_schema(response_format)
+
+    def strip(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {k: strip(v) for k, v in node.items() if k != "additionalProperties"}
+        if isinstance(node, list):
+            return [strip(item) for item in node]
+        return node
+
+    return strip(schema)
 
 
 @dataclass(frozen=True)
@@ -381,7 +411,7 @@ class GeminiLLM(LLMInterface):
                 gemini_contents.append(genai_types.Content(role="user", parts=[genai_types.Part(text=content)]))
 
         def _system_instruction_with_schema() -> str:
-            schema = response_format.model_json_schema()
+            schema = provider_json_schema(response_format)
             schema_msg = (
                 f"\n\nYou must respond with valid JSON matching this schema:\n"
                 f"{json.dumps(schema, indent=2, ensure_ascii=False)}"
@@ -416,7 +446,15 @@ class GeminiLLM(LLMInterface):
                 config_kwargs["system_instruction"] = system_instruction
             if response_format is not None and not use_schema_prompt_fallback:
                 config_kwargs["response_mime_type"] = "application/json"
-                config_kwargs["response_schema"] = response_format
+                # The model class is handed to the SDK untouched wherever the SDK can
+                # convert it, which is every schema this provider has ever sent. A
+                # discriminated union is the exception: pydantic renders it as
+                # ``oneOf`` + ``discriminator`` and ``types.Schema`` forbids both keys,
+                # so the SDK raises before the request leaves the process. Serializing
+                # it ourselves rewrites the union to the ``anyOf`` the SDK accepts.
+                config_kwargs["response_schema"] = (
+                    _gemini_dict_schema(response_format) if has_tagged_union(response_format) else response_format
+                )
             if temperature is not None:
                 config_kwargs["temperature"] = temperature
             # Gemini's equivalent of OpenAI-style max_completion_tokens is max_output_tokens.
