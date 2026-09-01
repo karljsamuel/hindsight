@@ -1,14 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { HOOK_HARNESSES, type HookHarnessName } from "./hook-lifecycle";
 
-const HOOK_HARNESS_NAMES: HookHarnessName[] = [
-  "claude-code",
-  "codex",
-  "antigravity-cli",
-  "cursor-cli",
-  "copilot-cli",
-  "grok-build",
-];
+// Derived, not hand-listed: a hand-written roster silently stops covering the newest harness, which
+// is exactly the sibling it most needs to cover. (It had already fallen behind — devin-cli was
+// missing.)
+const HOOK_HARNESS_NAMES = Object.keys(HOOK_HARNESSES) as HookHarnessName[];
 
 describe("HOOK_HARNESSES lifecycle contract", () => {
   it("declares every lifecycle once for every hook-based harness", () => {
@@ -21,6 +17,35 @@ describe("HOOK_HARNESSES lifecycle contract", () => {
       expect(HOOK_HARNESSES[harness].sessionStart.harness).toBe(harness);
       expect(HOOK_HARNESSES[harness].prompt.harness).toBe(harness);
       expect(HOOK_HARNESSES[harness].retain.harness).toBe(harness);
+    }
+  });
+
+  /**
+   * Family guard for the Stop-event reply recovery. A harness that reads `last_assistant_message`
+   * off its Stop event MUST also say how to decode it, because the field is not always prose:
+   * Dcode sends `str(content)`, a serialized content-block list. Retaining that undecoded stores
+   * the provider's reasoning payload as if the assistant had said it, AND makes the
+   * already-flushed compare fail so a duplicate turn is appended every turn.
+   *
+   * Asserted over the whole family rather than for Dcode alone: the next harness to surface this
+   * field is by definition the one with no test of its own.
+   */
+  it("makes every harness that reads a Stop-event reply declare how to decode it", () => {
+    const probe = {
+      session_id: "s",
+      transcript_path: "/t",
+      cwd: "/c",
+      last_assistant_message: "[{'type': 'text', 'text': 'hi'}]",
+    };
+    for (const harness of HOOK_HARNESS_NAMES) {
+      const spec = HOOK_HARNESSES[harness].retain;
+      if (spec.parse(probe).lastAssistantMessage === undefined) continue;
+      expect(
+        spec.readLastMessage,
+        `${harness} reads last_assistant_message but never decodes it`
+      ).toBeDefined();
+      // And the decoder must actually reduce a block list to its text, not pass the repr through.
+      expect(spec.readLastMessage!(probe.last_assistant_message)).toBe("hi");
     }
   });
 
@@ -82,6 +107,37 @@ describe("HOOK_HARNESSES lifecycle contract", () => {
         hookEventName: "UserPromptSubmit",
         additionalContext: "context",
       },
+    });
+
+    const dcode = HOOK_HARNESSES.dcode;
+    expect(dcode.install).toMatchObject({
+      sessionStart: { event: "SessionStart", entry: "dcode-sessionstart-hook.js", timeout: 30 },
+      prompt: { event: "UserPromptSubmit", entry: "dcode-hook.js", timeout: 30 },
+      stop: { event: "Stop", entry: "dcode-stop-hook.js", timeout: 60 },
+    });
+    expect(dcode.prompt.parse({ prompt: "hello", cwd: "/repo", session_id: "s1" })).toEqual({
+      prompt: "hello",
+      cwd: "/repo",
+      sessionId: "s1",
+    });
+    expect(dcode.prompt.emit("context")).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "UserPromptSubmit",
+        additionalContext: "context",
+      },
+    });
+    expect(
+      dcode.retain.parse({
+        session_id: "s1",
+        transcript_path: "/tmp/s1.jsonl",
+        cwd: "/repo",
+        last_assistant_message: "done",
+      })
+    ).toEqual({
+      sessionId: "s1",
+      transcriptPath: "/tmp/s1.jsonl",
+      cwd: "/repo",
+      lastAssistantMessage: "done",
     });
   });
 });
