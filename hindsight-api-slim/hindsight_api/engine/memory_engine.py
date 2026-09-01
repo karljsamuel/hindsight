@@ -1437,6 +1437,28 @@ class _MentalModelScopeFilter:
     params: list[Any]
 
 
+@dataclass(frozen=True)
+class _MentalModelScopeWatermark:
+    """What one ``MAX(updated_at)`` over a mental model's scope tells a refresh.
+
+    Both answers come off the same aggregate, so they are returned together rather
+    than queried twice: whether there is anything in scope to read at all, and the
+    watermark to persist afterwards. They are not the same number — the watermark is
+    clamped so it can never regress — which is exactly why the raw reading has to
+    travel alongside it.
+    """
+
+    newest_in_scope: datetime | None
+    """Newest in-scope memory visible at the refresh snapshot; None when the scope
+    holds nothing at all. Unclamped, so it answers "is there anything here?" —
+    and, compared against the delta window's lower bound, "anything *new*?"."""
+
+    watermark: datetime | None
+    """The ``last_memory_seen_at`` a successful refresh persists: ``newest_in_scope``
+    raised to the model's current watermark so it never moves backwards. None leaves
+    the column untouched."""
+
+
 def _resolve_refresh_tag_filtering(
     model_tags: list[str] | None,
     trigger_data: dict[str, Any],
@@ -14694,24 +14716,31 @@ class MemoryEngine(MemoryEngineInterface):
                 mental_model_id,
             )
 
-    async def _mental_model_processed_watermark(
+    async def _mental_model_scope_watermark(
         self,
         bank_id: str,
         mental_model_id: str,
         scope_filter: "_MentalModelScopeFilter",
         refresh_cutoff: datetime,
-    ) -> datetime | None:
-        """Watermark to persist after a refresh: the newest in-scope memory visible at
-        the snapshot, clamped so it never regresses below the model's current
-        ``last_memory_seen_at`` (falling back to ``last_refreshed_at`` for a row no
-        refresh has stamped since the migration backfill).
+    ) -> _MentalModelScopeWatermark:
+        """One ``MAX(updated_at)`` over the model's scope, read for both its answers.
 
-        A still-uncommitted straddling row is excluded from this max, so when it commits
-        it stays newer than the watermark and is caught next time. Returns ``None`` when
-        no in-scope memory is visible (leave ``last_memory_seen_at`` untouched, so an
-        in-flight first row is not skipped). Kept as its own method — like
-        ``_mental_model_refresh_cutoff`` — so mock unit tests of the refresh wiring can
-        stub it instead of reaching a real pool.
+        ``watermark`` is what a successful refresh persists: the newest in-scope memory
+        visible at the snapshot, clamped so it never regresses below the model's current
+        ``last_memory_seen_at`` (falling back to ``last_refreshed_at`` for a row no
+        refresh has stamped since the migration backfill). A still-uncommitted straddling
+        row is excluded from the max, so when it commits it stays newer than the watermark
+        and is caught next time; ``None`` leaves the column untouched, so an in-flight
+        first row is not skipped.
+
+        ``newest_in_scope`` is the same reading *unclamped*, and is what the refresh's
+        emptiness check (#3875) decides on — it has to be carried out of here rather
+        than re-queried, because the clamp destroys exactly the information that check
+        needs: a model whose watermark is already set reports that watermark whether its
+        scope holds a thousand memories or none.
+
+        Kept as its own method — like ``_mental_model_refresh_cutoff`` — so mock unit
+        tests of the refresh wiring can stub it instead of reaching a real pool.
         """
         backend = await self._get_backend()
         assert self._dialect is not None
@@ -14729,10 +14758,40 @@ class MemoryEngine(MemoryEngineInterface):
                 *watermark_params,
             )
         if newest_in_scope is None:
-            return None
+            return _MentalModelScopeWatermark(newest_in_scope=None, watermark=None)
         if current_memory_seen_at is not None:
-            return max(newest_in_scope, current_memory_seen_at)
-        return newest_in_scope
+            return _MentalModelScopeWatermark(
+                newest_in_scope=newest_in_scope, watermark=max(newest_in_scope, current_memory_seen_at)
+            )
+        return _MentalModelScopeWatermark(newest_in_scope=newest_in_scope, watermark=newest_in_scope)
+
+    async def _bank_has_readable_document(self, bank_id: str, *, excluding_id: str) -> bool:
+        """Does this bank hold another mental model the reflect agent could read?
+
+        ``search_mental_models`` returns sibling documents, so one with real content is
+        something to reflect over even when no memory is — and it applies no time bound,
+        so that holds inside a delta window too. Only the model being refreshed is
+        excluded, not its full ``exclude_mental_model_ids`` list: over-counting keeps a
+        refresh running, which is the safe direction to be wrong in.
+
+        A sibling still holding the ``Generating content...`` placeholder does not
+        count. That is exactly the state a bank's default pages are all in while they
+        wait on each other, and treating it as content would defeat the emptiness check
+        for the case it was written for (#3875).
+        """
+        backend = await self._get_backend()
+        async with acquire_with_retry(backend) as conn:
+            other_documents = await conn.fetchval(
+                f"SELECT COUNT(*) FROM {fq_table('mental_models')} "
+                f"WHERE bank_id = $1 AND id <> $2 AND LENGTH(TRIM(content)) > 0 AND content NOT LIKE $3",
+                bank_id,
+                excluding_id,
+                # Prefix match, not equality: the placeholder is stored as written but read
+                # back through the structured render, which ends it with a newline. It
+                # carries no LIKE wildcard of its own, so the pattern needs no escaping.
+                f"{MENTAL_MODEL_PENDING_CONTENT}%",
+            )
+        return bool(other_documents)
 
     async def _execute_mental_model_refresh(
         self,
@@ -14841,9 +14900,10 @@ class MemoryEngine(MemoryEngineInterface):
         # such a straddling commit stays newer than the watermark and is caught next
         # time, instead of being stamped "already processed" and dropped forever.
         scope_filter = self._build_mm_scope_filter(bank_id, tag_filtering, fact_types)
-        processed_watermark = await self._mental_model_processed_watermark(
+        scope_watermark = await self._mental_model_scope_watermark(
             bank_id, mental_model_id, scope_filter, refresh_cutoff
         )
+        processed_watermark = scope_watermark.watermark
 
         # Run reflect with the source query, excluding the mental model being refreshed
         # Skip creating a nested "hindsight.reflect" span since we already have "hindsight.mental_model_refresh"
@@ -14915,7 +14975,44 @@ class MemoryEngine(MemoryEngineInterface):
             watermark=processed_watermark,
         )
 
-        reflect_result = await self.reflect_async(**reflect_kwargs)
+        # Having nothing to read is not a cheap reflect — it is the most expensive
+        # one there is (#3875). The forced retrieval turns all come back empty, and
+        # the agent's evidence guardrail then refuses every ``done`` call, because
+        # evidence is exactly what it cannot gather; the loop runs to its iteration
+        # limit and pays a forced synthesis on top. A bank's default knowledge pages
+        # each enqueue a refresh the moment they are created, so a fresh bank spent
+        # its whole LLM budget on five worst-case reflects over an empty graph — the
+        # budget it needed to ingest the content those pages were waiting for.
+        #
+        # So ask first whether this model's flags leave the agent anything to retrieve.
+        # The watermark reading already answers it for memories, at no cost: it is the
+        # newest memory visible at the snapshot *within this model's scope*, so
+        # tags/tag_groups/fact_types are already applied to it. ``None`` means the scope
+        # is empty; otherwise the delta window's lower bound settles it, because a max
+        # newer than the bound is exactly "at least one row is in the window" — the same
+        # comparison recall makes with ``updated_at > created_after``. Full mode has no
+        # lower bound, so any memory at all counts. Only when that comes back empty is
+        # there a query to pay, and only while sibling documents are still in reach.
+        has_sources = scope_watermark.newest_in_scope is not None and (
+            created_after is None or scope_watermark.newest_in_scope > created_after
+        )
+        if not has_sources and not exclude_mental_models:
+            has_sources = await self._bank_has_readable_document(bank_id, excluding_id=mental_model_id)
+        if has_sources:
+            reflect_result = await self.reflect_async(**reflect_kwargs)
+        else:
+            # An empty result, not a shortcut around the rest of the pipeline: the
+            # delta legs below still run. A retraction is a reason to edit the
+            # document all by itself, and gating it on new facts arriving is the
+            # coupling that lets a retired claim survive forever on a quiet bank —
+            # the same reason the unsay pass runs before the no-new-facts return.
+            logger.info(
+                f"[MENTAL_MODELS] Refresh for {mental_model_id}: nothing in scope to reflect over "
+                f"(mode={'delta' if use_delta else 'full'}"
+                f"{f', window opens {created_after.isoformat()}' if created_after else ''}); "
+                f"skipping the reflect loop"
+            )
+            reflect_result = ReflectResult(text="", based_on={})
 
         # Build reflect_response payload to store
         # based_on contains MemoryFact objects for most types, but plain dicts for directives
@@ -15029,10 +15126,22 @@ class MemoryEngine(MemoryEngineInterface):
             "mental_models": [],  # Mental models are included in based_on["mental-models"]
         }
 
+        if not has_sources:
+            # Recorded on the model so a refresh that did nothing says why it did
+            # nothing — distinct from a reflect that ran and came back empty-handed.
+            reflect_response_payload["reflect_skipped"] = "no_sources_in_scope"
+
         warnings: list[str] = []
         retrieved_total = sum(facts.retrieved.values())
         used_total = sum(facts.used.values())
-        if retrieved_total == 0:
+        if not has_sources:
+            warnings.append(
+                "Nothing in this document's scope was readable, so the reflect loop was skipped and the "
+                "document left as it is. Check the resolved scope — tags, tag_groups and fact_types all "
+                "narrow it — and, in delta mode, the time window: only memories changed after the last "
+                "refresh are in range."
+            )
+        elif retrieved_total == 0:
             warnings.append(
                 "Retrieval returned no facts at all. Check the resolved scope and the time window — "
                 "in delta mode nothing created after the last refresh is in range."
@@ -15415,6 +15524,25 @@ class MemoryEngine(MemoryEngineInterface):
 
         effective_mode: RefreshMode = "delta" if delta_applied else "full"
 
+        # Nothing was read, and no delta edit was made from what was not read. The
+        # candidate is empty by construction rather than by failure, so this must not
+        # fall into the empty-candidate guard below: that raises, and the worker would
+        # retry a refresh whose inputs are guaranteed identical next time. Preserve the
+        # document and report the same outcome the delta leg reports for an empty
+        # window — which is what this is, in full mode with the window wide open.
+        #
+        # Reached by a full refresh, and by a delta refresh whose baseline could not be
+        # read (a delta with a baseline has already returned via the no-new-facts leg).
+        if not has_sources and not delta_applied:
+            return _finish(
+                effective_mode=effective_mode,
+                mode_fallback_reason=mode_fallback_reason,
+                final_content=current_content,
+                final_structured=None,
+                delta_operations=delta_operations,
+                outcome="content_preserved_no_new_facts",
+            )
+
         # Refuse to overwrite existing content with an empty render.
         # The reflect agent can return an empty answer (small models, all
         # tool-call retries failing, transient provider errors, the cleaner
@@ -15494,8 +15622,9 @@ class MemoryEngine(MemoryEngineInterface):
         # report ``content_written`` even though nothing about the document
         # changed. So does a full regeneration that reproduces the stored text.
         # ``content_preserved_no_new_facts`` does not cover either: it fires only
-        # when the delta window was empty, whereas these runs read facts and
-        # concluded there was nothing to change.
+        # when there was nothing to read — an empty delta window, or a scope with no
+        # readable memory at all — whereas these runs read facts and concluded there
+        # was nothing to change.
         return _finish(
             effective_mode=effective_mode,
             mode_fallback_reason=mode_fallback_reason,
@@ -15587,7 +15716,8 @@ class MemoryEngine(MemoryEngineInterface):
 
             if run.outcome == "content_preserved_no_new_facts":
                 logger.info(
-                    f"[MENTAL_MODELS] Delta refresh for {mental_model_id}: no new facts found, preserving content"
+                    f"[MENTAL_MODELS] Refresh for {mental_model_id} ({run.effective_mode}): "
+                    f"no new facts found, preserving content"
                 )
                 # Content is preserved unchanged, so the structured view must be too.
                 if prev_structured_output is not None:
