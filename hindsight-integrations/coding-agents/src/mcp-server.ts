@@ -85,14 +85,15 @@ export function buildMcpServer(tools: ToolSpec[]): McpServer {
   }
 
   for (const tool of tools) {
-    // registerTool (not the deprecated `tool()`) so the read-only annotation reaches the client:
-    // Dcode rejects unannotated MCP calls outright in headless mode. See ToolSpec.readOnly.
+    // registerTool (not the deprecated `tool()`) so the safety annotations reach the client:
+    // Dcode rejects unannotated MCP calls outright in headless mode, and Codex Auto-review treats
+    // them as unverified external access. See ToolSpec.annotations.
     server.registerTool(
       tool.name,
       {
         description: tool.description,
         inputSchema: tool.inputSchema,
-        ...(tool.readOnly ? { annotations: { readOnlyHint: true, destructiveHint: false } } : {}),
+        annotations: tool.annotations,
       },
       tool.handler
     );

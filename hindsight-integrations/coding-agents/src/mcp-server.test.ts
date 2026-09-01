@@ -164,11 +164,34 @@ describe("buildMcpServer", () => {
 
   /**
    * Dcode computes an "is this tool coherently read-only" verdict from the MCP annotations and,
-   * in headless mode, REJECTS every call that fails it. So the annotation is a functional
-   * requirement, not documentation: without it `dcode -n` cannot search or read knowledge pages.
-   * Assert it over the wire (what a client actually sees), not on the specs.
+   * in headless mode, REJECTS every call that fails it; Codex Auto-review reads the same metadata
+   * to tell a safe knowledge read from a write. So the annotations are a functional requirement,
+   * not documentation. Assert them over the wire (what a client actually sees), not on the specs.
    */
-  it("advertises readOnlyHint on exactly the tools that only read Hindsight", async () => {
+  it("publishes explicit safety annotations for every enabled tool", async () => {
+    const readOnly = {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    };
+    // The writes are additive, never idempotent: clients should still gate them.
+    const nonDestructiveWrite = {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    };
+    const expected = {
+      hindsight_sync_status: readOnly,
+      hindsight_diagnose: readOnly,
+      hindsight_search_knowledge_pages: readOnly,
+      hindsight_list_knowledge_pages: readOnly,
+      hindsight_read_knowledge_page: readOnly,
+      hindsight_reflect: readOnly,
+      hindsight_capture_initiative: nonDestructiveWrite,
+      hindsight_ingest_document: nonDestructiveWrite,
+    };
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const server = buildMcpServer(selectTools(resolveConfig({}), stubClient, "b"));
     const client = new Client({ name: "test-client", version: "0.1.0" });
@@ -176,26 +199,10 @@ describe("buildMcpServer", () => {
     await server.connect(serverTransport);
     await client.connect(clientTransport);
     try {
-      const { tools } = await client.listTools();
-      const readOnly = tools
-        .filter((t) => t.annotations?.readOnlyHint === true)
-        .map((t) => t.name)
-        .sort();
-      expect(readOnly).toEqual([
-        "hindsight_diagnose",
-        "hindsight_list_knowledge_pages",
-        "hindsight_read_knowledge_page",
-        "hindsight_reflect",
-        "hindsight_search_knowledge_pages",
-        "hindsight_sync_status",
-      ]);
-      // The writes must stay unannotated: gating them behind approval is correct.
-      const writes = tools.filter((t) => t.annotations?.readOnlyHint !== true).map((t) => t.name);
-      expect(writes.sort()).toEqual(["hindsight_capture_initiative", "hindsight_ingest_document"]);
-      // A read-only hint paired with a destructive one is INCOHERENT and gets gated anyway.
-      for (const tool of tools) {
-        if (tool.annotations?.readOnlyHint) expect(tool.annotations.destructiveHint).toBe(false);
-      }
+      const listed = await client.listTools();
+      expect(Object.fromEntries(listed.tools.map((tool) => [tool.name, tool.annotations]))).toEqual(
+        expected
+      );
     } finally {
       await client.close();
       await server.close();
