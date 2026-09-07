@@ -1707,9 +1707,7 @@ async def _run_consolidation_job(
 
             cancelled_local = False
             if operation_id and not await memory_engine._check_op_alive(operation_id):
-                logger.info(
-                    f"[CONSOLIDATION] bank={bank_id} operation {operation_id} cancelled (bank deleted), stopping early"
-                )
+                logger.info(f"[CONSOLIDATION] bank={bank_id} operation {operation_id} cancelled, stopping early")
                 cancelled_local = True
 
             # Per-batch local stats; merged into outer state once, serially,
