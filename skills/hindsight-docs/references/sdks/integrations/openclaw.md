@@ -399,6 +399,41 @@ uvx hindsight-embed@latest -p openclaw memory list openclaw --limit 10
 uvx hindsight-embed@latest -p openclaw ui
 ```
 
+## OpenClaw compatibility
+
+The plugin is tested against the current OpenClaw release and against older ones.
+Version 0.12.0 and later work with **OpenClaw 2026.7.x through 2026.9.x**.
+
+**If you are on OpenClaw 2026.8.1 or later, upgrade to plugin 0.12.0.** OpenClaw
+2026.8.1 changed how it labels the conversation metadata it attaches to each
+message. Earlier plugin versions no longer recognised those labels, which caused
+three problems on affected setups:
+
+- Turns were skipped instead of being remembered, with
+  `missing stable sender identity` in the gateway log.
+- OpenClaw's internal routing details (sender and channel IDs) were stored as if
+  they were part of the conversation, so they could surface in later recalls.
+- Automatic recall sometimes searched using that metadata instead of what you
+  actually said, returning irrelevant memories.
+
+0.12.0 reads both the old and new labels, so it is safe on any supported OpenClaw
+version — you do not need to match plugin and OpenClaw versions.
+
+Two things to expect after installing on OpenClaw 2026.8.1 or later:
+
+- Install prints
+  `Exclusive slot "memory" switched from "memory-core" to "hindsight-openclaw"`.
+  This is correct: Hindsight replaces OpenClaw's built-in memory.
+- `openclaw plugins doctor` then reports that `memory-core` is not selected for
+  the memory slot. This is expected and not an error — it is OpenClaw noting that
+  its built-in memory stepped aside.
+
+> **📝 Upgrading from 0.11.1 or earlier**
+>
+Installing 0.11.x could fail with
+`npm error Cannot read properties of null (reading 'edgesOut')`. That was a
+packaging problem in the plugin, triggered by a change in the npm registry, and
+it is fixed in 0.12.0 — retry the install with the new version.
 ## Troubleshooting
 
 ### Plugin not loading

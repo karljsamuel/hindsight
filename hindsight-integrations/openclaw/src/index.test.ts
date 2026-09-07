@@ -30,6 +30,8 @@ import {
   stripInlineRetainTags,
   stripInlineTimestampPrefix,
   stripRuntimeEnvelope,
+  stripMetadataEnvelopes,
+  extractSenderIdFromText,
   configureSenderPrefixStripping,
   getPluginConfig,
   formatHookPerf,
@@ -2219,5 +2221,71 @@ describe("senderPrefixPattern display-name stripping (#3070)", () => {
     expect(stripRuntimeEnvelope("UserName: today weather?")).toBe("UserName: today weather?");
 
     expect(getPluginConfig(makeApi({})).senderPrefixPattern).toBeUndefined();
+  });
+});
+
+// OpenClaw 2026.8.1 replaced the "(untrusted metadata)" label on every injected
+// inbound context header with a `⟦openclaw:ctx⟧` provenance marker. Both forms
+// have to keep working: hosts on either side of that change are in the field.
+describe("inbound metadata blocks (marker and legacy forms)", () => {
+  const MARKER = "⟦openclaw:ctx⟧";
+  const markerBlock = (label: string, json: string) =>
+    `${label} ${MARKER}\n\`\`\`json\n${json}\n\`\`\``;
+  const legacyBlock = (label: string, json: string) =>
+    `${label} (untrusted metadata):\n\`\`\`json\n${json}\n\`\`\``;
+
+  it("extracts sender_id from a marker-form Conversation info block", () => {
+    const text = `${markerBlock("Conversation info:", '{"message_id":"om_abc","sender_id":"ou_xyz"}')}\n\nwhat did I say about postgres?`;
+    expect(extractSenderIdFromText(text)).toBe("ou_xyz");
+  });
+
+  it("extracts sender_id from a marker-form Sender block", () => {
+    const text = `${markerBlock("Sender:", '{"id":"ou_sender_only"}')}\n\nhello`;
+    expect(extractSenderIdFromText(text)).toBe("ou_sender_only");
+  });
+
+  it("still extracts sender_id from the legacy label", () => {
+    const text = `${legacyBlock("Conversation info", '{"sender_id":"ou_legacy"}')}\n\nhello`;
+    expect(extractSenderIdFromText(text)).toBe("ou_legacy");
+  });
+
+  it("strips a marker-form block from retained content", () => {
+    const text = `${markerBlock("Conversation info:", '{"sender_id":"ou_xyz"}')}\n\nremember I use pnpm`;
+    expect(stripMetadataEnvelopes(text)).toBe("remember I use pnpm");
+  });
+
+  it("strips a marker-form block that has no json fence", () => {
+    const text = `Chat history since last reply: ${MARKER}\nalice: hi\nbob: hey\n\nremember I use pnpm`;
+    expect(stripMetadataEnvelopes(text)).toBe("remember I use pnpm");
+  });
+
+  it("strips several marker-form blocks and keeps the user text", () => {
+    const text = [
+      markerBlock("Conversation info:", '{"sender_id":"ou_xyz"}'),
+      "",
+      markerBlock("Location:", '{"city":"Milan"}'),
+      "",
+      "what is the plan?",
+    ].join("\n");
+    expect(stripMetadataEnvelopes(text)).toBe("what is the plan?");
+  });
+
+  it("still strips the legacy label form", () => {
+    const text = `${legacyBlock("Conversation info", '{"sender_id":"ou_legacy"}')}\n\nremember I use pnpm`;
+    expect(stripMetadataEnvelopes(text)).toBe("remember I use pnpm");
+  });
+
+  it("leaves ordinary user text untouched", () => {
+    expect(stripMetadataEnvelopes("just a normal message")).toBe("just a normal message");
+  });
+
+  it("rejects a marker-only prompt as a recall query", () => {
+    const text = markerBlock("Conversation info:", '{"sender_id":"ou_xyz"}');
+    expect(extractRecallQuery(text, undefined)).toBeNull();
+  });
+
+  it("recovers the user query from a marker-wrapped prompt", () => {
+    const text = `${markerBlock("Conversation info:", '{"sender_id":"ou_xyz"}')}\n\nwhat did I say about postgres?`;
+    expect(extractRecallQuery(undefined, text)).toBe("what did I say about postgres?");
   });
 });

@@ -202,6 +202,19 @@ Retained documents use stable session-scoped IDs derived from the OpenClaw `sess
 
 `retainContext` is sent separately from the transcript content and gives Hindsight's extraction LLM interpretation guidance for the retained document. The default is designed for OpenClaw transcripts: it explains that sender/channel/provider metadata is operational routing data, that assistant-role first-person statements belong to the AI assistant, and that bank IDs or tags should not be treated as the discussed project. Sender/channel/provider stay in retain request metadata/context and are not prepended into retained transcript content.
 
+## OpenClaw compatibility
+
+Version 0.12.0 and later work with **OpenClaw 2026.7.x through 2026.9.x**. The plugin reads both the old and the new conversation-metadata labels, so plugin and OpenClaw versions do not need to match.
+
+**On OpenClaw 2026.8.1 or later, use 0.12.0 or later.** 2026.8.1 changed how OpenClaw labels the metadata it attaches to each message; earlier plugin versions no longer recognised it, so turns were skipped with `missing stable sender identity`, routing IDs were stored as conversation content, and automatic recall could search using that metadata instead of your message.
+
+Two expected (non-error) messages on 2026.8.1+:
+
+- Install prints `Exclusive slot "memory" switched from "memory-core" to "hindsight-openclaw"` — correct; Hindsight replaces OpenClaw's built-in memory.
+- `openclaw plugins doctor` then reports `memory-core` is not selected for the memory slot — that is OpenClaw noting its built-in memory stepped aside.
+
+Upgrading from 0.11.1 or earlier: installs could fail with `npm error Cannot read properties of null (reading 'edgesOut')`. That was a packaging problem in the plugin, fixed in 0.12.0 — retry with the new version.
+
 ## Documentation
 
 For full documentation, configuration options, troubleshooting, and development guide, see:
