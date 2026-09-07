@@ -1979,6 +1979,145 @@ class ListMemoryUnitsResponse(BaseModel):
     offset: int
 
 
+class PromptPreviewRequest(BaseModel):
+    """Request to render the prompts an operation would send, without calling an LLM.
+
+    The operation is the whole request: everything that shapes the prompt comes from
+    the bank — its resolved config, profile and directives — and the runtime data an
+    operation would be given is a fixed placeholder. There is deliberately nothing to
+    override. A preview answers "what does this bank send"; letting a caller pass its
+    own mission or sample text only moved that question somewhere the bank cannot
+    answer it. To try a candidate value, save it and look again — the response says
+    which settings are editable.
+    """
+
+    model_config = ConfigDict(json_schema_extra={"example": {"operation": "retain"}})
+
+    operation: Literal["retain", "consolidation", "reflect"] = Field(
+        default="retain", description="Which operation's prompts to render."
+    )
+    strategy: str | None = Field(
+        default=None,
+        description=(
+            "Name of a retain strategy to render under (a key of the bank's `retain_strategies`). "
+            "Retain only. Omit it and the bank's `retain_default_strategy` applies, exactly as it "
+            "does for a retain that names none."
+        ),
+    )
+
+
+class PromptBlockModel(BaseModel):
+    """One block of a message: its text, and the setting that decides it.
+
+    The **active** blocks of a message concatenate back to the exact text sent, so a
+    client can render them separately without showing the reader something the model
+    never receives. An **inactive** block has no text: it marks a setting that is
+    switched off, at the point where it would land if it were on.
+
+    Everything identifying a block is a machine value, never display copy — what a
+    block is called, and what turning a switched-off one on would do, is for the
+    client to say in the language it is running in.
+    """
+
+    text: str = Field(description="The block's text; empty when the block is inactive.")
+    source: Literal["config", "builtin"] = Field(
+        description="`config` — produced by a setting (`field` names it); `builtin` — Hindsight's own wording."
+    )
+    field: str = Field(default="", description="Config field behind this block; empty when no single field owns it.")
+    section: str = Field(
+        default="",
+        description=(
+            "Slug for a part the preview names itself and no field owns: `bank_identity`, `disposition`, "
+            "`directives`. Empty otherwise."
+        ),
+    )
+    heading: str = Field(
+        default="",
+        description=(
+            "The section heading the prompt text carries at this point, extracted from the prompt itself. "
+            "Empty when it carries none."
+        ),
+    )
+    active: bool = Field(default=True, description="Whether this block is in the prompt as configured.")
+    value: str | None = Field(default=None, description="The field's effective value; null when unset.")
+    # Required, with no default: progenitor (the Rust client generator) rejects a
+    # default value on an inline enum property with TypeError(InvalidValue), and the
+    # server always sends this field anyway. Same reason `source` and `role` carry no
+    # default. Don't add one back without regenerating the Rust client.
+    kind: Literal["text", "boolean", "choice", "complex"] = Field(
+        description="Shape of the value, so a client can offer the right control for editing it."
+    )
+    choices: list[str] | None = Field(default=None, description="Allowed values, when `kind` is `choice`.")
+    editable: bool = Field(
+        default=False,
+        description=(
+            "Whether this bank may override the field via the bank config API. Server-level fields shape "
+            "the prompt but cannot be set per bank, and offering to edit one would only collect a 400."
+        ),
+    )
+
+
+class PromptMessageModel(BaseModel):
+    """One message of the request, as the blocks it is built from."""
+
+    role: Literal["system", "user"]
+    blocks: list[PromptBlockModel] = Field(default_factory=list)
+
+
+class RunSettingModel(BaseModel):
+    """A setting that shapes the operation without appearing in its prompt.
+
+    Chunk sizes decide how the input is cut before extraction runs, so they change
+    what comes back while contributing no prompt text — they cannot be blocks, which
+    partition the message, and these are in none of it.
+    """
+
+    field: str
+    value: str | None = Field(default=None, description="Effective value; null when unset.")
+    kind: Literal["text", "boolean", "choice", "complex"] = Field(
+        description="Shape of the value, so a client can offer the right control."
+    )
+    editable: bool = Field(
+        default=False, description="Whether this bank may override the field via the bank config API."
+    )
+
+
+class PromptPreviewResponse(BaseModel):
+    """The messages one call of the requested operation would send.
+
+    `messages` is in send order, system first. Both are always present because a
+    mission is not necessarily in the system prompt: retain and consolidation keep
+    their system prompt bank-agnostic (so one provider-side cache serves every bank)
+    and carry the mission in the user message instead.
+
+    When `skipped_reason` is set the configuration means no prompt is sent at all —
+    `chunks` extraction mode stores each chunk verbatim and never calls an LLM — and
+    `messages` is empty.
+    """
+
+    messages: list[PromptMessageModel] = Field(
+        default_factory=list,
+        description="Request messages, in send order. Each is given as the blocks it is built from.",
+    )
+    strategy: str | None = Field(
+        default=None, description="The retain strategy these prompts were rendered under, if any."
+    )
+    strategies: list[str] = Field(
+        default_factory=list,
+        description="Names of the bank's retain strategies, so a client can offer them without a second call.",
+    )
+    run_settings: list[RunSettingModel] = Field(
+        default_factory=list,
+        description="Settings that shape the operation without appearing in its prompt, such as chunk sizes.",
+    )
+    response_schema: dict[str, Any] | None = Field(
+        default=None, description="JSON schema the response is constrained to, when the operation constrains it."
+    )
+    skipped_reason: str | None = Field(
+        default=None, description="Why no prompt is sent, when the configuration means none is."
+    )
+
+
 class DryRunExtractRequest(BaseModel):
     """Request to run fact extraction ONLY (no resolution/links/embeddings/persistence).
 
@@ -1999,6 +2138,14 @@ class DryRunExtractRequest(BaseModel):
         description=(
             "Deprecated: describe the speaker in `context` instead. Narrator override (memory owner) "
             "primed in the prompt; still honored for backwards compatibility."
+        ),
+    )
+    strategy: str | None = Field(
+        default=None,
+        description=(
+            "Name of a retain strategy to extract under (a key of the bank's `retain_strategies`). "
+            "Omit it and the bank's `retain_default_strategy` applies, exactly as it does for a "
+            "retain that names none."
         ),
     )
     # --- prompt-affecting config overrides (null = use the bank's value) ---
@@ -5069,6 +5216,7 @@ def _register_routes(app: FastAPI):
                 body.content,
                 context=body.context or "",
                 event_date=body.timestamp,
+                strategy=body.strategy,
                 overrides=overrides,
                 agent_name=body.agent_name,
                 request_context=request_context,
@@ -5081,6 +5229,71 @@ def _register_routes(app: FastAPI):
             raise
         except Exception as e:
             raise _internal_error(e, f"/v1/default/banks/{bank_id}/memories/dry-run-extract")
+
+    @app.post(
+        "/v1/default/banks/{bank_id}/prompts/preview",
+        response_model=PromptPreviewResponse,
+        summary="Preview an operation's prompts (no LLM call)",
+        description=(
+            "Render the exact system and user messages retain, consolidation or reflect would send "
+            "for this bank, without calling an LLM, reading memories, or changing anything. "
+            "Everything that shapes the prompt comes from the bank; the runtime data an operation "
+            "would be given is a fixed placeholder. Both messages are returned: retain and "
+            "consolidation keep their system prompt bank-agnostic (one provider-side cache serves "
+            "every bank) and carry the mission in the user message instead."
+        ),
+        operation_id="preview_prompt",
+        tags=["Banks"],
+    )
+    async def api_preview_prompt(
+        bank_id: str,
+        body: PromptPreviewRequest,
+        request_context: RequestContext = Depends(get_request_context),
+    ):
+        try:
+            preview = await app.state.memory.preview_prompt(
+                bank_id,
+                body.operation,
+                strategy=body.strategy,
+                request_context=request_context,
+            )
+            return PromptPreviewResponse(
+                messages=[
+                    PromptMessageModel(
+                        role=m.role,
+                        blocks=[
+                            PromptBlockModel(
+                                text=b.text,
+                                source=b.source,
+                                field=b.field,
+                                section=b.section,
+                                heading=b.heading,
+                                active=b.active,
+                                value=b.value,
+                                kind=b.kind,
+                                choices=b.choices,
+                                editable=b.editable,
+                            )
+                            for b in m.blocks
+                        ],
+                    )
+                    for m in preview.messages
+                ],
+                strategy=preview.strategy,
+                strategies=preview.strategies,
+                run_settings=[
+                    RunSettingModel(field=r.field, value=r.value, kind=r.kind, editable=r.editable)
+                    for r in preview.run_settings
+                ],
+                response_schema=preview.response_schema,
+                skipped_reason=preview.skipped_reason,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except (AuthenticationError, HTTPException):
+            raise
+        except Exception as e:
+            raise _internal_error(e, f"/v1/default/banks/{bank_id}/prompts/preview")
 
     @app.get(
         "/v1/default/banks/{bank_id}/memories/{memory_id}",

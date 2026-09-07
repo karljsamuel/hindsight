@@ -209,6 +209,9 @@ import type {
   LlmRequestStatsResponses,
   MetricsEndpointMetricsGetData,
   MetricsEndpointMetricsGetResponses,
+  PreviewPromptData,
+  PreviewPromptErrors,
+  PreviewPromptResponses,
   RecallMemoriesData,
   RecallMemoriesErrors,
   RecallMemoriesResponses,
@@ -397,6 +400,23 @@ export const dryRunExtractMemories = <ThrowOnError extends boolean = false>(
     ThrowOnError
   >({
     url: "/v1/default/banks/{bank_id}/memories/dry-run-extract",
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+  });
+
+/**
+ * Preview an operation's prompts (no LLM call)
+ *
+ * Render the exact system and user messages retain, consolidation or reflect would send for this bank, without calling an LLM, reading memories, or changing anything. Everything that shapes the prompt comes from the bank; the runtime data an operation would be given is a fixed placeholder. Both messages are returned: retain and consolidation keep their system prompt bank-agnostic (one provider-side cache serves every bank) and carry the mission in the user message instead.
+ */
+export const previewPrompt = <ThrowOnError extends boolean = false>(
+  options: Options<PreviewPromptData, ThrowOnError>
+) =>
+  (options.client ?? client).post<PreviewPromptResponses, PreviewPromptErrors, ThrowOnError>({
+    url: "/v1/default/banks/{bank_id}/prompts/preview",
     ...options,
     headers: {
       "Content-Type": "application/json",

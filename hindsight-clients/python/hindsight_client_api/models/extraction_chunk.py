@@ -18,21 +18,17 @@ import re  # noqa: F401
 import json
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List
 from typing import Optional, Set
 from typing_extensions import Self
 
-class ExtractedFact(BaseModel):
+class ExtractionChunk(BaseModel):
     """
-    A single candidate fact produced by dry-run extraction (no resolution/links/persistence).  A deliberate subset of the persisted memory-unit shape — only the fields a fresh extraction yields. Storage/consolidation/curation fields (id, document_id, chunk_id, proof_count, state, …) are omitted because nothing is stored. Entities are raw, unresolved names.
+    One chunk the extractor was handed, and how much it yielded.
     """ # noqa: E501
-    text: StrictStr = Field(description="The extracted fact text.")
-    fact_type: StrictStr = Field(description="Perspective classification: 'world' or 'experience'.")
-    occurred_start: Optional[StrictStr] = None
-    occurred_end: Optional[StrictStr] = None
-    entities: Optional[List[StrictStr]] = Field(default=None, description="Raw (unresolved) entity names mentioned in the fact.")
-    chunk_index: Optional[StrictInt] = None
-    __properties: ClassVar[List[str]] = ["text", "fact_type", "occurred_start", "occurred_end", "entities", "chunk_index"]
+    text: StrictStr = Field(description="The chunk as the extractor saw it.")
+    fact_count: StrictInt = Field(description="How many facts came out of this chunk.")
+    __properties: ClassVar[List[str]] = ["text", "fact_count"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -52,7 +48,7 @@ class ExtractedFact(BaseModel):
 
     @classmethod
     def from_json(cls, json_str: str) -> Optional[Self]:
-        """Create an instance of ExtractedFact from a JSON string"""
+        """Create an instance of ExtractionChunk from a JSON string"""
         return cls.from_dict(json.loads(json_str))
 
     def to_dict(self) -> Dict[str, Any]:
@@ -73,26 +69,11 @@ class ExtractedFact(BaseModel):
             exclude=excluded_fields,
             exclude_none=True,
         )
-        # set to None if occurred_start (nullable) is None
-        # and model_fields_set contains the field
-        if self.occurred_start is None and "occurred_start" in self.model_fields_set:
-            _dict['occurred_start'] = None
-
-        # set to None if occurred_end (nullable) is None
-        # and model_fields_set contains the field
-        if self.occurred_end is None and "occurred_end" in self.model_fields_set:
-            _dict['occurred_end'] = None
-
-        # set to None if chunk_index (nullable) is None
-        # and model_fields_set contains the field
-        if self.chunk_index is None and "chunk_index" in self.model_fields_set:
-            _dict['chunk_index'] = None
-
         return _dict
 
     @classmethod
     def from_dict(cls, obj: Optional[Dict[str, Any]]) -> Optional[Self]:
-        """Create an instance of ExtractedFact from a dict"""
+        """Create an instance of ExtractionChunk from a dict"""
         if obj is None:
             return None
 
@@ -101,11 +82,7 @@ class ExtractedFact(BaseModel):
 
         _obj = cls.model_validate({
             "text": obj.get("text"),
-            "fact_type": obj.get("fact_type"),
-            "occurred_start": obj.get("occurred_start"),
-            "occurred_end": obj.get("occurred_end"),
-            "entities": obj.get("entities"),
-            "chunk_index": obj.get("chunk_index")
+            "fact_count": obj.get("fact_count")
         })
         return _obj
 

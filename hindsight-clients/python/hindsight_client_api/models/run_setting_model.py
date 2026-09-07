@@ -17,22 +17,27 @@ import pprint
 import re  # noqa: F401
 import json
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, field_validator
 from typing import Any, ClassVar, Dict, List, Optional
 from typing import Optional, Set
 from typing_extensions import Self
 
-class ExtractedFact(BaseModel):
+class RunSettingModel(BaseModel):
     """
-    A single candidate fact produced by dry-run extraction (no resolution/links/persistence).  A deliberate subset of the persisted memory-unit shape — only the fields a fresh extraction yields. Storage/consolidation/curation fields (id, document_id, chunk_id, proof_count, state, …) are omitted because nothing is stored. Entities are raw, unresolved names.
+    A setting that shapes the operation without appearing in its prompt.  Chunk sizes decide how the input is cut before extraction runs, so they change what comes back while contributing no prompt text — they cannot be blocks, which partition the message, and these are in none of it.
     """ # noqa: E501
-    text: StrictStr = Field(description="The extracted fact text.")
-    fact_type: StrictStr = Field(description="Perspective classification: 'world' or 'experience'.")
-    occurred_start: Optional[StrictStr] = None
-    occurred_end: Optional[StrictStr] = None
-    entities: Optional[List[StrictStr]] = Field(default=None, description="Raw (unresolved) entity names mentioned in the fact.")
-    chunk_index: Optional[StrictInt] = None
-    __properties: ClassVar[List[str]] = ["text", "fact_type", "occurred_start", "occurred_end", "entities", "chunk_index"]
+    var_field: StrictStr = Field(alias="field")
+    value: Optional[StrictStr] = None
+    kind: StrictStr = Field(description="Shape of the value, so a client can offer the right control.")
+    editable: Optional[StrictBool] = Field(default=False, description="Whether this bank may override the field via the bank config API.")
+    __properties: ClassVar[List[str]] = ["field", "value", "kind", "editable"]
+
+    @field_validator('kind')
+    def kind_validate_enum(cls, value):
+        """Validates the enum"""
+        if value not in set(['text', 'boolean', 'choice', 'complex']):
+            raise ValueError("must be one of enum values ('text', 'boolean', 'choice', 'complex')")
+        return value
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -52,7 +57,7 @@ class ExtractedFact(BaseModel):
 
     @classmethod
     def from_json(cls, json_str: str) -> Optional[Self]:
-        """Create an instance of ExtractedFact from a JSON string"""
+        """Create an instance of RunSettingModel from a JSON string"""
         return cls.from_dict(json.loads(json_str))
 
     def to_dict(self) -> Dict[str, Any]:
@@ -73,26 +78,16 @@ class ExtractedFact(BaseModel):
             exclude=excluded_fields,
             exclude_none=True,
         )
-        # set to None if occurred_start (nullable) is None
+        # set to None if value (nullable) is None
         # and model_fields_set contains the field
-        if self.occurred_start is None and "occurred_start" in self.model_fields_set:
-            _dict['occurred_start'] = None
-
-        # set to None if occurred_end (nullable) is None
-        # and model_fields_set contains the field
-        if self.occurred_end is None and "occurred_end" in self.model_fields_set:
-            _dict['occurred_end'] = None
-
-        # set to None if chunk_index (nullable) is None
-        # and model_fields_set contains the field
-        if self.chunk_index is None and "chunk_index" in self.model_fields_set:
-            _dict['chunk_index'] = None
+        if self.value is None and "value" in self.model_fields_set:
+            _dict['value'] = None
 
         return _dict
 
     @classmethod
     def from_dict(cls, obj: Optional[Dict[str, Any]]) -> Optional[Self]:
-        """Create an instance of ExtractedFact from a dict"""
+        """Create an instance of RunSettingModel from a dict"""
         if obj is None:
             return None
 
@@ -100,12 +95,10 @@ class ExtractedFact(BaseModel):
             return cls.model_validate(obj)
 
         _obj = cls.model_validate({
-            "text": obj.get("text"),
-            "fact_type": obj.get("fact_type"),
-            "occurred_start": obj.get("occurred_start"),
-            "occurred_end": obj.get("occurred_end"),
-            "entities": obj.get("entities"),
-            "chunk_index": obj.get("chunk_index")
+            "field": obj.get("field"),
+            "value": obj.get("value"),
+            "kind": obj.get("kind"),
+            "editable": obj.get("editable") if obj.get("editable") is not None else False
         })
         return _obj
 

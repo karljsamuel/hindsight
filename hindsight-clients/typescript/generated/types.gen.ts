@@ -1876,6 +1876,12 @@ export type DryRunExtractRequest = {
    */
   agent_name?: string | null;
   /**
+   * Strategy
+   *
+   * Name of a retain strategy to extract under (a key of the bank's `retain_strategies`). Omit it and the bank's `retain_default_strategy` applies, exactly as it does for a retain that names none.
+   */
+  strategy?: string | null;
+  /**
    * Retain Mission
    */
   retain_mission?: string | null;
@@ -1914,7 +1920,8 @@ export type DryRunExtractRequest = {
 /**
  * DryRunExtractionResult
  *
- * Result of dry-run fact extraction: candidate facts plus aggregated LLM token usage.
+ * Result of dry-run fact extraction: candidate facts, the chunks they came from,
+ * and aggregated LLM token usage.
  */
 export type DryRunExtractionResult = {
   /**
@@ -1923,6 +1930,12 @@ export type DryRunExtractionResult = {
    * Candidate facts the retain step would extract.
    */
   facts?: Array<ExtractedFact>;
+  /**
+   * Chunks
+   *
+   * The chunks the input was cut into before extraction. Already computed on every path; returned because `retain_chunk_size` is otherwise a number with no visible effect.
+   */
+  chunks?: Array<ExtractionChunk>;
   /**
    * Aggregated token usage across the extraction LLM calls.
    */
@@ -2167,6 +2180,32 @@ export type ExtractedFact = {
    * Raw (unresolved) entity names mentioned in the fact.
    */
   entities?: Array<string>;
+  /**
+   * Chunk Index
+   *
+   * Index into `chunks` of the chunk this fact came from; null if it could not be attributed.
+   */
+  chunk_index?: number | null;
+};
+
+/**
+ * ExtractionChunk
+ *
+ * One chunk the extractor was handed, and how much it yielded.
+ */
+export type ExtractionChunk = {
+  /**
+   * Text
+   *
+   * The chunk as the extractor saw it.
+   */
+  text: string;
+  /**
+   * Fact Count
+   *
+   * How many facts came out of this chunk.
+   */
+  fact_count: number;
 };
 
 /**
@@ -4347,6 +4386,182 @@ export type OperationsListResponse = {
 };
 
 /**
+ * PromptBlockModel
+ *
+ * One block of a message: its text, and the setting that decides it.
+ *
+ * The **active** blocks of a message concatenate back to the exact text sent, so a
+ * client can render them separately without showing the reader something the model
+ * never receives. An **inactive** block has no text: it marks a setting that is
+ * switched off, at the point where it would land if it were on.
+ *
+ * Everything identifying a block is a machine value, never display copy — what a
+ * block is called, and what turning a switched-off one on would do, is for the
+ * client to say in the language it is running in.
+ */
+export type PromptBlockModel = {
+  /**
+   * Text
+   *
+   * The block's text; empty when the block is inactive.
+   */
+  text: string;
+  /**
+   * Source
+   *
+   * `config` — produced by a setting (`field` names it); `builtin` — Hindsight's own wording.
+   */
+  source: "config" | "builtin";
+  /**
+   * Field
+   *
+   * Config field behind this block; empty when no single field owns it.
+   */
+  field?: string;
+  /**
+   * Section
+   *
+   * Slug for a part the preview names itself and no field owns: `bank_identity`, `disposition`, `directives`. Empty otherwise.
+   */
+  section?: string;
+  /**
+   * Heading
+   *
+   * The section heading the prompt text carries at this point, extracted from the prompt itself. Empty when it carries none.
+   */
+  heading?: string;
+  /**
+   * Active
+   *
+   * Whether this block is in the prompt as configured.
+   */
+  active?: boolean;
+  /**
+   * Value
+   *
+   * The field's effective value; null when unset.
+   */
+  value?: string | null;
+  /**
+   * Kind
+   *
+   * Shape of the value, so a client can offer the right control for editing it.
+   */
+  kind: "text" | "boolean" | "choice" | "complex";
+  /**
+   * Choices
+   *
+   * Allowed values, when `kind` is `choice`.
+   */
+  choices?: Array<string> | null;
+  /**
+   * Editable
+   *
+   * Whether this bank may override the field via the bank config API. Server-level fields shape the prompt but cannot be set per bank, and offering to edit one would only collect a 400.
+   */
+  editable?: boolean;
+};
+
+/**
+ * PromptMessageModel
+ *
+ * One message of the request, as the blocks it is built from.
+ */
+export type PromptMessageModel = {
+  /**
+   * Role
+   */
+  role: "system" | "user";
+  /**
+   * Blocks
+   */
+  blocks?: Array<PromptBlockModel>;
+};
+
+/**
+ * PromptPreviewRequest
+ *
+ * Request to render the prompts an operation would send, without calling an LLM.
+ *
+ * The operation is the whole request: everything that shapes the prompt comes from
+ * the bank — its resolved config, profile and directives — and the runtime data an
+ * operation would be given is a fixed placeholder. There is deliberately nothing to
+ * override. A preview answers "what does this bank send"; letting a caller pass its
+ * own mission or sample text only moved that question somewhere the bank cannot
+ * answer it. To try a candidate value, save it and look again — the response says
+ * which settings are editable.
+ */
+export type PromptPreviewRequest = {
+  /**
+   * Operation
+   *
+   * Which operation's prompts to render.
+   */
+  operation?: "retain" | "consolidation" | "reflect";
+  /**
+   * Strategy
+   *
+   * Name of a retain strategy to render under (a key of the bank's `retain_strategies`). Retain only. Omit it and the bank's `retain_default_strategy` applies, exactly as it does for a retain that names none.
+   */
+  strategy?: string | null;
+};
+
+/**
+ * PromptPreviewResponse
+ *
+ * The messages one call of the requested operation would send.
+ *
+ * `messages` is in send order, system first. Both are always present because a
+ * mission is not necessarily in the system prompt: retain and consolidation keep
+ * their system prompt bank-agnostic (so one provider-side cache serves every bank)
+ * and carry the mission in the user message instead.
+ *
+ * When `skipped_reason` is set the configuration means no prompt is sent at all —
+ * `chunks` extraction mode stores each chunk verbatim and never calls an LLM — and
+ * `messages` is empty.
+ */
+export type PromptPreviewResponse = {
+  /**
+   * Messages
+   *
+   * Request messages, in send order. Each is given as the blocks it is built from.
+   */
+  messages?: Array<PromptMessageModel>;
+  /**
+   * Strategy
+   *
+   * The retain strategy these prompts were rendered under, if any.
+   */
+  strategy?: string | null;
+  /**
+   * Strategies
+   *
+   * Names of the bank's retain strategies, so a client can offer them without a second call.
+   */
+  strategies?: Array<string>;
+  /**
+   * Run Settings
+   *
+   * Settings that shape the operation without appearing in its prompt, such as chunk sizes.
+   */
+  run_settings?: Array<RunSettingModel>;
+  /**
+   * Response Schema
+   *
+   * JSON schema the response is constrained to, when the operation constrains it.
+   */
+  response_schema?: {
+    [key: string]: unknown;
+  } | null;
+  /**
+   * Skipped Reason
+   *
+   * Why no prompt is sent, when the configuration means none is.
+   */
+  skipped_reason?: string | null;
+};
+
+/**
  * RecallRequest
  *
  * Request model for recall endpoint.
@@ -5065,6 +5280,40 @@ export type RetryOperationResponse = {
    * Operation Id
    */
   operation_id: string;
+};
+
+/**
+ * RunSettingModel
+ *
+ * A setting that shapes the operation without appearing in its prompt.
+ *
+ * Chunk sizes decide how the input is cut before extraction runs, so they change
+ * what comes back while contributing no prompt text — they cannot be blocks, which
+ * partition the message, and these are in none of it.
+ */
+export type RunSettingModel = {
+  /**
+   * Field
+   */
+  field: string;
+  /**
+   * Value
+   *
+   * Effective value; null when unset.
+   */
+  value?: string | null;
+  /**
+   * Kind
+   *
+   * Shape of the value, so a client can offer the right control.
+   */
+  kind: "text" | "boolean" | "choice" | "complex";
+  /**
+   * Editable
+   *
+   * Whether this bank may override the field via the bank config API.
+   */
+  editable?: boolean;
 };
 
 /**
@@ -6043,6 +6292,42 @@ export type DryRunExtractMemoriesResponses = {
 
 export type DryRunExtractMemoriesResponse =
   DryRunExtractMemoriesResponses[keyof DryRunExtractMemoriesResponses];
+
+export type PreviewPromptData = {
+  body: PromptPreviewRequest;
+  headers?: {
+    /**
+     * Authorization
+     */
+    authorization?: string | null;
+  };
+  path: {
+    /**
+     * Bank Id
+     */
+    bank_id: string;
+  };
+  query?: never;
+  url: "/v1/default/banks/{bank_id}/prompts/preview";
+};
+
+export type PreviewPromptErrors = {
+  /**
+   * Validation Error
+   */
+  422: HttpValidationError;
+};
+
+export type PreviewPromptError = PreviewPromptErrors[keyof PreviewPromptErrors];
+
+export type PreviewPromptResponses = {
+  /**
+   * Successful Response
+   */
+  200: PromptPreviewResponse;
+};
+
+export type PreviewPromptResponse = PreviewPromptResponses[keyof PreviewPromptResponses];
 
 export type GetMemoryData = {
   body?: never;

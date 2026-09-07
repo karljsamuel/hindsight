@@ -24,7 +24,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, ParamSpec, TypeVar, cast, overload
 
@@ -519,6 +519,7 @@ if TYPE_CHECKING:
 
     from .audit import AuditLogListResponse, AuditLogStatsResponse
     from .memories import MemoryScopeWatermark
+    from .prompt_preview import PromptPreview
     from .retain.attachment_content import LoadedAttachment, RetainAttachment
     from .retain.attachment_store import StoredAttachment
     from .transfer import BankImportResult, ImportResult
@@ -11540,6 +11541,85 @@ class MemoryEngine(MemoryEngineInterface):
         }
     )
 
+    async def preview_prompt(
+        self,
+        bank_id: str,
+        operation: str,
+        *,
+        strategy: str | None = None,
+        request_context: "RequestContext",
+    ) -> "PromptPreview":
+        """Render the prompts ``operation`` would send for this bank — no LLM call, no writes.
+
+        The read-only counterpart to :meth:`extract_dry_run`: that one spends a real
+        LLM call to show what a mission would *extract*, this one costs nothing and
+        shows the prompt the mission lands in. Everything comes from the bank — its
+        resolved config, profile and directives — so what comes back is this bank's
+        prompt and nothing a caller talked it into. Side-effect-free and idempotent.
+        """
+        from .prompt_preview import render_prompt_preview
+
+        # Same gate as GET /banks/{id}/config: this renders the bank's resolved
+        # settings — missions, custom instructions, entity labels — as prompt text,
+        # which is that endpoint's disclosure by another route. get_bank_profile and
+        # list_directives below carry their own read validation.
+        await self._authorize_bank_config_read(bank_id, request_context)
+        # Retain runs under a strategy-resolved config — a named one, or the bank's
+        # retain_default_strategy. Resolving directly showed a prompt retain would not
+        # send whenever a default strategy was set. The other operations have no
+        # strategies, so they take the plain resolved config.
+        resolved_config = (
+            await self._resolve_retain_config(bank_id, request_context, strategy)
+            if operation == "retain"
+            else await self._config_resolver.resolve_full_config(bank_id, request_context)
+        )
+
+        # Only reflect reads the profile and the directives — the profile for the bank
+        # name, disposition and legacy mission column that reflect_mission overlays;
+        # the directives because they are injected as hard rules near the top of the
+        # agent's system prompt, so a preview without them is missing the part of the
+        # prompt a bank is most likely to have customised. Fetching either for the
+        # other two operations would add queries they never use.
+        bank_profile: dict[str, Any] = {}
+        directives: list[dict[str, Any]] = []
+        if operation == "reflect":
+            bank_profile = (
+                await self.get_bank_profile(bank_id, request_context=request_context, create_if_missing=False)
+            ) or {}
+            # Untagged reflect: isolation_mode keeps tag-scoped directives out, which
+            # matches what a reflect call with no tags would load.
+            listed = await self.list_directives(
+                bank_id=bank_id, active_only=True, request_context=request_context, isolation_mode=True
+            )
+            directives = list(listed.items)
+
+        preview = render_prompt_preview(operation, resolved_config, bank_profile, directives)
+        if operation != "retain":
+            return preview
+        # Reported so a client can offer a strategy picker without a second call for
+        # the bank config. `strategy` echoes what actually applied, including the
+        # bank's default when the caller named none.
+        return replace(
+            preview,
+            strategy=strategy or resolved_config.retain_default_strategy,
+            strategies=sorted(resolved_config.retain_strategies or {}),
+        )
+
+    @staticmethod
+    def _chunk_index_per_fact(fact_counts: list[int], total_facts: int) -> list[int | None]:
+        """Which chunk each fact came from, derived from the per-chunk counts.
+
+        Both extraction paths return facts in chunk order and a count per chunk, so
+        the mapping falls out of the counts — no need to carry an index through the
+        real retain pipeline for the sake of a dry run. A chunk that failed is absent
+        from both lists, so the running sum stays aligned. Anything the counts do not
+        cover is left unattributed rather than guessed.
+        """
+        indices: list[int | None] = [index for index, count in enumerate(fact_counts) for _ in range(count)]
+        if len(indices) < total_facts:
+            indices.extend([None] * (total_facts - len(indices)))
+        return indices[:total_facts]
+
     async def extract_dry_run(
         self,
         bank_id: str,
@@ -11547,6 +11627,7 @@ class MemoryEngine(MemoryEngineInterface):
         *,
         context: str = "",
         event_date: "datetime | None" = None,
+        strategy: str | None = None,
         overrides: dict | None = None,
         agent_name: str | None = None,
         request_context: "RequestContext",
@@ -11560,12 +11641,16 @@ class MemoryEngine(MemoryEngineInterface):
         in ``context`` instead) but still overrides the narrator when supplied, for backwards compatibility.
         Side-effect-free and idempotent.
         """
-        from .response_models import ExtractedFact
+        from .response_models import ExtractedFact, ExtractionChunk
         from .retain import fact_extraction
 
         # Resolve the tenant schema before touching any bank-scoped data (config).
         await self._authenticate_tenant(request_context)
-        resolved_config = await self._config_resolver.resolve_full_config(bank_id, request_context)
+        # Through the same resolver retain uses, so a named strategy — and, with none
+        # named, the bank's retain_default_strategy — lands the way it will in a real
+        # retain. Resolving the config directly skipped strategies entirely, which
+        # quietly extracted under settings retain would not have used.
+        resolved_config = await self._resolve_retain_config(bank_id, request_context, strategy)
         if self._llm_config.provider == "none":
             resolved_config.retain_extraction_mode = "chunks"
 
@@ -11576,11 +11661,43 @@ class MemoryEngine(MemoryEngineInterface):
                 )
             setattr(resolved_config, key, value)
 
+        # chunks mode never reaches an LLM in a real retain — each chunk is stored as
+        # its own memory verbatim — and the branch that does that lives in
+        # `extract_facts_from_contents`, which this path does not go through. Without
+        # this the dry run called the model and showed extracted facts for a
+        # configuration that produces none, which is the opposite of what it is for.
+        if resolved_config.retain_extraction_mode == "chunks":
+            from .retain.types import RetainContent
+
+            chunked = fact_extraction._extract_facts_chunks(
+                [RetainContent(content=content, context=context, event_date=event_date)],
+                resolved_config,
+            )
+            chunk_of = self._chunk_index_per_fact([c.fact_count for c in chunked.chunks], len(chunked.facts))
+            return DryRunExtractionResult(
+                facts=[
+                    # The chunks path yields the retain-internal dataclass, whose text
+                    # field is `fact_text`; the LLM path yields the parsed response
+                    # model, whose is `fact`.
+                    ExtractedFact(
+                        text=fact.fact_text,
+                        fact_type=fact.fact_type,
+                        occurred_start=fact.occurred_start,
+                        occurred_end=fact.occurred_end,
+                        entities=list(fact.entities or []),
+                        chunk_index=chunk_of[i],
+                    )
+                    for i, fact in enumerate(chunked.facts)
+                ],
+                chunks=[ExtractionChunk(text=c.chunk_text, fact_count=c.fact_count) for c in chunked.chunks],
+                usage=chunked.usage,
+            )
+
         # No narrator unless the caller passed one. The bank's display `name` is deliberately
         # NOT consulted: it leaked into extracted fact text (#3962), and retain no longer
         # derives a narrator from it either, so a dry run must mirror what retain would do.
         retain_llm = self._retain_llm_config.with_config(resolved_config, bank_id=bank_id, operation="retain")
-        facts, _chunks, usage = await fact_extraction.extract_facts_from_text(
+        facts, chunks, usage = await fact_extraction.extract_facts_from_text(
             text=content,
             event_date=event_date,
             llm_config=retain_llm,
@@ -11590,6 +11707,7 @@ class MemoryEngine(MemoryEngineInterface):
             agent_name=agent_name,
         )
 
+        chunk_of = self._chunk_index_per_fact([count for _, count in chunks], len(facts))
         extracted = [
             ExtractedFact(
                 text=fact.fact,
@@ -11597,10 +11715,17 @@ class MemoryEngine(MemoryEngineInterface):
                 occurred_start=fact.occurred_start,
                 occurred_end=fact.occurred_end,
                 entities=list(fact.entities or []),
+                chunk_index=chunk_of[i],
             )
-            for fact in facts
+            for i, fact in enumerate(facts)
         ]
-        return DryRunExtractionResult(facts=extracted, usage=usage)
+        return DryRunExtractionResult(
+            facts=extracted,
+            # The LLM path returns (text, fact_count) pairs; the chunks path returns
+            # ChunkMetadata objects. Same information, two shapes.
+            chunks=[ExtractionChunk(text=text, fact_count=count) for text, count in chunks],
+            usage=usage,
+        )
 
     async def list_memory_units(
         self,
@@ -13026,13 +13151,14 @@ class MemoryEngine(MemoryEngineInterface):
 
         await get_memories().ensure_bank_storage(bank_id)
 
-    async def get_bank_config(
-        self,
-        bank_id: str,
-        *,
-        request_context: "RequestContext",
-    ) -> BankConfigState:
-        """Return resolved bank configuration after read authorization."""
+    async def _authorize_bank_config_read(self, bank_id: str, request_context: "RequestContext") -> None:
+        """Authenticate the tenant and authorize a read of this bank's configuration.
+
+        Every surface that hands a caller the bank's resolved settings goes through
+        here, so an extension that denies ``GET_BANK_CONFIG`` denies all of them.
+        The prompt preview renders those settings as prompt text, which is the same
+        disclosure by another route — it must not be reachable when this one is not.
+        """
         await self._authenticate_tenant(request_context)
         if self._operation_validator:
             from hindsight_api.extensions import BankReadContext, BankReadOperation
@@ -13043,7 +13169,19 @@ class MemoryEngine(MemoryEngineInterface):
                 request_context=request_context,
             )
             await self._validate_operation(self._operation_validator.validate_bank_read(context))
+        # Existence is checked here too, so a preview of a bank that does not exist
+        # 404s exactly as reading its config does, rather than rendering the prompts a
+        # hypothetical bank on server defaults would send.
         await self._require_bank_exists(bank_id)
+
+    async def get_bank_config(
+        self,
+        bank_id: str,
+        *,
+        request_context: "RequestContext",
+    ) -> BankConfigState:
+        """Return resolved bank configuration after read authorization."""
+        await self._authorize_bank_config_read(bank_id, request_context)
         return await self._get_bank_config_authenticated(bank_id, request_context)
 
     async def update_bank_config(
