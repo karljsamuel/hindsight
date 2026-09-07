@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 from dotenv import find_dotenv, load_dotenv
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from ._pg_search import normalize_pg_search_tokenizer
 from ._vector_index import validate_extension
@@ -2209,30 +2210,86 @@ class LLMMemberConfig:
 # Valid multi-LLM strategy modes.
 LLM_STRATEGY_FAILOVER = "failover"
 LLM_STRATEGY_ROUND_ROBIN = "round-robin"
-_VALID_LLM_STRATEGY_MODES = (LLM_STRATEGY_FAILOVER, LLM_STRATEGY_ROUND_ROBIN)
+LLM_STRATEGY_METADATA = "metadata"
+_VALID_LLM_STRATEGY_MODES = (LLM_STRATEGY_FAILOVER, LLM_STRATEGY_ROUND_ROBIN, LLM_STRATEGY_METADATA)
 
 
-@dataclass
-class LLMStrategyConfig:
+class LLMMetadataRoute(BaseModel):
+    """Send a retain item whose ``metadata[key] == value`` to member ``member``.
+
+    Matching is on the string form of the item's value, because retain metadata
+    is free-form JSON and a route read from an env var is always a string.
+
+    Strict and closed on purpose: this is parsed straight from operator-supplied
+    JSON, where ``{"member": true}`` is a typo rather than member 1, and a
+    misspelled key (``"membr"``) must fail loudly instead of leaving the route
+    pointed at the default member.
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    key: str = Field(min_length=1)
+    value: str
+    member: int = Field(ge=0)
+
+
+class LLMStrategyConfig(BaseModel):
     """How to route a request across the members of a multi-LLM chain.
 
-    ``mode`` is "failover" (try members in order) or "round-robin" (rotate the
-    starting member per request, then fall through the rest on error). ``weights``
-    is round-robin only: positive integers, one per member (primary first), giving
-    an unbalanced rotation; ``None`` means uniform.
+    ``mode`` is "failover" (try members in order), "round-robin" (rotate the
+    starting member per request, then fall through the rest on error) or
+    "metadata" (pick the member from the retained item's own metadata).
+    ``weights`` is round-robin only: positive integers, one per member (primary
+    first), giving an unbalanced rotation; ``None`` means uniform. ``routes`` is
+    metadata only: the first route matching an item wins, and an item matching
+    none uses the primary.
     """
+
+    model_config = ConfigDict(strict=True, extra="forbid")
 
     mode: str
     weights: list[int] | None = None
+    routes: list[LLMMetadataRoute] | None = None
+
+    @field_validator("mode")
+    @classmethod
+    def _validate_mode(cls, mode: str) -> str:
+        if mode not in _VALID_LLM_STRATEGY_MODES:
+            raise ValueError(
+                f"Invalid LLM strategy mode {mode!r}. Must be one of: {', '.join(_VALID_LLM_STRATEGY_MODES)}."
+            )
+        return mode
+
+    @model_validator(mode="after")
+    def _validate_mode_specific_fields(self) -> "LLMStrategyConfig":
+        """``weights`` and ``routes`` each belong to exactly one mode.
+
+        Rejecting the wrong pairing matters more than it looks: a ``routes`` list
+        under "failover" would otherwise be accepted and never consulted, which
+        reads as the routes silently not working.
+        """
+        if self.weights is not None:
+            if self.mode != LLM_STRATEGY_ROUND_ROBIN:
+                raise ValueError(f"LLM strategy 'weights' is only valid with mode '{LLM_STRATEGY_ROUND_ROBIN}'.")
+            if not self.weights or any(weight <= 0 for weight in self.weights):
+                raise ValueError("LLM strategy 'weights' must be a non-empty list of positive integers.")
+
+        if self.mode == LLM_STRATEGY_METADATA:
+            if not self.routes:
+                raise ValueError(f"LLM strategy 'routes' must be a non-empty list with mode '{LLM_STRATEGY_METADATA}'.")
+        elif self.routes is not None:
+            raise ValueError(f"LLM strategy 'routes' is only valid with mode '{LLM_STRATEGY_METADATA}'.")
+        return self
 
 
 def _parse_llm_strategy(raw: str | None) -> LLMStrategyConfig | None:
     """Parse a multi-LLM strategy from a JSON env var.
 
-    Returns ``None`` when unset. The value must be a JSON object with a ``mode``
-    of "failover" or "round-robin"; ``weights`` (round-robin only) must be a list
-    of positive ints. Raises ``ValueError`` on any malformed input so
-    misconfiguration fails fast at startup rather than silently degrading.
+    Returns ``None`` when unset. Shape and per-field rules live on
+    :class:`LLMStrategyConfig` / :class:`LLMMetadataRoute`, so this only decodes
+    the JSON and restates pydantic's complaint in terms of the env var. Any
+    malformed input raises ``ValueError`` so misconfiguration fails fast at
+    startup rather than silently degrading.
     """
     text = (raw or "").strip()
     if not text:
@@ -2244,18 +2301,27 @@ def _parse_llm_strategy(raw: str | None) -> LLMStrategyConfig | None:
     if not isinstance(parsed, dict):
         raise ValueError(f"Invalid LLM strategy: expected a JSON object, got {type(parsed).__name__}")
 
-    mode = parsed.get("mode")
-    if mode not in _VALID_LLM_STRATEGY_MODES:
-        raise ValueError(f"Invalid LLM strategy mode {mode!r}. Must be one of: {', '.join(_VALID_LLM_STRATEGY_MODES)}.")
+    try:
+        return LLMStrategyConfig.model_validate(parsed)
+    except ValidationError as e:
+        raise ValueError(f"Invalid {ENV_LLM_STRATEGY}: {_format_validation_error(e)}") from e
 
-    weights = parsed.get("weights")
-    if weights is not None:
-        if mode != LLM_STRATEGY_ROUND_ROBIN:
-            raise ValueError(f"LLM strategy 'weights' is only valid with mode '{LLM_STRATEGY_ROUND_ROBIN}'.")
-        if not isinstance(weights, list) or not weights or not all(isinstance(w, int) and w > 0 for w in weights):
-            raise ValueError("LLM strategy 'weights' must be a non-empty list of positive integers.")
 
-    return LLMStrategyConfig(mode=mode, weights=weights)
+def _format_validation_error(error: ValidationError) -> str:
+    """Flatten a ``ValidationError`` into one operator-readable line.
+
+    The default rendering spans several lines and names the model, neither of
+    which helps someone reading a startup crash caused by an env var. Keep the
+    field path (``routes.0.member``) — with nested routes it is the only thing
+    that says *which* entry is wrong.
+    """
+    details = []
+    for detail in error.errors():
+        location = ".".join(str(part) for part in detail["loc"])
+        # Messages raised by our own validators arrive prefixed by pydantic.
+        message = detail["msg"].removeprefix("Value error, ")
+        details.append(f"{location}: {message}" if location else message)
+    return "; ".join(details)
 
 
 def _parse_llm_members(prefix: str) -> list[LLMMemberConfig]:
