@@ -1069,6 +1069,14 @@ export function parseSessionKey(sessionKey: string): ParsedSessionKey {
       channel: "main",
     };
   }
+  // OpenClaw's Control UI creates `agent:<id>:dashboard:<opaque-id>` keys.
+  // Recover only the agent identity: "dashboard" is a session namespace, not
+  // the live message provider used for dynamic bank routing.
+  if (parts.length === 4 && parts[2] === "dashboard") {
+    return {
+      agentId: parts[1],
+    };
+  }
   if (parts.length >= 4 && ["cron", "heartbeat", "subagent"].includes(parts[2])) {
     return {
       agentId: parts[1],
@@ -1249,9 +1257,11 @@ export function resolveAndCacheIdentity(options: ResolveAndCacheIdentityOptions)
     return { effectiveCtx, resolvedCtx, skipReason };
   }
 
-  cacheSessionIdentity(sessionKey, resolvedCtx);
-
-  const { reason: skipReason } = getIdentitySkipReason(resolvedCtx, options.pluginConfig);
+  const { resolvedCtx: identityCtx, reason: skipReason } = getIdentitySkipReason(
+    resolvedCtx,
+    options.pluginConfig
+  );
+  cacheSessionIdentity(sessionKey, identityCtx);
   if (sessionKey) {
     if (skipReason) {
       setCappedMapValue(skipHindsightTurnBySession, sessionKey, skipReason);
@@ -1260,7 +1270,7 @@ export function resolveAndCacheIdentity(options: ResolveAndCacheIdentityOptions)
     }
   }
 
-  return { effectiveCtx, resolvedCtx, skipReason };
+  return { effectiveCtx, resolvedCtx: identityCtx, skipReason };
 }
 
 export function getIdentitySkipReason(
