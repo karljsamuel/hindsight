@@ -493,6 +493,12 @@ jobs:
       working-directory: ./hindsight-integrations/openclaw
       run: npm ci
 
+    # Guards the guard: the smoke test's doctor assertion once passed a plugin
+    # whose hooks openclaw had blocked, so its logic has its own fixtures.
+    - name: Self-test the smoke test's doctor assertion
+      working-directory: ./hindsight-integrations/openclaw
+      run: ./scripts/doctor-check-selftest.sh
+
     - name: Run openclaw install smoke test
       working-directory: ./hindsight-integrations/openclaw
       run: ./scripts/smoke-test.sh
