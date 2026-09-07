@@ -81,7 +81,7 @@ RUN if [ "$INCLUDE_LOCAL_MODELS" = "true" ]; then \
 # =============================================================================
 # Stage: SDK Builder (needed for Control Plane)
 # =============================================================================
-FROM node:20-slim AS sdk-builder
+FROM node:24-slim AS sdk-builder
 
 ARG INCLUDE_CP
 RUN if [ "$INCLUDE_CP" != "true" ]; then echo "Skipping SDK build" && exit 0; fi
@@ -99,7 +99,7 @@ RUN npm run build -w @vectorize-io/hindsight-client
 # =============================================================================
 # Stage: Control Plane Builder
 # =============================================================================
-FROM node:20-slim AS cp-builder
+FROM node:24-slim AS cp-builder
 
 ARG INCLUDE_CP
 RUN if [ "$INCLUDE_CP" != "true" ]; then echo "Skipping CP build" && exit 0; fi
@@ -253,7 +253,7 @@ CMD ["/app/start-all.sh"]
 # =============================================================================
 # Stage: Final Image - Control Plane Only
 # =============================================================================
-FROM node:20-alpine AS cp-only
+FROM node:24-alpine AS cp-only
 
 WORKDIR /app
 
@@ -331,7 +331,7 @@ RUN apt-get update && apt-get upgrade -y \
     libgssapi-krb5-2 \
     libossp-uuid16 \
     && (apt-get install -y libicu72 2>/dev/null || apt-get install -y libicu74 2>/dev/null || apt-get install -y libicu76 2>/dev/null || true) \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y nodejs \
     && [ -e /usr/lib/node_modules/npm ] \
     && rm -rf /usr/lib/node_modules/npm /usr/bin/npm /usr/bin/npx \
