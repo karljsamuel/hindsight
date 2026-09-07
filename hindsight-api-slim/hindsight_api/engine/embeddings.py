@@ -1839,21 +1839,6 @@ class LiteLLMSDKEmbeddings(Embeddings):
             raise
 
 
-# Gemini Embedding 2+ multimodal models return a SINGLE aggregated embedding
-# for a multi-input request instead of one vector per input (see
-# https://ai.google.dev/gemini-api/docs/embeddings#embedding-aggregation). For
-# these models we must embed one input per call to preserve the 1:1 input→vector
-# alignment the rest of the pipeline relies on. The marker matches preview and GA
-# names (e.g. "gemini-embedding-2-preview", "gemini-embedding-2"), with or
-# without a "google/" or "models/" prefix.
-_GEMINI_AGGREGATING_MODEL_MARKER = "gemini-embedding-2"
-
-
-def _gemini_model_aggregates_inputs(model: str) -> bool:
-    """Whether the model aggregates a multi-input request into one embedding."""
-    return _GEMINI_AGGREGATING_MODEL_MARKER in model.lower()
-
-
 class GeminiEmbeddings(Embeddings):
     """
     Google embeddings via the google.genai SDK.
@@ -1864,9 +1849,8 @@ class GeminiEmbeddings(Embeddings):
 
     Uses the embed_content API: client.models.embed_content(model, contents)
 
-    Gemini Embedding 2+ multimodal models aggregate a multi-input request into a
-    single embedding, so for those the batch size is forced to 1 (one input per
-    call) to keep one vector per input.
+    Each input text is wrapped in a distinct Content object to preserve 1:1
+    input→vector alignment across both text-only and multimodal model families.
     """
 
     def __init__(
@@ -2030,20 +2014,12 @@ class GeminiEmbeddings(Embeddings):
         if not texts:
             return []
 
-        # Gemini Embedding 2+ multimodal models return one aggregated vector for a
-        # multi-input request, so embed one input per call to keep 1:1 alignment. That
-        # makes the fan-out matter most here: without it such a model costs one serial
-        # round trip per text.
-        batch_size = 1 if _gemini_model_aggregates_inputs(self.model) else self.batch_size
-
         # One retry budget for the whole call: batching must not multiply the
         # worst-case added latency of a single encode(). Shared across the concurrent
         # batches too, which is why RetryBudget takes a lock.
         budget = self.retry_policy.new_budget()
 
-        all_embeddings = self._encode_batched(
-            texts, lambda batch: self._embed_batch(batch, budget), batch_size=batch_size
-        )
+        all_embeddings = self._encode_batched(texts, lambda batch: self._embed_batch(batch, budget))
 
         # L2-normalize when output_dimensionality is set — Gemini only returns
         # normalized vectors at full 3072 dims; truncated dims need re-normalization
@@ -2060,7 +2036,15 @@ class GeminiEmbeddings(Embeddings):
 
     def _embed_batch(self, batch: list[str], budget: "RetryBudget") -> list[list[float]]:
         """Embed one batch-sized slice through the google.genai sync client."""
-        embed_kwargs = {"model": self.model, "contents": batch}
+        from google.genai import types as genai_types
+
+        # A plain list[str] reaches the API as several Parts of ONE Content, which the
+        # multimodal models (gemini-embedding-2+) fuse into a single vector — the whole
+        # batch collapses to one embedding. Giving each text its own Content keeps them
+        # distinct inputs, so every model returns one vector per text
+        # (https://ai.google.dev/gemini-api/docs/embeddings#embedding-aggregation).
+        contents = [genai_types.Content(parts=[genai_types.Part.from_text(text=text)]) for text in batch]
+        embed_kwargs = {"model": self.model, "contents": contents}
         if self._embed_config is not None:
             embed_kwargs["config"] = self._embed_config
 
@@ -2321,6 +2305,7 @@ def create_embeddings_from_env() -> Embeddings:
                 vertexai_region=config.embeddings_vertexai_region,
                 vertexai_service_account_key=config.embeddings_vertexai_service_account_key,
                 output_dimensionality=config.embeddings_gemini_output_dimensionality,
+                batch_size=config.embeddings_gemini_batch_size,
                 force_ipv4=config.embeddings_gemini_force_ipv4,
                 retry_policy=_retry_policy_from_config(config),
             ),
