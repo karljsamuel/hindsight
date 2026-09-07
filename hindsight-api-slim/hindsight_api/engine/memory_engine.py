@@ -1587,9 +1587,11 @@ def _may_need_refresh(last_refreshed_at: datetime | None, watermark: datetime | 
     model's tags, so it is a signal to go and ask
     (:func:`_mental_model_stale_scope` plus the store's scoped check), never an
     answer to report. Surfaces used to report it as "may need refresh" because
-    asking per model was expensive; ``idx_memory_units_bank_updated_at`` made the
-    scoped answer microseconds, so they now ask (#3291) and this stays what it
-    always was — a free way to skip the question.
+    asking per model was expensive; they now ask the scoped question instead
+    (#3291), and this stays what it always was — a free way to skip it. Every
+    staleness caller runs it first (#4169): the scoped check is bounded by the
+    writes since the model's own watermark, so a model this settles is exactly the
+    one that would have paid the most to be asked.
     """
     if last_refreshed_at is None:
         return True  # Never refreshed — nothing to be current with.
@@ -17858,10 +17860,12 @@ class MemoryEngine(MemoryEngineInterface):
         polls. On a bank whose writes spread across scopes the approximation
         saturated: pages stayed flagged for as long as their own scope stayed
         quiet, since only an in-scope write can move their watermark, and the tree
-        contradicted the gate that refused to refresh them (#3291). With
-        ``idx_memory_units_bank_updated_at`` the exact answer is one query for the
-        whole tree, so the tree asks it outright — no watermark, and so no
-        dependence on how fresh the cached one happens to be.
+        contradicted the gate that refused to refresh them (#3291). The answer here
+        is the exact scoped one, in one round-trip for the whole tree; the bank
+        watermark is back only as :meth:`compute_mental_models_are_stale`'s own
+        shortcut in front of it, read live there rather than taken from a cache, so
+        it rules pages *out* of the scoped query without ever standing in for its
+        answer.
         """
         await self._authenticate_tenant(request_context)
         if self._operation_validator and not _nested_operation_authorized.get():
@@ -18479,6 +18483,25 @@ class MemoryEngine(MemoryEngineInterface):
                 )
         return KnowledgeBaseExport(nodes=nodes, pages=pages)
 
+    async def _bank_write_watermark(self, conn, bank_id: str) -> datetime | None:
+        """The bank's newest memory write, read live, for the staleness shortcut.
+
+        One index probe (see the store's ``latest_memory_write_at``) in front of a
+        scoped check that costs a walk of every memory written since the model's
+        own watermark. It must be read here, on the same connection and
+        immediately before the scoped question, rather than taken from anything
+        cached: :func:`_may_need_refresh` reports "not stale" from it, and a
+        watermark older than the bank's real newest write would prove a freshness
+        that is not there. A write landing after this read is the same race the
+        scoped query already has, and resolves the same way — the next poll sees it.
+
+        None means an empty bank, which is a real answer (nothing has been written,
+        so nothing in any scope has).
+        """
+        from .memories import get_memories
+
+        return await get_memories().latest_memory_write_at(conn=conn, fq_table=fq_table, bank_id=bank_id)
+
     async def compute_mental_model_is_stale(
         self,
         conn,
@@ -18508,19 +18531,25 @@ class MemoryEngine(MemoryEngineInterface):
         # The scoped existence check belongs to the store: it is a query over the
         # memories, and the mental model's scope (tags, tag_groups, fact_types) is
         # exactly what decides whether one of them changed since the last refresh.
+        # It is also the expensive half, so the bank-wide watermark is asked first
+        # and settles it outright whenever nothing has been written since this
+        # model read the memories — the same shortcut the batch variant takes, and
+        # the reason the cron loop and the consolidation flush, which come through
+        # here one model at a time, do not each pay for a scan.
         from .memories import get_memories
 
-        if await get_memories().any_memory_updated_since(
-            conn=conn,
-            fq_table=fq_table,
-            bank_id=bank_id,
-            since=scope.since,
-            fact_types=scope.fact_types,
-            tags=scope.tags,
-            tags_match=scope.tags_match,
-            tag_groups=scope.tag_groups,
-        ):
-            return True
+        if _may_need_refresh(scope.since, await self._bank_write_watermark(conn, bank_id)):
+            if await get_memories().any_memory_updated_since(
+                conn=conn,
+                fq_table=fq_table,
+                bank_id=bank_id,
+                since=scope.since,
+                fact_types=scope.fact_types,
+                tags=scope.tags,
+                tags_match=scope.tags_match,
+                tag_groups=scope.tag_groups,
+            ):
+                return True
 
         # A memory that was *removed* raises no watermark — the row is simply not
         # there — so the check above can never see one. That is why a page could
@@ -18671,29 +18700,38 @@ class MemoryEngine(MemoryEngineInterface):
         against its own scope, in one round-trip for the whole set (see the store's
         ``any_memory_updated_since_batch``).
 
-        ``watermark`` is an optional shortcut, not part of the answer: a model that
-        has read the memories at or past the bank's newest write cannot be stale,
-        whatever its scope, so it can be settled without asking. Pass one **only if
-        it is live** — :meth:`get_bank_freshness` reads it fresh. A cached
-        watermark — the ``last_memory_write_at`` in the 60s-cached stats payload,
-        say — can be older than a model's own last read, and would then prove a
-        freshness that is not there. Omit it and every model is simply asked, which
-        at roughly 30µs each is what the surfaces that poll do.
+        The bank's newest write settles most of the set for free: a model that has
+        read the memories at or past it cannot be stale whatever its scope. That is
+        read here (:meth:`_bank_write_watermark`, one index probe) rather than left
+        to the caller, so every surface gets it — the mental-model list, the
+        knowledge tree and its MCP twin used to ask the scoped question for every
+        model on every poll, and the scoped question is only cheap when the model
+        *is* stale: a scope whose own tags have been quiet pays a walk of every
+        memory written since its watermark (#4169).
+
+        ``watermark`` stays an optional argument for a caller that already holds a
+        **live** one — reflect resolves it once per invocation — and passing it
+        skips the read here. Pass one only if it is live: a cached watermark, the
+        ``last_memory_write_at`` in the 60s-cached stats payload say, can be older
+        than a model's own last read and would then prove a freshness that is not
+        there.
         """
         from .memories import get_memories
 
         answers: dict[str, bool] = {}
         pending: list[MemoryScopeWatermark] = []
+        # Read once for the whole set, and only if some model could still be settled
+        # by it — a set of models that have never been stamped needs no watermark.
+        if watermark is None and any(scope is not None for scope in scopes.values()):
+            watermark = await self._bank_write_watermark(conn, bank_id)
         for key, scope in scopes.items():
             if scope is None:
                 answers[key] = True
                 continue
-            # `watermark is None` means the caller passed none, not that the bank is
-            # empty — without one there is nothing to shortcut against and every
-            # model is asked.
-            if watermark is not None and not _may_need_refresh(scope.since, watermark):
-                # Exact, and free: nothing in the bank has been written since this
-                # model read the memories, so nothing in its scope has either.
+            if not _may_need_refresh(scope.since, watermark):
+                # Exact, and one index probe for the whole set: nothing in the bank
+                # has been written since this model read the memories, so nothing in
+                # its scope has either.
                 answers[key] = False
                 continue
             pending.append(scope)
