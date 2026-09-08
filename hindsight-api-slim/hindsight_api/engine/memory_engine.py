@@ -7546,6 +7546,13 @@ class MemoryEngine(MemoryEngineInterface):
         # handful of floats and they are what makes a recall log account for its own duration --
         # the numbered stages stop at token filtering, so hydration, assembly and entity building
         # were measured and then thrown away unless someone happened to pass `trace=true`.
+        #
+        # The tracer therefore ALWAYS exists, and `if tracer:` is always true. Never guard on it:
+        # call `add_phase_metric` unguarded, and put anything that BUILDS a trace payload behind
+        # `enable_trace` -- under `phases_only` the tracer drops those payloads after the caller
+        # has paid to construct them. `test_recall_tracer_payload_gating.py` fails on a new
+        # `if tracer:`; this has been the same bug three times.
+        #
         # The trace's timestamp is the anchor the ranking was computed against -- the caller's
         # `question_date` when they supplied one -- not the moment the trace happened to be built.
         # Reporting wall-clock here made an applied anchor look ignored (#4217).
@@ -7562,8 +7569,7 @@ class MemoryEngine(MemoryEngineInterface):
 
         backend_acquire_start = time.time()
         backend = await self._get_read_backend()
-        if tracer:
-            tracer.add_phase_metric("backend_acquisition", time.time() - backend_acquire_start)
+        tracer.add_phase_metric("backend_acquisition", time.time() - backend_acquire_start)
         recall_start = time.time()
 
         # Buffer logs for clean output in concurrent scenarios.
@@ -7602,9 +7608,8 @@ class MemoryEngine(MemoryEngineInterface):
             finally:
                 embedding_span.end()
 
-            if tracer:
-                tracer.record_query_embedding(query_embedding)
-                tracer.add_phase_metric("generate_query_embedding", step_duration)
+            tracer.record_query_embedding(query_embedding)
+            tracer.add_phase_metric("generate_query_embedding", step_duration)
 
             # Cancellation checkpoint: bail before the DB-heavy retrieval stage
             # if the client has gone away (issue #2122).
@@ -7701,17 +7706,16 @@ class MemoryEngine(MemoryEngineInterface):
                 # showed up as an unattributed remainder, on the one path where the work is not
                 # in this process to begin with. `store_*` are the store's own stages, `full_recall`
                 # is the whole hop including the Python either side of it.
-                if tracer:
-                    for _name, _micros in (_store_result.store_stages or {}).items():
-                        tracer.add_phase_metric(f"store_{_name}", _micros / 1_000_000)
-                    tracer.add_phase_metric(
-                        "full_recall",
-                        _full_elapsed,
-                        {"results": len(_store_result.results)},
-                    )
+                for _name, _micros in (_store_result.store_stages or {}).items():
+                    tracer.add_phase_metric(f"store_{_name}", _micros / 1_000_000)
+                tracer.add_phase_metric(
+                    "full_recall",
+                    _full_elapsed,
+                    {"results": len(_store_result.results)},
+                )
                 # Assembling the trace OBJECT stays behind the caller's flag: it dumps every
                 # result, which is the expensive half and the reason tracing is opt-in.
-                if enable_trace and tracer:
+                if enable_trace:
                     _trace = tracer.finalize([r.model_dump() for r in _store_result.results])
                     _store_result.trace = _trace.to_dict() if _trace else None
                 return _store_result
@@ -7851,7 +7855,7 @@ class MemoryEngine(MemoryEngineInterface):
             # call and reports 0.0 for each.
             _store_recall = aggregated_timings.get("store_recall", 0.0)
             _store_recall_info = f" | store={_store_recall:.3f}s" if _store_recall else ""
-            if tracer and _store_recall:
+            if _store_recall:
                 # Diagnostic: it is a SUBSET of parallel_retrieval, not a sibling of it, so it must
                 # not be summed with the partitioning phases.
                 tracer.add_phase_metric(
@@ -7906,12 +7910,15 @@ class MemoryEngine(MemoryEngineInterface):
                         )
 
             # Record temporal constraint in tracer if detected
-            if tracer and detected_temporal_constraint:
+            if detected_temporal_constraint:
                 start_dt, end_dt = detected_temporal_constraint
                 tracer.record_temporal_constraint(start_dt, end_dt)
 
-            # Record retrieval results for tracer - per fact type
-            if tracer:
+            # Record retrieval results for tracer - per fact type.
+            # `enable_trace`, NOT `if tracer`: the tracer always exists so phase timings are
+            # always collected, but these payloads are built eagerly by the CALLER and then
+            # dropped inside the tracer when phases_only is set -- pure waste on every recall.
+            if enable_trace:
                 # Convert RetrievalResult to old tuple format for tracer
                 def to_tuple_format(results):
                     return [(r.id, r.__dict__) for r in results]
@@ -7990,13 +7997,13 @@ class MemoryEngine(MemoryEngineInterface):
                 # after the trim, because an entry point is a top-10 SEMANTIC result and need not
                 # have survived fusion at all.
                 #
-                # Skipped unless a caller actually asked for a trace. The enclosing guard is
-                # `if tracer:`, and the tracer is now built for EVERY recall so the `[phases]`
-                # accounting has somewhere to write — so this fetch, which costs a round trip per
-                # recall and exists only to fill in text for the graph view, had quietly become
-                # unconditional. `phases_only` is the flag that distinguishes "constructed for
-                # metrics" from "the caller wants a trace".
-                _entry_points = [] if getattr(tracer, "phases_only", False) else semantic_results[:10]
+                # This fetch costs a round trip per recall and exists only to fill in text for
+                # the graph view. It used to sit behind `if tracer:` and so ran on EVERY recall
+                # once the tracer started being built unconditionally (for the `[phases]`
+                # accounting); the enclosing guard is now `enable_trace`, which is the same
+                # condition `phases_only` encoded, so the check that used to be needed here is
+                # implied by getting this far.
+                _entry_points = semantic_results[:10]
                 if _entry_points:
                     from .memories import get_memories as _get_memories_for_trace
 
@@ -8004,23 +8011,23 @@ class MemoryEngine(MemoryEngineInterface):
                 for rank, retrieval in enumerate(_entry_points, start=1):
                     tracer.add_entry_point(retrieval.id, retrieval.text, retrieval.similarity or 0.0, rank)
 
-                tracer.add_phase_metric(
-                    "parallel_retrieval",
-                    step_duration,
-                    {
-                        "semantic_count": len(semantic_results),
-                        "bm25_count": len(bm25_results),
-                        "graph_count": len(graph_results),
-                        "temporal_count": len(temporal_results) if temporal_results else 0,
-                    },
-                )
-                # Also expose each retrieval method as its own phase so
-                # benchmarks can pinpoint which sub-query drives latency. These are
-                # children of parallel_retrieval (marked diagnostic so the phase-coverage
-                # check doesn't double-count them).
-                for _method, _dur in aggregated_timings.items():
-                    if _dur > 0:
-                        tracer.add_phase_metric(f"retrieval_{_method}", _dur, {"diagnostic": True})
+            tracer.add_phase_metric(
+                "parallel_retrieval",
+                step_duration,
+                {
+                    "semantic_count": len(semantic_results),
+                    "bm25_count": len(bm25_results),
+                    "graph_count": len(graph_results),
+                    "temporal_count": len(temporal_results) if temporal_results else 0,
+                },
+            )
+            # Also expose each retrieval method as its own phase so
+            # benchmarks can pinpoint which sub-query drives latency. These are
+            # children of parallel_retrieval (marked diagnostic so the phase-coverage
+            # check doesn't double-count them).
+            for _method, _dur in aggregated_timings.items():
+                if _dur > 0:
+                    tracer.add_phase_metric(f"retrieval_{_method}", _dur, {"diagnostic": True})
 
             # Step 3: Merge ranked lists. RRF by default; interleave (round-robin) when
             # requested by consolidation dedup recall — RRF averages a strong-in-one-arm
@@ -8054,14 +8061,18 @@ class MemoryEngine(MemoryEngineInterface):
                 fusion_span.set_attribute("hindsight.merged_count", len(merged_candidates))
                 fusion_span.end()
 
-            if tracer:
+            # The payload build is gated on `enable_trace`; the phase metric is not. The
+            # tracer always exists so timings are always collected -- but `tracer_merged`
+            # is built by the CALLER and then dropped inside the tracer when phases_only
+            # is set, so building it unconditionally is pure waste on every recall.
+            if enable_trace:
                 # Convert MergedCandidate to old tuple format for tracer
                 tracer_merged = [
                     (mc.id, mc.retrieval.__dict__, {"rrf_score": mc.rrf_score, **mc.source_ranks})
                     for mc in merged_candidates
                 ]
                 tracer.add_rrf_merged(tracer_merged)
-                tracer.add_phase_metric("rrf_merge", step_duration, {"candidates_merged": len(merged_candidates)})
+            tracer.add_phase_metric("rrf_merge", step_duration, {"candidates_merged": len(merged_candidates)})
 
             # Step 4: Rerank using cross-encoder (MergedCandidate -> ScoredResult)
             step_start = time.time()
@@ -8094,28 +8105,27 @@ class MemoryEngine(MemoryEngineInterface):
                     merged_candidates.sort(key=lambda mc: boosted_rrf_score(mc, strategy_boosts), reverse=True)
                     pre_filtered_count = len(merged_candidates) - max_candidates
                     merged_candidates = merged_candidates[:max_candidates]
-                    if tracer:
-                        # Surface the cut in the trace: which arms actually made it into
-                        # the reranker's budget, and whether a boost shaped that. Ranking
-                        # complaints land on the trace first, and without this the boost
-                        # is only visible in server logs (issue #3956). Cheap: source_ranks
-                        # is already in memory and payloads are not materialized until below.
-                        arm_composition: dict[str, int] = {}
-                        for mc in merged_candidates:
-                            for key in mc.source_ranks:
-                                arm = key.removesuffix("_rank")
-                                arm_composition[arm] = arm_composition.get(arm, 0) + 1
-                        tracer.add_phase_metric(
-                            "rerank_prefilter",
-                            0.0,
-                            {
-                                "kept": len(merged_candidates),
-                                "dropped": pre_filtered_count,
-                                "max_candidates": max_candidates,
-                                "strategy_boosts": dict(strategy_boosts) if strategy_boosts else None,
-                                "arm_composition": arm_composition,
-                            },
-                        )
+                    # Surface the cut in the trace: which arms actually made it into
+                    # the reranker's budget, and whether a boost shaped that. Ranking
+                    # complaints land on the trace first, and without this the boost
+                    # is only visible in server logs (issue #3956). Cheap: source_ranks
+                    # is already in memory and payloads are not materialized until below.
+                    arm_composition: dict[str, int] = {}
+                    for mc in merged_candidates:
+                        for key in mc.source_ranks:
+                            arm = key.removesuffix("_rank")
+                            arm_composition[arm] = arm_composition.get(arm, 0) + 1
+                    tracer.add_phase_metric(
+                        "rerank_prefilter",
+                        0.0,
+                        {
+                            "kept": len(merged_candidates),
+                            "dropped": pre_filtered_count,
+                            "max_candidates": max_candidates,
+                            "strategy_boosts": dict(strategy_boosts) if strategy_boosts else None,
+                            "arm_composition": arm_composition,
+                        },
+                    )
 
                 # Materialize the payload for the candidates that survived fusion, for a store
                 # that returned scores rather than payloads. THIS is why ranking can be cheap: the
@@ -8131,12 +8141,11 @@ class MemoryEngine(MemoryEngineInterface):
                 await _get_memories_for_hydrate().hydrate_results(
                     bank_id=bank_id, results=[mc.retrieval for mc in merged_candidates]
                 )
-                if tracer:
-                    tracer.add_phase_metric(
-                        "hydrate_results",
-                        time.time() - _hydrate_start,
-                        {"candidates": len(merged_candidates)},
-                    )
+                tracer.add_phase_metric(
+                    "hydrate_results",
+                    time.time() - _hydrate_start,
+                    {"candidates": len(merged_candidates)},
+                )
 
                 if reranking == "cross_encoder":
                     # Cancellation checkpoint: the cross-encoder rerank is the
@@ -8250,25 +8259,26 @@ class MemoryEngine(MemoryEngineInterface):
                 )
 
             # Add reranked results to tracer AFTER combined scoring (so normalized values are included)
-            if tracer:
+            # `enable_trace`, NOT `if tracer`: see the retrieval-results guard above.
+            if enable_trace:
                 results_dict = [sr.to_dict() for sr in scored_results]
                 tracer_merged = [
                     (mc.id, mc.retrieval.__dict__, {"rrf_score": mc.rrf_score, **mc.source_ranks})
                     for mc in merged_candidates
                 ]
                 tracer.add_reranked(results_dict, tracer_merged)
-                tracer.add_phase_metric(
-                    "reranking",
-                    step_duration,
-                    {"reranker_type": rerank_kind, "candidates_reranked": len(scored_results)},
-                )
-                # Combined scoring + additive boosts + final sort, plus the trace
-                # serialization of reranked entries done just above.
-                tracer.add_phase_metric(
-                    "combined_scoring",
-                    time.time() - scoring_start,
-                    {"candidates_scored": len(scored_results)},
-                )
+            tracer.add_phase_metric(
+                "reranking",
+                step_duration,
+                {"reranker_type": rerank_kind, "candidates_reranked": len(scored_results)},
+            )
+            # Combined scoring + additive boosts + final sort, plus -- when a trace was
+            # asked for -- the serialization of reranked entries done just above.
+            tracer.add_phase_metric(
+                "combined_scoring",
+                time.time() - scoring_start,
+                {"candidates_scored": len(scored_results)},
+            )
 
             # Cancellation checkpoint: reranking is done; skip the remaining
             # enrichment (chunk/entity/source-fact fetches, each its own DB work)
@@ -8318,12 +8328,11 @@ class MemoryEngine(MemoryEngineInterface):
                                 )
                                 if m.fact_type == "observation"
                             ]
-                    if tracer:
-                        tracer.add_phase_metric(
-                            "prefer_observations_dedup",
-                            time.time() - dedup_start,
-                            {"observations_considered": len(observation_ids)},
-                        )
+                    tracer.add_phase_metric(
+                        "prefer_observations_dedup",
+                        time.time() - dedup_start,
+                        {"observations_considered": len(observation_ids)},
+                    )
                     for obs_row in obs_rows:
                         for sid in obs_row["source_memory_ids"] or []:
                             superseded_ids.add(str(sid))
@@ -8587,7 +8596,7 @@ class MemoryEngine(MemoryEngineInterface):
 
             # Chunk fetch involves up to two SQL round-trips plus per-chunk token
             # counting; record it only when chunks were actually requested (issue #2361).
-            if tracer and include_chunks:
+            if include_chunks:
                 tracer.add_phase_metric(
                     "chunk_fetch",
                     time.time() - chunk_fetch_start,
@@ -8614,31 +8623,35 @@ class MemoryEngine(MemoryEngineInterface):
                 f"{truncated_note} in {step_duration:.3f}s"
             )
 
-            if tracer:
-                tracer.add_phase_metric(
-                    "token_filtering",
-                    step_duration,
-                    {
-                        "results_selected": len(top_scored),
-                        "tokens_used": total_tokens,
-                        "max_tokens": max_tokens,
-                        "truncated": selection.truncated,
-                    },
-                )
+            tracer.add_phase_metric(
+                "token_filtering",
+                step_duration,
+                {
+                    "results_selected": len(top_scored),
+                    "tokens_used": total_tokens,
+                    "max_tokens": max_tokens,
+                    "truncated": selection.truncated,
+                },
+            )
 
             # Record visits + build the JSON-serializable result dicts. Timed as one
             # phase: the visit loop alone walks every scored result (issue #2361).
             assembly_start = time.time()
 
-            # Record visits for all retrieved nodes
-            if tracer:
+            # Record visits for all retrieved nodes.
+            # `enable_trace`, NOT `if tracer`: see the retrieval-results guard above. `visit_node`
+            # drops everything it is handed under `phases_only`, and the counters it keeps are read
+            # by nothing but itself -- so on the ordinary path this loop walked every scored result
+            # to build records that were thrown away.
+            if enable_trace:
+                entry_point_ids = {ep.node_id for ep in tracer.entry_points}
                 for sr in scored_results:
                     tracer.visit_node(
                         node_id=sr.id,
                         text=sr.retrieval.text,
                         context=sr.retrieval.context or "",
                         event_date=sr.retrieval.occurred_start,
-                        is_entry_point=(sr.id in [ep.node_id for ep in tracer.entry_points]),
+                        is_entry_point=sr.id in entry_point_ids,
                         activation=sr.candidate.rrf_score,  # Use RRF score as activation
                         semantic_similarity=sr.retrieval.similarity or 0.0,
                         recency=sr.recency,
@@ -8676,12 +8689,11 @@ class MemoryEngine(MemoryEngineInterface):
                     )
                 top_results_dicts.append(result_dict)
 
-            if tracer:
-                tracer.add_phase_metric(
-                    "result_serialization",
-                    time.time() - assembly_start,
-                    {"results_serialized": len(top_results_dicts)},
-                )
+            tracer.add_phase_metric(
+                "result_serialization",
+                time.time() - assembly_start,
+                {"results_serialized": len(top_results_dicts)},
+            )
 
             # Fetch source facts for observation-type results (mirrors chunks pattern)
             source_fact_start = time.time()
@@ -8860,7 +8872,7 @@ class MemoryEngine(MemoryEngineInterface):
 
             # Source-fact enrichment is two SQL passes + token counting; record it
             # only when requested (issue #2361).
-            if tracer and include_source_facts:
+            if include_source_facts:
                 tracer.add_phase_metric(
                     "source_fact_fetch",
                     time.time() - source_fact_start,
@@ -8985,22 +8997,21 @@ class MemoryEngine(MemoryEngineInterface):
                         observations=[],  # Mental models provide this now
                     )
 
-            if tracer:
-                tracer.add_phase_metric(
-                    "entity_build",
-                    time.time() - entity_build_start,
-                    {"entities_returned": len(entities_dict or {})},
-                )
+            tracer.add_phase_metric(
+                "entity_build",
+                time.time() - entity_build_start,
+                {"entities_returned": len(entities_dict or {})},
+            )
 
-                # Diagnostic phases — these do NOT partition the timeline and are
-                # excluded from the phase-coverage check (see test_trace_phase_coverage):
-                # the pool waits overlap other phases (semaphore_wait precedes the
-                # tracer window; connection_wait is part of parallel_retrieval), and the
-                # per-method retrieval splits are children of parallel_retrieval.
-                if semaphore_wait > 0:
-                    tracer.add_phase_metric("semaphore_wait", semaphore_wait, {"diagnostic": True})
-                if max_conn_wait > 0:
-                    tracer.add_phase_metric("connection_wait", max_conn_wait, {"diagnostic": True})
+            # Diagnostic phases — these do NOT partition the timeline and are
+            # excluded from the phase-coverage check (see test_trace_phase_coverage):
+            # the pool waits overlap other phases (semaphore_wait precedes the
+            # tracer window; connection_wait is part of parallel_retrieval), and the
+            # per-method retrieval splits are children of parallel_retrieval.
+            if semaphore_wait > 0:
+                tracer.add_phase_metric("semaphore_wait", semaphore_wait, {"diagnostic": True})
+            if max_conn_wait > 0:
+                tracer.add_phase_metric("connection_wait", max_conn_wait, {"diagnostic": True})
 
             # Finalize trace if enabled. finalize() snapshots total_duration_seconds at
             # entry, so its own object construction + to_dict() serialization fall outside
@@ -9043,43 +9054,42 @@ class MemoryEngine(MemoryEngineInterface):
             # recall, that silence hid 42% of the request: the stages summed to 155ms of 268ms.
             # A waterfall that does not add up sends the reader looking for the missing time in the
             # wrong layer, which is exactly what happened here.
-            if tracer:
-                # Diagnostics are SUBSETS of other phases (store_recall sits inside
-                # parallel_retrieval, the pool waits overlap it), so summing them double-counts --
-                # it read "accounted=549ms of 306ms", which is worse than printing no total.
-                phases = [
+            # Diagnostics are SUBSETS of other phases (store_recall sits inside
+            # parallel_retrieval, the pool waits overlap it), so summing them double-counts --
+            # it read "accounted=549ms of 306ms", which is worse than printing no total.
+            phases = [
+                (m.phase_name, m.duration_seconds)
+                for m in tracer.phase_metrics
+                if not (m.details or {}).get("diagnostic")
+            ]
+            if phases:
+                accounted = sum(d for _, d in phases)
+                # EVERY phase, not the slowest four. The truncation made the line read as if
+                # the remainder were unmeasured: a recall whose four biggest phases summed to
+                # 134ms of 237ms looked like it had 103ms nobody had instrumented, and the
+                # obvious next move -- go add timers to hydration and entity build -- was
+                # wasted work, because `hydrate_results` and `entity_build` were already
+                # recording metrics that this line was throwing away. Descending, so the top of
+                # the list is still where to look first.
+                ordered = sorted(phases, key=lambda kv: -kv[1])
+                log_buffer.append(
+                    "  [phases] "
+                    + ", ".join(f"{n}={d * 1000:.0f}ms" for n, d in ordered)
+                    + f" | accounted={accounted * 1000:.0f}ms of {total_time * 1000:.0f}ms"
+                )
+                # Diagnostics are excluded from the sum above because they are subsets, but
+                # they are the most useful numbers in the line (store_recall is the store's
+                # share of parallel_retrieval), so print them on their own, clearly labelled.
+                diags = [
                     (m.phase_name, m.duration_seconds)
-                    for m in getattr(tracer, "phase_metrics", []) or []
-                    if not (m.details or {}).get("diagnostic")
+                    for m in tracer.phase_metrics
+                    if (m.details or {}).get("diagnostic")
                 ]
-                if phases:
-                    accounted = sum(d for _, d in phases)
-                    # EVERY phase, not the slowest four. The truncation made the line read as if
-                    # the remainder were unmeasured: a recall whose four biggest phases summed to
-                    # 134ms of 237ms looked like it had 103ms nobody had instrumented, and the
-                    # obvious next move -- go add timers to hydration and entity build -- was
-                    # wasted work, because `hydrate_results` and `entity_build` were already
-                    # recording metrics that this line was throwing away. Descending, so the top of
-                    # the list is still where to look first.
-                    ordered = sorted(phases, key=lambda kv: -kv[1])
+                if diags:
                     log_buffer.append(
-                        "  [phases] "
-                        + ", ".join(f"{n}={d * 1000:.0f}ms" for n, d in ordered)
-                        + f" | accounted={accounted * 1000:.0f}ms of {total_time * 1000:.0f}ms"
+                        "  [phases:subsets] "
+                        + ", ".join(f"{n}={d * 1000:.0f}ms" for n, d in sorted(diags, key=lambda kv: -kv[1]))
                     )
-                    # Diagnostics are excluded from the sum above because they are subsets, but
-                    # they are the most useful numbers in the line (store_recall is the store's
-                    # share of parallel_retrieval), so print them on their own, clearly labelled.
-                    diags = [
-                        (m.phase_name, m.duration_seconds)
-                        for m in getattr(tracer, "phase_metrics", []) or []
-                        if (m.details or {}).get("diagnostic")
-                    ]
-                    if diags:
-                        log_buffer.append(
-                            "  [phases:subsets] "
-                            + ", ".join(f"{n}={d * 1000:.0f}ms" for n, d in sorted(diags, key=lambda kv: -kv[1]))
-                        )
             log_buffer.append(
                 f"[RECALL {recall_id}] Complete: {len(top_scored)} facts ({total_tokens} tok), {num_chunks} chunks ({total_chunk_tokens} tok), {num_entities} entities ({total_entity_tokens} tok) | {fact_type_summary} | {total_time:.3f}s{wait_info}"
             )
