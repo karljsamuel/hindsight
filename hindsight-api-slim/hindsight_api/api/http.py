@@ -4416,6 +4416,14 @@ def create_app(
         In that case, you should call memory.initialize() manually before starting the server
         and memory.close() when shutting down.
     """
+
+    # Arm profiling here as well as in main(): with `--workers N`, uvicorn spawns worker
+    # processes that import the app but never run main(), so arming only there profiles
+    # the supervisor -- which does nothing but waitpid() -- and reports an empty process
+    # while every request is served elsewhere. install() is idempotent.
+    from hindsight_api.profiling import install as _install_profiling
+
+    _install_profiling()
     # Load HTTP extension from environment if not provided
     if http_extension is None:
         http_extension = load_extension("HTTP", HttpExtension)
