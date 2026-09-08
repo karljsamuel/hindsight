@@ -944,7 +944,7 @@ async def _streaming_store_owned_retain(
             doc_replace_done[0] = True
         log_buffer.append(
             f"[streaming] pg-free retain doc={effective_doc_id} units={len(unit_ids)} "
-            f"seq={resp.seq} new_entities={resp.new_entities}"
+            f"seq={resp.get('seq')} new_entities={resp.get('new_entities', 0)}"
         )
     # Mark the document tracked so the post-loop "no facts / not-yet-tracked" finalizer does NOT
     # fire. That finalizer (a) writes a Postgres documents row and (b) runs handle_document_tracking,
@@ -1108,8 +1108,8 @@ async def _delta_store_owned_write(
         )
         log_buffer.append(
             f"[delta] store-owned retain doc={effective_doc_id} units={len(unit_ids or [])} "
-            f"replaced_chunks={len(replace_chunk_ids)} seq={resp.seq} "
-            f"new_entities={resp.new_entities}"
+            f"replaced_chunks={len(replace_chunk_ids)} seq={resp.get('seq')} "
+            f"new_entities={resp.get('new_entities', 0)}"
         )
 
     log_buffer.append(f"DELTA RETAIN COMPLETE (store-owned): {len(processed_facts)} new units")
