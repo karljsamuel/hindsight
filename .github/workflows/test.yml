@@ -1859,23 +1859,6 @@ jobs:
       # with the GIL quietly re-enabled.
       DISABLE_SQLALCHEMY_CEXT_RUNTIME: "1"
 
-    services:
-      # For the image smoke test at the end of the job. The pytest run above uses the
-      # embedded pg0, not this.
-      postgres:
-        image: pgvector/pgvector:pg17
-        env:
-          POSTGRES_USER: hindsight
-          POSTGRES_PASSWORD: hindsight
-          POSTGRES_DB: hindsight
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U hindsight"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
     steps:
     - uses: actions/checkout@v6
       with:
@@ -1941,6 +1924,47 @@ jobs:
       run: |
         ./.venv-ft/bin/python -m pytest tests -v \
           -m "not hs_llm_mat and not hs_llm_core"
+
+  build-freethreaded-image:
+    needs: [detect-changes]
+    # Gated on `docker` as well as `core`: this is the only job that builds
+    # Dockerfile.freethreaded, and it used to hang off the free-threaded pytest job,
+    # which does not run for a docker-only change. Two Dockerfile.freethreaded PRs
+    # merged without CI ever building the image before this was split out.
+    #
+    # Deliberately NOT gated on `has_secrets`, for the same reason as the pytest job
+    # above: the smoke test runs a mock LLM and a stub embedder, so it needs no
+    # provider credentials and therefore also covers fork PRs, which skip
+    # build-docker-images entirely.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.core == 'true' ||
+      needs.detect-changes.outputs.docker == 'true' ||
+      needs.detect-changes.outputs.ci == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: build-freethreaded-image
+
+    services:
+      # For the smoke test; the image runs against this rather than embedded pg0.
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: hindsight
+          POSTGRES_PASSWORD: hindsight
+          POSTGRES_DB: hindsight
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hindsight"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: ${{ github.event.pull_request.head.sha || '' }}
 
     - name: Build the free-threaded image
       # Its own Dockerfile, not a target of the standalone one: different interpreter,

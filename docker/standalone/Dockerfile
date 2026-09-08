@@ -168,7 +168,6 @@ WORKDIR /app
 # commit can now resolve different package versions.
 RUN apt-get update && apt-get upgrade -y \
     && apt-get install -y \
-    curl \
     procps \
     libssl3 \
     libgssapi-krb5-2 \
@@ -310,7 +309,7 @@ FROM python:3.11-slim AS standalone
 
 WORKDIR /app
 
-# Install curl, uv, and system dependencies. Node arrives separately, below.
+# Install uv and system dependencies. Node arrives separately, below.
 # Note: libicu version varies by Debian version - try common versions in order
 # Runtime images use uv directly; remove pip build tooling after installation so
 # vulnerable setuptools-vendored packages and wheel are not shipped in production.
@@ -321,7 +320,6 @@ WORKDIR /app
 # commit can now resolve different package versions.
 RUN apt-get update && apt-get upgrade -y \
     && apt-get install -y \
-    curl \
     procps \
     libssl3 \
     libgssapi-krb5-2 \
