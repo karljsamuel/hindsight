@@ -4843,6 +4843,18 @@
               }
             }
           }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "title": "Manifest",
+                "description": "Bank template manifest",
+                "$ref": "#/components/schemas/BankTemplateManifest"
+              }
+            }
+          }
         }
       }
     },
