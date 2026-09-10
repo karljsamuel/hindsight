@@ -659,6 +659,9 @@ ENV_GRAPH_RETRIEVER = "HINDSIGHT_API_GRAPH_RETRIEVER"
 ENV_RECALL_MAX_CONCURRENT = "HINDSIGHT_API_RECALL_MAX_CONCURRENT"
 ENV_RECALL_CONNECTION_BUDGET = "HINDSIGHT_API_RECALL_CONNECTION_BUDGET"
 ENV_RECALL_MAX_QUERY_TOKENS = "HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS"
+ENV_RECALL_DIAGNOSTIC_PHASES = "HINDSIGHT_API_RECALL_DIAGNOSTIC_PHASES"
+ENV_GZIP_MIN_SIZE = "HINDSIGHT_API_GZIP_MIN_SIZE"
+ENV_LOOP_LAG_REPORT_SECONDS = "HINDSIGHT_API_LOOP_LAG_REPORT_SECONDS"
 ENV_LINK_EXPANSION_PER_ENTITY_LIMIT = "HINDSIGHT_API_LINK_EXPANSION_PER_ENTITY_LIMIT"
 ENV_LINK_EXPANSION_TIMEOUT = "HINDSIGHT_API_LINK_EXPANSION_TIMEOUT"
 ENV_RETAIN_BATCH_DOCUMENT_WRITES = "HINDSIGHT_API_RETAIN_BATCH_DOCUMENT_WRITES"
@@ -1464,6 +1467,9 @@ DEFAULT_GRAPH_RETRIEVER = "link_expansion"
 DEFAULT_RECALL_MAX_CONCURRENT = 32  # Max concurrent recall operations per worker
 DEFAULT_RECALL_CONNECTION_BUDGET = 4  # Max concurrent DB connections per recall operation
 DEFAULT_RECALL_MAX_QUERY_TOKENS = 500  # Maximum tokens allowed in recall query
+DEFAULT_RECALL_DIAGNOSTIC_PHASES = True  # Record the subset (diagnostic=true) recall phase metrics
+DEFAULT_GZIP_MIN_SIZE = 1024  # Min response bytes to gzip; negative disables compression
+DEFAULT_LOOP_LAG_REPORT_SECONDS = 0.0  # Event-loop lag probe report interval; 0 disables it
 DEFAULT_LINK_EXPANSION_PER_ENTITY_LIMIT = 200  # Max target units per entity in graph expansion
 DEFAULT_LINK_EXPANSION_TIMEOUT = 10.0  # Timeout (seconds) for entity expansion query
 # The bank's own row (name/disposition/mission) and its config, cached per process so a
@@ -3034,6 +3040,9 @@ class HindsightConfig:
     recall_max_concurrent: int
     recall_connection_budget: int
     recall_max_query_tokens: int
+    recall_diagnostic_phases: bool
+    gzip_min_size: int
+    loop_lag_report_seconds: float
     link_expansion_per_entity_limit: int
     link_expansion_timeout: float
     retain_batch_document_writes: bool
@@ -4448,6 +4457,12 @@ class HindsightConfig:
                 os.getenv(ENV_RECALL_CONNECTION_BUDGET, str(DEFAULT_RECALL_CONNECTION_BUDGET))
             ),
             recall_max_query_tokens=int(os.getenv(ENV_RECALL_MAX_QUERY_TOKENS, str(DEFAULT_RECALL_MAX_QUERY_TOKENS))),
+            recall_diagnostic_phases=os.getenv(
+                ENV_RECALL_DIAGNOSTIC_PHASES, str(DEFAULT_RECALL_DIAGNOSTIC_PHASES)
+            ).lower()
+            in ("true", "1", "yes"),
+            gzip_min_size=int(os.getenv(ENV_GZIP_MIN_SIZE, str(DEFAULT_GZIP_MIN_SIZE))),
+            loop_lag_report_seconds=float(os.getenv(ENV_LOOP_LAG_REPORT_SECONDS, str(DEFAULT_LOOP_LAG_REPORT_SECONDS))),
             link_expansion_per_entity_limit=int(
                 os.getenv(ENV_LINK_EXPANSION_PER_ENTITY_LIMIT, str(DEFAULT_LINK_EXPANSION_PER_ENTITY_LIMIT))
             ),
