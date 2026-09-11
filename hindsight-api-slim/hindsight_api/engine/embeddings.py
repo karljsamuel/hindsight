@@ -23,7 +23,9 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, ClassVar, Literal, cast
 from urllib.parse import parse_qs, urlparse, urlunparse
 
+import aiohttp
 import httpx
+import orjson
 from pydantic import BaseModel
 
 from ..config import (
@@ -688,6 +690,10 @@ class RemoteTEIEmbeddings(Embeddings):
         self._initialized = False
         self._model_id: str | None = None
         self._dimension: int | None = None
+        # The on-loop query path (aencode_query) keeps one aiohttp session, recreated when
+        # it is first used from a different event loop.
+        self._aio_session: aiohttp.ClientSession | None = None
+        self._aio_loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def provider_name(self) -> str:
@@ -861,7 +867,42 @@ class RemoteTEIEmbeddings(Embeddings):
             )
         except httpx.HTTPError as e:
             raise RuntimeError(f"TEI embedding request failed: {e}")
-        return response.json()
+        # A batch of embeddings is a large JSON array of floats; orjson parses it several times
+        # faster than the stdlib decoder behind response.json() (1.4% of busy CPU at 450 recalls/s).
+        return orjson.loads(response.content)
+
+    async def aencode_query(self, texts: list[str]) -> list[list[float]] | None:
+        """Embed a recall's query on the event loop, or return None to take the thread path.
+
+        A recall embeds one short string, and on the thread path that costs an executor hop
+        plus httpx's pure-Python sync stack — together ~10% of an API process's busy CPU
+        under recall load. aiohttp parses HTTP in C and stays on the loop. It is a single
+        attempt: any failure returns None and the caller falls back to the thread path,
+        which carries the full retry policy, so a transient error costs one extra attempt
+        rather than a second retry implementation.
+        """
+        if not self._initialized or self._injected_client is not None or len(texts) > (self.batch_size or len(texts)):
+            return None
+        loop = asyncio.get_running_loop()
+        session = self._aio_session
+        # A session is bound to the loop it was created on; each worker process has its own.
+        if session is None or session.closed or self._aio_loop is not loop:
+            session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=self.timeout),
+                connector=aiohttp.TCPConnector(keepalive_timeout=TEI_KEEPALIVE_EXPIRY_SECONDS),
+            )
+            self._aio_session = session
+            self._aio_loop = loop
+        inputs = [f"{self.query_prefix}{t}" for t in texts] if self.query_prefix else texts
+        try:
+            async with session.post(f"{self.base_url}/embed", json={"inputs": inputs}) as resp:
+                if resp.status != 200:
+                    return None
+                body = await resp.read()
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            return None
+        vectors = orjson.loads(body)
+        return vectors if len(vectors) == len(texts) else None
 
 
 class OpenAIEmbeddings(Embeddings):
