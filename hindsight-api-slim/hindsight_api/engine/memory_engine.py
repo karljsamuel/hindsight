@@ -4788,6 +4788,7 @@ class MemoryEngine(MemoryEngineInterface):
                     # off the event loop so the process pool's blocking joins don't
                     # stall it.
                     from ..migrations import run_migrations_for_schemas
+                    from .memories import get_memories
 
                     schemas = [tenant.schema for tenant in tenants if tenant.schema]
                     await asyncio.to_thread(
@@ -4801,6 +4802,7 @@ class MemoryEngine(MemoryEngineInterface):
                         text_search_extension=config.text_search_extension,
                         pg_search_tokenizer=config.text_search_extension_pg_search_tokenizer,
                         ensure_extensions=self._backend.supports_bm25,
+                        store_owned_memories=get_memories().store_owned,
                     )
                 else:
                     # Oracle and other backends: Alembic's non-thread-safe globals
@@ -15788,9 +15790,12 @@ class MemoryEngine(MemoryEngineInterface):
         saves is the ANN insert everywhere, plus the vchord lexical write where that backend is in
         use.
 
-        Leaving the INDEXES in place is deliberate -- one schema holds banks on both backends, so
-        they still serve the Postgres ones, and dropping them is a deployment-level decision this
-        cannot make per bank.
+        This per-bank switch leaves the INDEXES in place -- one schema holds banks on both
+        backends, so they still serve the Postgres ones. Dropping them is a deployment-level
+        decision, made at startup: when the configured store is store-owned for every bank
+        (``MemoriesExtension.store_owned``), the migration reconcile drops the mental_models
+        vector and BM25 indexes (``store_owned_memories`` in ``migrations.py``) and rebuilds them
+        if the deployment later moves back to Postgres.
 
         The columns go NULL for pages written from here on. Nothing reads them for a store-owned
         bank, and the store's own index is rebuilt by ``reconcile_knowledge_index``, which
