@@ -2070,6 +2070,49 @@ async def _resolve_memory_attachments(
     return resolved
 
 
+async def _name_store_owned_attachments(
+    store,
+    bank_id: str,
+    resolved: "dict[str, list[StoredAttachment]]",
+    document_of: "Mapping[str, str | None]",
+    known: "Mapping[str, Mapping[str, str]] | None" = None,
+) -> "dict[str, list[StoredAttachment]]":
+    """Fill in ``filename`` on a store-owned bank's resolved attachments, from its document records.
+
+    The name belongs to the document edge. A SQL bank keeps it on ``document_attachments``, which a
+    store-owned bank cannot have (the edge's FK needs a SQL ``documents`` row), so the store keeps
+    it on the document record instead and this reads it back. ``document_of`` maps each key of
+    ``resolved`` to its document; ``known`` is document_id -> names for records the caller already
+    read, which are not asked for again.
+
+    At most ONE batched read per call, and none when nothing resolved -- so a response with no
+    attachments (the overwhelmingly common one) costs nothing extra. The store's name wins over a
+    SQL one: a bank migrated from SQL keeps its old ``document_attachments`` rows, which stop
+    following the document once the store owns it.
+    """
+    from dataclasses import replace
+
+    from .memories.base import document_attachment_filenames
+
+    if not resolved:
+        return resolved
+    names = {d: dict(n) for d, n in (known or {}).items()}
+    wanted = sorted({d for key in resolved if (d := document_of.get(key)) and d not in names})
+    if wanted:
+        records = await store.get_document_records(bank_id=bank_id, document_ids=wanted)
+        for document_id in wanted:
+            names[document_id] = document_attachment_filenames(records.get(document_id))
+    if not any(names.values()):
+        return resolved
+    return {
+        key: [
+            replace(record, filename=name) if (name := doc_names.get(record.short_id)) else record for record in records
+        ]
+        for key, records in resolved.items()
+        for doc_names in (names.get(document_of.get(key) or "") or {},)
+    }
+
+
 def _provider_default_base_url(provider: str | None) -> str:
     """The base URL a provider needs when the caller did not supply one.
 
@@ -6616,6 +6659,7 @@ class MemoryEngine(MemoryEngineInterface):
         request_context: "RequestContext",
         *,
         carried_texts: "Mapping[str, str | None] | None" = None,
+        carried_filenames: "Mapping[str, Mapping[str, str]] | None" = None,
     ) -> "dict[str, list[StoredAttachment]]":
         """The attachments each document references, keyed by document_id.
 
@@ -6627,8 +6671,9 @@ class MemoryEngine(MemoryEngineInterface):
         row can exist for it (the edge's FK needs the document row). There the ids are
         derived from the document's text instead: ``carried_texts`` (document_id -> the
         text a caller already read from the store) when given, else the store's own
-        record, falling back to its chunk texts when the full text is not kept.
-        Filenames live only on that edge, so they come back ``None`` for such a bank.
+        record, falling back to its chunk texts when the full text is not kept. The
+        filenames come from the store's document record; ``carried_filenames``
+        (document_id -> names) is for a caller that already holds that record.
         """
         from .retain.attachment_store import StoredAttachment
 
@@ -6639,7 +6684,12 @@ class MemoryEngine(MemoryEngineInterface):
         store = get_memories()
         if store.store_owned_for(bank_id):
             return await self._attachments_for_store_owned_documents(
-                store, bank_id, list(dict.fromkeys(document_ids)), request_context, carried_texts or {}
+                store,
+                bank_id,
+                list(dict.fromkeys(document_ids)),
+                request_context,
+                carried_texts or {},
+                carried_filenames or {},
             )
         profile = await self.get_bank_profile(bank_id, request_context=request_context, create_if_missing=False)
         if profile is None:
@@ -6681,6 +6731,7 @@ class MemoryEngine(MemoryEngineInterface):
         document_ids: list[str],
         request_context: "RequestContext",
         carried_texts: "Mapping[str, str | None]",
+        carried_filenames: "Mapping[str, Mapping[str, str]]",
     ) -> "dict[str, list[StoredAttachment]]":
         """:meth:`attachments_for_documents` for a store-owned bank: ids derived from the text.
 
@@ -6688,8 +6739,13 @@ class MemoryEngine(MemoryEngineInterface):
         the retain-ingress revisit has no text in hand, and it only asks when the caller wrote
         something placeholder-shaped. The record's ``original_text`` is null when a deployment
         does not keep full text; its chunk texts still carry every placeholder, so they stand in.
+
+        A record read here also carries the document's attachment names, so it is not read twice.
         """
+        from .memories.base import document_attachment_filenames
         from .retain.attachment_content import iter_placeholder_ids
+
+        known_names = {d: carried_filenames[d] for d in document_ids if d in carried_filenames}
 
         texts = {d: carried_texts.get(d) for d in document_ids}
         if all(texts[d] is not None for d in document_ids) and not any(
@@ -6705,6 +6761,7 @@ class MemoryEngine(MemoryEngineInterface):
             record = await store.get_document_record(bank_id=bank_id, document_id=document_id, include_text=True)
             if record is None:
                 continue
+            known_names[document_id] = document_attachment_filenames(record)
             text = record.get("original_text")
             if text is None:
                 text = "\n".join(
@@ -6716,7 +6773,8 @@ class MemoryEngine(MemoryEngineInterface):
             return {}
         backend = await self._get_backend()
         async with backend.acquire() as conn:
-            return await _resolve_memory_attachments(conn, bank_id, refs)
+            resolved = await _resolve_memory_attachments(conn, bank_id, refs)
+        return await _name_store_owned_attachments(store, bank_id, resolved, {d: d for d in refs}, known_names)
 
     async def attachments_for_chunks(
         self,
@@ -6745,7 +6803,8 @@ class MemoryEngine(MemoryEngineInterface):
             return {}
         from .memories import get_memories
 
-        if get_memories().store_owned_for(bank_id):
+        store = get_memories()
+        if store.store_owned_for(bank_id):
             wanted = set(chunk_ids)
             refs = {
                 chunk_id: (document_id, ids)
@@ -6759,7 +6818,10 @@ class MemoryEngine(MemoryEngineInterface):
                 return {}
             backend = await self._get_backend()
             async with backend.acquire() as conn:
-                return await _resolve_memory_attachments(conn, bank_id, refs)
+                resolved = await _resolve_memory_attachments(conn, bank_id, refs)
+            return await _name_store_owned_attachments(
+                store, bank_id, resolved, {chunk_id: document_id for chunk_id, (document_id, _) in refs.items()}
+            )
         profile = await self.get_bank_profile(bank_id, request_context=request_context, create_if_missing=False)
         if profile is None:
             return {}
@@ -6825,7 +6887,8 @@ class MemoryEngine(MemoryEngineInterface):
             return {}
         from .memories import get_memories
 
-        if get_memories().store_owned_for(bank_id):
+        store = get_memories()
+        if store.store_owned_for(bank_id):
             # Never `memory_units` for a store-owned bank. It holds none of the bank's memories,
             # so the read can only come back empty, and it is not a cheap empty read: the table
             # carries partial vector indexes per bank, and the planner opens and locks every one
@@ -6846,7 +6909,11 @@ class MemoryEngine(MemoryEngineInterface):
                 return {}
             backend = await self._get_backend()
             async with backend.acquire() as conn:
-                return await _resolve_memory_attachments(conn, bank_id, refs)
+                resolved = await _resolve_memory_attachments(conn, bank_id, refs)
+            # One batched record read for the whole page, and only when something resolved.
+            return await _name_store_owned_attachments(
+                store, bank_id, resolved, {unit_id: document_id for unit_id, (document_id, _) in refs.items()}
+            )
 
         profile = await self.get_bank_profile(bank_id, request_context=request_context, create_if_missing=False)
         if profile is None:
@@ -9361,6 +9428,7 @@ class MemoryEngine(MemoryEngineInterface):
             )
 
             from .memories import get_memories
+            from .memories.base import document_attachment_filenames
 
             _store = get_memories()
             if not _store.store_owned_for(bank_id):
@@ -9414,6 +9482,10 @@ class MemoryEngine(MemoryEngineInterface):
                             # before that carry nothing here and still read back with null
                             # params — null beats 404-ing the whole document.
                             "retain_params": (_rec.get("metadata") or {}).get("retain_params"),
+                            # The document's attachment names, from the same record. An internal
+                            # carrier, not a response field: the get-document route and reprocess
+                            # take it off, so the payload is the same shape on either backend.
+                            "attachment_filenames": document_attachment_filenames(_rec),
                         }
                 else:
                     # The documents row is still SQL; only the per-fact-type counts come from the
@@ -9465,7 +9537,7 @@ class MemoryEngine(MemoryEngineInterface):
             # retained after this was added.
             observation_scopes = retain_params_parsed.get("observation_scopes") if retain_params_parsed else None
 
-            return {
+            result = {
                 "id": doc["id"],
                 "bank_id": doc["bank_id"],
                 "original_text": doc["original_text"],
@@ -9483,6 +9555,11 @@ class MemoryEngine(MemoryEngineInterface):
                 "retain_params": retain_params_parsed or None,
                 "observation_scopes": observation_scopes or None,
             }
+            # Only a store-owned document has it (see where `doc` is built from the record); a SQL
+            # one has no such key, so its payload is unchanged.
+            if "attachment_filenames" in doc:
+                result["attachment_filenames"] = doc["attachment_filenames"]
+            return result
 
     async def delete_document(
         self,
@@ -12744,6 +12821,12 @@ class MemoryEngine(MemoryEngineInterface):
         content_dict["content"] = original_text
         content_dict["document_id"] = document_id
         content_dict["update_mode"] = "replace"
+        # A store-owned record's metadata is REPLACED by the rewrite, so the replay restates every
+        # name the record carries -- retain_params holds only the last retain's. (A SQL bank merges
+        # them in `sync_document_attachments`, and its document carries no such key.)
+        stored_names = doc.pop("attachment_filenames", None)
+        if stored_names:
+            content_dict["attachment_filenames"] = {**(content_dict.get("attachment_filenames") or {}), **stored_names}
         # A reprocess replays the SAME content by construction, and the retain pipeline has two
         # skips for exactly that: the delta path sees no changed chunk and updates metadata only,
         # and the crash-recovery gate sees the matching content_hash plus surviving chunk hashes

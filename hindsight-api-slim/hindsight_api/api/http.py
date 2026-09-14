@@ -7444,6 +7444,10 @@ def _register_routes(app: FastAPI):
             document = await app.state.memory.get_document(document_id, bank_id, request_context=request_context)
             if not document:
                 raise HTTPException(status_code=404, detail="Document not found")
+            # A store-owned bank's document carries its attachment names from the record just
+            # read; taken off so the payload is the same shape on either backend, and handed on so
+            # the engine does not read that record a second time.
+            stored_names = document.pop("attachment_filenames", None)
             by_document = await app.state.memory.attachments_for_documents(
                 bank_id,
                 [document_id],
@@ -7451,6 +7455,7 @@ def _register_routes(app: FastAPI):
                 # Used only for a store-owned bank, which has no document edge to read; a null
                 # text (full text not kept) makes the engine fall back to the chunk texts.
                 carried_texts={document_id: document.get("original_text")},
+                carried_filenames=None if stored_names is None else {document_id: stored_names},
             )
             if by_document.get(document_id):
                 document["attachments"] = [_attachment_payload(bank_id, record) for record in by_document[document_id]]
@@ -9082,6 +9087,7 @@ def _register_routes(app: FastAPI):
             # and silently delete every screenshot in the article. Only paid for
             # when the caller actually wrote something placeholder-shaped.
             allowed_by_document: dict[str, set[str]] = {}
+            names_by_document: dict[str, dict[str, str]] = {}
             revisited = {
                 item.document_id
                 for item in request.items
@@ -9091,6 +9097,13 @@ def _register_routes(app: FastAPI):
                 existing = await app.state.memory.attachments_for_documents(bank_id, sorted(revisited), request_context)
                 allowed_by_document = {
                     document_id: {record.short_id for record in records} for document_id, records in existing.items()
+                }
+                # The names those attachments already have. The edit re-sends only placeholders,
+                # so without these a store-owned document -- whose record's names are replaced on
+                # every write -- would lose them. A SQL bank merges the same names back itself.
+                names_by_document = {
+                    document_id: {record.short_id: record.filename for record in records if record.filename}
+                    for document_id, records in existing.items()
                 }
 
             canonical_contents = [
@@ -9124,6 +9137,13 @@ def _register_routes(app: FastAPI):
                     for attachment in canonical.attachments
                     if attachment.filename
                 }
+                kept_names = names_by_document.get(item.document_id or "")
+                if kept_names:
+                    referenced = set(iter_placeholder_ids(canonical.text))
+                    item_filenames = {
+                        **{short_id: name for short_id, name in kept_names.items() if short_id in referenced},
+                        **item_filenames,
+                    }
                 if item_filenames:
                     content_dict["attachment_filenames"] = item_filenames
                 if item.timestamp == "unset":
