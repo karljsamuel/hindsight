@@ -248,6 +248,56 @@ def _memories(store_owned: bool, names: "dict[str, dict[str, str]] | None" = Non
     )
 
 
+# -- reclaim -----------------------------------------------------------------
+
+
+class _NoSqlConn:
+    """Fails on any statement: reclaim must not even ask which attachments look orphaned."""
+
+    async def fetch(self, *a, **k):
+        raise AssertionError("reclaim queried Postgres for a store-owned bank")
+
+    async def execute(self, *a, **k):
+        raise AssertionError("reclaim deleted attachment rows for a store-owned bank")
+
+
+class _NoFileDeletes:
+    """An engine stand-in whose file storage fails on any delete."""
+
+    class _Files:
+        async def delete(self, key):
+            raise AssertionError(f"reclaim deleted the blob {key} for a store-owned bank")
+
+    _file_storage = _Files()
+
+
+@pytest.mark.asyncio
+async def test_reclaim_never_runs_for_a_store_owned_bank(monkeypatch):
+    """A store-owned bank has no complete set of document_attachments rows, so the "no edge
+    survives" test cannot tell an orphan from an attachment a store-held document still shows:
+    reclaiming would delete a shared image. It must leave every attachment in place."""
+    monkeypatch.setattr(memories_module, "get_memories", lambda: _memories(store_owned=True))
+
+    await MemoryEngine._reclaim_orphaned_attachments(_NoFileDeletes(), _NoSqlConn(), "bank-1", [SHOT_HASH])
+
+
+@pytest.mark.asyncio
+async def test_reclaim_still_checks_references_for_a_sql_bank(monkeypatch):
+    """The guard is scoped to store-owned banks: a SQL bank still runs the reference check."""
+    monkeypatch.setattr(memories_module, "get_memories", lambda: _memories(store_owned=False))
+    asked: list[list[str]] = []
+
+    class _Conn:
+        async def fetch(self, sql, bank_id, hashes):
+            assert "document_attachments" in sql
+            asked.append(list(hashes))
+            return []  # still referenced: nothing to reclaim
+
+    await MemoryEngine._reclaim_orphaned_attachments(_NoFileDeletes(), _Conn(), "bank-1", [SHOT_HASH])
+
+    assert asked == [[SHOT_HASH]]
+
+
 @pytest.mark.asyncio
 async def test_a_store_owned_bank_resolves_no_attachments_without_touching_postgres(monkeypatch):
     """With nothing carried there is nothing to resolve, so not even the bank profile is read.

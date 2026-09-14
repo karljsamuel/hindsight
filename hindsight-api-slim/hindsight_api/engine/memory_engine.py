@@ -6981,8 +6981,22 @@ class MemoryEngine(MemoryEngineInterface):
         gone the attachment is unreachable — and a blob left behind by a failed
         delete is wasted bytes, not a correctness problem, so a storage error must
         not fail an otherwise good document deletion.
+
+        Never for a store-owned bank. The check above is only sound when every
+        document that references an attachment has a ``document_attachments``
+        row, and a store-owned bank's documents live in its memories store, where
+        no such row is written. With edges missing, "no row survives" does not
+        mean "unreferenced": a bank carried over from SQL keeps its old rows while
+        documents retained since have none, so deleting an old document would
+        reclaim an image a newer one still shows. Leaving the attachment in place
+        costs bytes; reclaiming it loses it. Reclaim for these banks needs a
+        reference source the store owns.
         """
         if not attachment_hashes:
+            return
+        from .memories import get_memories
+
+        if get_memories().store_owned_for(bank_id):
             return
         orphans = await conn.fetch(
             f"""
