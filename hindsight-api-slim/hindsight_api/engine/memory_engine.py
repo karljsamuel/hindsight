@@ -8644,19 +8644,16 @@ class MemoryEngine(MemoryEngineInterface):
                     from .memories import get_memories
 
                     # A backend that carries an observation's sources on the recalled result has
-                    # already paid for this record — hydration fetched it whole. Re-fetching it to
-                    # read one field back off is a second addressed read per recall, and against a
-                    # store whose reads are round trips that is most of what this step costs. Same
-                    # all-or-nothing shape as the entity fast path: one observation that did not
-                    # carry its sources means the read has to happen anyway, so it covers them all.
-                    if all(sr.retrieval.source_memory_ids is not None for sr in observation_srs):
-                        obs_rows = [{"source_memory_ids": sr.retrieval.source_memory_ids} for sr in observation_srs]
-                    else:
+                    # already paid for this record — hydration fetched it whole, so skip the read.
+                    # Same all-or-nothing shape as the entity fast path: one observation that did
+                    # not carry its sources means the read has to happen anyway, so it covers them
+                    # all. The resolved sources are written back onto sr.retrieval (previously they
+                    # were read into a local and discarded), so the store-owned chunk walk in Step
+                    # 5.5 and the source-facts step reuse them instead of reading them a second time.
+                    if not all(sr.retrieval.source_memory_ids is not None for sr in observation_srs):
                         async with acquire_with_retry(backend) as dedup_conn:
-                            # The observation carries its sources; the store resolves
-                            # them all in one addressed read.
-                            obs_rows = [
-                                {"source_memory_ids": m.source_memory_ids}
+                            obs_by_id = {
+                                m.unit_id: [str(s) for s in (m.source_memory_ids or [])]
                                 for m in await get_memories().get_memories(
                                     conn=dedup_conn,
                                     fq_table=fq_table,
@@ -8664,14 +8661,17 @@ class MemoryEngine(MemoryEngineInterface):
                                     unit_ids=[str(o) for o in observation_ids],
                                 )
                                 if m.fact_type == "observation"
-                            ]
+                            }
+                            for sr in observation_srs:
+                                if sr.id in obs_by_id:
+                                    sr.retrieval.source_memory_ids = obs_by_id[sr.id]
                     tracer.add_phase_metric(
                         "prefer_observations_dedup",
                         time.time() - dedup_start,
                         {"observations_considered": len(observation_ids)},
                     )
-                    for obs_row in obs_rows:
-                        for sid in obs_row["source_memory_ids"] or []:
+                    for sr in observation_srs:
+                        for sid in sr.retrieval.source_memory_ids or []:
                             superseded_ids.add(str(sid))
                     if superseded_ids:
                         before_count = len(scored_results)
@@ -8745,7 +8745,10 @@ class MemoryEngine(MemoryEngineInterface):
                             bank_id=bank_id,
                             unit_ids=[str(o) for o in observation_ids_ordered],
                         )
-                        sources_by_obs = {u.unit_id: list(u.source_memory_ids) for u in obs_units}
+                        sources_by_obs = {u.unit_id: [str(s) for s in (u.source_memory_ids or [])] for u in obs_units}
+                        for sr in top_scored:
+                            if sr.retrieval.fact_type == "observation" and sr.id in sources_by_obs:
+                                sr.retrieval.source_memory_ids = sources_by_obs[sr.id]
                     src_ids = [sid for sids in sources_by_obs.values() for sid in sids]
                     srcs = await _obs_store.get_memories(
                         conn=None, fq_table=fq_table, bank_id=bank_id, unit_ids=list(dict.fromkeys(src_ids))
