@@ -3032,7 +3032,25 @@ class MemoryEngine(MemoryEngineInterface):
         file_metadata = task_dict.get("_file_metadata")
         if file_metadata and len(contents) == 1:
             doc_id = contents[0].get("document_id")
-            if doc_id:
+            from .memories import get_memories
+
+            _store = get_memories()
+            if doc_id and _store.store_owned_for(bank_id):
+                # A store-owned bank has no SQL `documents` row for the UPDATE below to match, so
+                # the reference goes on the store's document record instead — where the retain
+                # above just wrote it.
+                found = await _store.set_document_file(
+                    bank_id=bank_id,
+                    document_id=doc_id,
+                    storage_key=file_metadata["file_storage_key"],
+                    original_name=file_metadata["file_original_name"],
+                    content_type=file_metadata["file_content_type"],
+                )
+                if not found:
+                    logger.warning(
+                        f"[BATCH_RETAIN_TASK] No document {doc_id} in bank {bank_id} to record its uploaded file on"
+                    )
+            elif doc_id:
                 backend = await self._get_backend()
                 async with acquire_with_retry(backend) as conn:
                     await conn.execute(
