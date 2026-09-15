@@ -611,13 +611,8 @@ def test_engine_memory_defense_shares_ext_ctx() -> None:
     engine = _make_minimal_engine()
     assert engine._memory_defense._context is engine._ext_ctx
     assert engine._ext_ctx.webhook_manager is None
-
-
-def test_engine_ext_ctx_current_schema_propagation() -> None:
-    """Writing _ext_ctx.current_schema is visible through _memory_defense.context."""
-    engine = _make_minimal_engine()
-    engine._ext_ctx.current_schema = "tenant_x"
-    assert engine._memory_defense.context.current_schema == "tenant_x"
+    # One context shared by every request: per-request tenant state on it is last-writer-wins (#4372).
+    assert not hasattr(engine._ext_ctx, "current_schema")
 
 
 # ---------------------------------------------------------------------------

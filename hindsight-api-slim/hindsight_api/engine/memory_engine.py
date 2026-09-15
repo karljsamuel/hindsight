@@ -2675,13 +2675,11 @@ class MemoryEngine(MemoryEngineInterface):
         from ..extensions.memory_defense import MemoryDefenseExtension  # noqa: PLC0415
 
         # Build the extension context now; webhook_manager is populated later in
-        # initialize() once the pool is ready.  current_schema is a per-request
-        # value written by _authenticate() and execute_task().
+        # initialize() once the pool is ready.
         self._ext_ctx = DefaultExtensionContext(
             database_url=config.database_url or "",
             memory_engine=self,
             webhook_manager=None,
-            current_schema=None,
         )
 
         loaded = load_extension("MEMORY_DEFENSE", MemoryDefenseExtension, context=self._ext_ctx)
@@ -2801,7 +2799,6 @@ class MemoryEngine(MemoryEngineInterface):
         tenant_context = await self._tenant_extension.authenticate(request_context)
 
         _current_schema.set(tenant_context.schema_name)
-        self._ext_ctx.current_schema = tenant_context.schema_name
         return tenant_context.schema_name
 
     async def _handle_import_documents(self, task_dict: dict[str, Any]):
@@ -3637,7 +3634,6 @@ class MemoryEngine(MemoryEngineInterface):
         schema = task_dict.pop("_schema", None)
         if schema:
             _current_schema.set(schema)
-            self._ext_ctx.current_schema = schema
 
         # Check if operation was cancelled (only for tasks with operation_id)
         if operation_id:

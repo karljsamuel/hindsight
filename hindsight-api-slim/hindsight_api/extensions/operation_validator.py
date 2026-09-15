@@ -588,6 +588,10 @@ class OperationValidatorExtension(Extension, ABC):
     Supported operations:
         - retain, recall, reflect (core memory operations)
         - consolidate (mental models consolidation)
+
+    Validators are not given an ExtensionContext: ``self.context`` raises. Everything a
+    hook needs is on its argument (``ctx.bank_id``, ``ctx.request_context``). Take the
+    tenant from those, never from shared engine state, which is not per-request.
     """
 
     # =========================================================================
