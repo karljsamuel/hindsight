@@ -41,6 +41,7 @@ interface Payload {
   content?: ContentItem[];
   name?: string;
   arguments?: string;
+  input?: string;
   output?: string;
   item?: { type?: string; content?: ContentItem[] };
 }
@@ -123,10 +124,16 @@ export function readCodexTranscript(path: string): TransportTurn[] {
         const text = contentText(p.content);
         if (!isSyntheticUserText(stripInjectedMemory(text))) push("user", text, stampOf(line));
       }
-    } else if (p.type === "function_call" && typeof p.name === "string") {
+    } else if (
+      (p.type === "function_call" || p.type === "custom_tool_call") &&
+      typeof p.name === "string"
+    ) {
+      // Codex CLI/Desktop emits both legacy function_call and current custom_tool_call records.
+      // Keep one compact action representation and never retain raw arguments.
+      const rawInput = p.type === "function_call" ? p.arguments : p.input;
       let input: unknown;
       try {
-        input = JSON.parse(p.arguments || "");
+        input = JSON.parse(rawInput || "");
       } catch {
         input = undefined;
       }

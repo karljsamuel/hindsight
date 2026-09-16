@@ -267,6 +267,28 @@ describe("readCodexTranscript", () => {
     expect(readCodexTranscript(file)).toEqual([{ role: "assistant", content: "done" }]);
   });
 
+  it("normalizes current custom_tool_call records as compact action turns", () => {
+    writeFileSync(
+      file,
+      [
+        item({
+          type: "custom_tool_call",
+          name: "exec",
+          input: JSON.stringify({ command: "systemctl status service" }),
+          call_id: "call_1",
+        }),
+        item({
+          type: "custom_tool_call_output",
+          call_id: "call_1",
+          output: [{ type: "text", text: "active" }],
+        }),
+      ].join("\n")
+    );
+    expect(readCodexTranscript(file)).toEqual([
+      { role: "action", content: "exec systemctl status service" },
+    ]);
+  });
+
   it("drops function_call_output entirely — even a huge one produces no turn", () => {
     writeFileSync(
       file,
