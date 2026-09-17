@@ -7940,14 +7940,6 @@ class MemoryEngine(MemoryEngineInterface):
                 status_code=422,
             )
 
-        # 404 for a bank nobody created, like every other bank-scoped read (#4175, #4442).
-        # Recall was the one that still answered 200 with empty results — indistinguishable from a
-        # healthy empty bank — after paying the whole retrieval fan-out (dense + BM25 + temporal,
-        # plus one graph arm per fact type, each taking its own pool connection) to return nothing.
-        # Malformed arguments above stay 422, and the profile row is process-cached, so an existing
-        # bank pays no extra query.
-        await self._require_bank_exists(bank_id)
-
         # Validate operation if validator is configured
         if self._operation_validator:
             from hindsight_api.extensions import RecallContext
@@ -7982,6 +7974,15 @@ class MemoryEngine(MemoryEngineInterface):
                     tags_match = result.tags_match
                 if result.tag_groups is not None:
                     tag_groups = result.tag_groups
+
+        # 404 for a bank nobody created, like every other bank-scoped read (#4175, #4442).
+        # Recall was the one that still answered 200 with empty results — indistinguishable from a
+        # healthy empty bank — after paying the whole retrieval fan-out (dense + BM25 + temporal,
+        # plus one graph arm per fact type, each taking its own pool connection) to return nothing.
+        # After the validator, like the other reads: a caller the validator refuses gets its own
+        # error rather than a 404 that tells it whether the bank exists. Malformed arguments above
+        # stay 422, and the profile row is process-cached, so an existing bank pays no extra query.
+        await self._require_bank_exists(bank_id)
 
         # Resolve fuzzy tag tokens into real tags before anything builds SQL. Runs after
         # the validator so a validator-supplied tag_groups is resolved too.
