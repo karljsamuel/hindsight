@@ -2593,7 +2593,15 @@ async def test_invalidated_facts_survive_a_bank_copy(memory, request_context):
             }
         assert len(rows) == 1
         assert rows[0]["invalidation_reason"] == "wrong colour"
-        assert rows[0]["document_id"] == "doc-1"
+        # Through the store: one that owns its documents has no SQL row for the column's
+        # foreign key to reference, so it keeps the document elsewhere and leaves the column NULL.
+        from hindsight_api.engine.memories import get_memories
+
+        async with acquire_with_retry(backend) as conn:
+            archived = await get_memories().get_archived_memory(
+                conn=conn, fq_table=fq_table, bank_id=target, unit_id=str(rows[0]["id"])
+            )
+        assert archived is not None and archived.document_id == "doc-1"
         # Fresh unit id: the source row is still there on a same-instance copy.
         assert rows[0]["id"] not in source_ids
     finally:
