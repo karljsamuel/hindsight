@@ -188,27 +188,47 @@ export function scopeClient(c: HindsightClient, bankId: string): BankScopedClien
       });
     },
     async recall(req, timeoutMs) {
-      const call = c.recall(bankId, req.query, {
-        maxTokens: req.maxTokens,
-        budget: req.budget,
-        types: req.types,
-        preferObservations: req.preferObservations,
-        minScores: req.minScores,
+      const controller = new AbortController();
+      const signal = controller.signal;
+      let onAbort!: () => void;
+      const cancelled = new Promise<never>((_, reject) => {
+        onAbort = () => reject(signal.reason);
+        signal.addEventListener("abort", onAbort, { once: true });
       });
-      if (!timeoutMs) return call;
-      // The generated client doesn't accept a per-call AbortSignal, so we race
-      // against a TimeoutError here. The before_prompt_build caller already
-      // special-cases `DOMException { name: 'TimeoutError' }` from the old
-      // bespoke client, so we preserve that contract.
-      return Promise.race([
-        call,
-        new Promise<never>((_, reject) =>
-          setTimeout(
-            () => reject(new DOMException(`Recall timed out after ${timeoutMs}ms`, "TimeoutError")),
+      const timer = timeoutMs
+        ? setTimeout(
+            () =>
+              controller.abort(
+                new DOMException(`Recall timed out after ${timeoutMs}ms`, "TimeoutError")
+              ),
             timeoutMs
           )
-        ),
-      ]);
+        : undefined;
+      try {
+        // A race alone only stopped the hook's wait. Forward cancellation to the
+        // client too, so its HTTP request receives the deadline.
+        //
+        // The race stays as a backstop for a transport that ignores the signal,
+        // which is not hypothetical: from client 0.10.x recall routes through
+        // `retryOnCapacity`, whose backoff sleeps in a plain setTimeout, so an
+        // abort during a 429/503 wait does not interrupt it. (#4445)
+        const response = await Promise.race([
+          c.recall(bankId, req.query, {
+            maxTokens: req.maxTokens,
+            budget: req.budget,
+            types: req.types,
+            preferObservations: req.preferObservations,
+            minScores: req.minScores,
+            signal,
+          }),
+          cancelled,
+        ]);
+        signal.throwIfAborted();
+        return response;
+      } finally {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+      }
     },
     async setMissions(opts) {
       // createBank upserts each mission column the request explicitly sets;
