@@ -2729,7 +2729,6 @@ class Hindsight:
         retain_default_strategy: str | None = None,
         retain_strategies: dict[str, Any] | None = None,
         retain_chunk_batch_size: int | None = None,
-        retain_optional_fact_dimensions: bool | None = None,
         store_document_text: bool | None = None,
         # Entity settings
         entity_labels: list[dict[str, Any]] | None = None,
@@ -2795,7 +2794,6 @@ class Hindsight:
                 retain_default_strategy=retain_default_strategy,
                 retain_strategies=retain_strategies,
                 retain_chunk_batch_size=retain_chunk_batch_size,
-                retain_optional_fact_dimensions=retain_optional_fact_dimensions,
                 store_document_text=store_document_text,
                 entity_labels=entity_labels,
                 entities_allow_free_form=entities_allow_free_form,
@@ -2854,7 +2852,6 @@ class Hindsight:
         retain_default_strategy: str | None = None,
         retain_strategies: dict[str, Any] | None = None,
         retain_chunk_batch_size: int | None = None,
-        retain_optional_fact_dimensions: bool | None = None,
         store_document_text: bool | None = None,
         # Entity settings
         entity_labels: list[dict[str, Any]] | None = None,
@@ -2924,10 +2921,6 @@ class Hindsight:
             retain_default_strategy: Default retain strategy name.
             retain_strategies: Named strategy definitions (dict of strategy name to config).
             retain_chunk_batch_size: Number of chunks per sub-batch in chunks extraction mode.
-            retain_optional_fact_dimensions: Let a fact leave when/where/who/why empty instead
-                of writing "N/A". Off by default; worth enabling for a small self-hosted model
-                under strict structured output, where a fact with no date of its own still has
-                to emit some string and tends to borrow one the text stated about another subject.
             store_document_text: Persist the original document text alongside extracted facts.
             entity_labels: Controlled vocabulary for entity labels — a list of label-group
                 dicts, each with a ``key`` and a ``type``: ``"value"``/``"multi-values"`` pick
@@ -2994,7 +2987,6 @@ class Hindsight:
                 "retain_default_strategy": retain_default_strategy,
                 "retain_strategies": retain_strategies,
                 "retain_chunk_batch_size": retain_chunk_batch_size,
-                "retain_optional_fact_dimensions": retain_optional_fact_dimensions,
                 "store_document_text": store_document_text,
                 "entity_labels": entity_labels,
                 "entities_allow_free_form": entities_allow_free_form,
