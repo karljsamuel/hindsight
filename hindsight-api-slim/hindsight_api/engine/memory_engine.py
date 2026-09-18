@@ -604,6 +604,7 @@ from .search.tags import TagGroup, TagsMatch, build_tag_groups_where_clause, bui
 from .search.types import ScoredResult
 from .source_facts import select_source_facts_within_budget
 from .task_backend import TaskBackend
+from .time_filter import DOCUMENT_TIME_FIELDS, build_time_clause, validate_time_window
 
 # Recall ranking strategy: how the per-arm (semantic/bm25/graph/temporal) results are
 # fused and reranked into the final order.
@@ -12777,6 +12778,9 @@ class MemoryEngine(MemoryEngineInterface):
         tags: list[str] | None = None,
         tags_match: TagsMatch = "any",
         created_before: datetime | None = None,
+        time_field: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
         limit: int = 100,
         offset: int = 0,
         request_context: "RequestContext",
@@ -12798,7 +12802,15 @@ class MemoryEngine(MemoryEngineInterface):
                 archive carries no entity links.
             created_before: Keep only units ingested strictly before this instant
                 (``created_at < created_before``). An ingest-age filter for
-                retention / bulk-maintenance sweeps.
+                retention / bulk-maintenance sweeps. Independent of the
+                ``time_field`` window below, which it predates.
+            time_field: Time axis to filter and order by — one of created_at,
+                updated_at, mentioned_at, occurred_start, occurred_end. Supplying
+                it (or either bound) replaces the default ordering with that axis
+                and EXCLUDES units carrying no value on it, so ``total`` counts
+                only dated units. See :mod:`hindsight_api.engine.time_filter`.
+            start_date: Inclusive lower bound on ``time_field``.
+            end_date: Exclusive upper bound on ``time_field`` (half-open window).
             tags: Optional list of tag names to filter by. When omitted, no tag
                 filtering is applied (except tags_match='exact', which then selects
                 the untagged/global scope).
@@ -12851,6 +12863,9 @@ class MemoryEngine(MemoryEngineInterface):
                 tags=tags,
                 tags_match=tags_match,
                 created_before=created_before,
+                time_field=time_field,
+                start_date=start_date,
+                end_date=end_date,
                 limit=limit,
                 offset=offset,
             )
@@ -12908,6 +12923,9 @@ class MemoryEngine(MemoryEngineInterface):
         search_query: str | None = None,
         tags: list[str] | None = None,
         tags_match: "TagsMatch" = "any_strict",
+        time_field: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
         limit: int = 100,
         offset: int = 0,
         request_context: "RequestContext",
@@ -12923,6 +12941,11 @@ class MemoryEngine(MemoryEngineInterface):
             search_query: Search in document ID
             tags: Filter by tags
             tags_match: How to match tags (any, all, any_strict, all_strict)
+            time_field: Time axis to filter and order by — ``created_at`` (when the
+                document first arrived) or ``updated_at`` (its last write, the
+                default ordering). See :mod:`hindsight_api.engine.time_filter`.
+            start_date: Inclusive lower bound on ``time_field``.
+            end_date: Exclusive upper bound on ``time_field`` (half-open window).
             limit: Maximum number of results
             offset: Offset for pagination
             request_context: Request context for authentication.
@@ -12940,6 +12963,13 @@ class MemoryEngine(MemoryEngineInterface):
             await self._validate_operation(self._operation_validator.validate_bank_read(ctx))
         await self._require_bank_exists(bank_id)
 
+        # Validated here rather than inside the SQL builder below, because the store-owned branch
+        # never reaches it: without this, an inverted window is a 400 on Postgres and a silently
+        # empty page on a store that owns its documents.
+        validate_time_window(
+            time_field=time_field, start_date=start_date, end_date=end_date, allowed=DOCUMENT_TIME_FIELDS
+        )
+
         # A store that owns its document metadata keeps no rows in the SQL `documents` table, so the
         # query below would return an empty page for it. List from the store's own registry instead.
         from .memories import get_memories
@@ -12950,11 +12980,15 @@ class MemoryEngine(MemoryEngineInterface):
             # unfiltered page — every document, including the untagged ones a strict mode excludes
             # — with a `total` that ignored the filter. The store applies them and counts what
             # matches, the same way the SQL branch below does.
+            # The time window goes WITH the call for the same reason tags do — see above.
             return await _docs_store.list_documents(
                 bank_id=bank_id,
                 search_query=search_query,
                 tags=tags,
                 tags_match=tags_match,
+                time_field=time_field,
+                start_date=start_date,
+                end_date=end_date,
                 limit=limit,
                 offset=offset,
             )
@@ -12981,6 +13015,18 @@ class MemoryEngine(MemoryEngineInterface):
             next_param = built.next_param_offset
             query_params.extend(tags_params)
             param_count = next_param - 1  # next_param is next available; convert to last used
+
+            window = build_time_clause(
+                time_field=time_field,
+                start_date=start_date,
+                end_date=end_date,
+                allowed=DOCUMENT_TIME_FIELDS,
+                default_field="updated_at",
+                param_offset=param_count + 1,
+            )
+            query_conditions.extend(window.conditions)
+            query_params.extend(window.params)
+            param_count = window.next_param_offset - 1
 
             where_clause = "WHERE " + " AND ".join(query_conditions) if query_conditions else ""
             if tags_clause:
@@ -13018,7 +13064,7 @@ class MemoryEngine(MemoryEngineInterface):
                     tags
                 FROM {fq_table("documents")}
                 {where_clause}
-                ORDER BY updated_at DESC, created_at DESC, id
+                ORDER BY {window.order_by or "updated_at DESC, created_at DESC, id"}
                 LIMIT {limit_param} OFFSET {offset_param}
             """,
                 *query_params,
