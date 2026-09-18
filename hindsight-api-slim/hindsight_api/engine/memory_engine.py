@@ -14985,6 +14985,12 @@ class MemoryEngine(MemoryEngineInterface):
         query = sanitize_text(query) or ""
         context = sanitize_text(context)
 
+        # A blank query produces an empty final user message, which providers reject
+        # with a 400 on every retry -- ~8 wasted LLM calls for a guaranteed failure
+        # (#4416). Fail before the agent loop starts.
+        if not query.strip() and not (context or "").strip():
+            raise ValueError("Reflect requires a non-empty query.")
+
         # Use cached LLM config
         if self._reflect_llm_config is None:
             raise ValueError("Memory LLM API key not set. Set HINDSIGHT_API_LLM_API_KEY environment variable.")

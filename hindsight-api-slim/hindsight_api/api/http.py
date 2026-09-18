@@ -1540,6 +1540,15 @@ class ReflectRequest(BaseModel):
         return v
 
     @model_validator(mode="after")
+    def validate_query_not_blank(self) -> "ReflectRequest":
+        # An empty/whitespace query used to reach the agent loop, where the provider
+        # rejects the empty user message with a 400 on every retry: ~8 wasted LLM
+        # calls and a misleading 200 (#4416). Reject it at the boundary instead.
+        if not self.query.strip() and not (self.context or "").strip():
+            raise ValueError("'query' must not be empty or whitespace-only.")
+        return self
+
+    @model_validator(mode="after")
     def validate_tags_exclusive(self) -> "ReflectRequest":
         if self.tags is not None and self.tag_groups is not None:
             raise ValueError("'tags' and 'tag_groups' are mutually exclusive. Use 'tag_groups' for compound filtering.")
