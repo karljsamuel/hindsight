@@ -3321,44 +3321,67 @@ class MemoryEngine(MemoryEngineInterface):
         file_metadata = task_dict.get("_file_metadata")
         if file_metadata and len(contents) == 1:
             doc_id = contents[0].get("document_id")
-            from .memories import get_memories
-
-            _store = get_memories()
-            if doc_id and _store.store_owned_for(bank_id):
-                # A store-owned bank has no SQL `documents` row for the UPDATE below to match, so
-                # the reference goes on the store's document record instead — where the retain
-                # above just wrote it.
-                found = await _store.set_document_file(
-                    bank_id=bank_id,
-                    document_id=doc_id,
-                    storage_key=file_metadata["file_storage_key"],
-                    original_name=file_metadata["file_original_name"],
-                    content_type=file_metadata["file_content_type"],
+            if doc_id and not await self.record_document_file(
+                bank_id,
+                doc_id,
+                storage_key=file_metadata["file_storage_key"],
+                original_name=file_metadata["file_original_name"],
+                content_type=file_metadata["file_content_type"],
+            ):
+                logger.warning(
+                    f"[BATCH_RETAIN_TASK] No document {doc_id} in bank {bank_id} to record its uploaded file on"
                 )
-                if not found:
-                    logger.warning(
-                        f"[BATCH_RETAIN_TASK] No document {doc_id} in bank {bank_id} to record its uploaded file on"
-                    )
-            elif doc_id:
-                backend = await self._get_backend()
-                async with acquire_with_retry(backend) as conn:
-                    await conn.execute(
-                        f"""
-                        UPDATE {fq_table("documents")}
-                        SET file_storage_key = $3,
-                            file_original_name = $4,
-                            file_content_type = $5,
-                            updated_at = NOW()
-                        WHERE id = $1 AND bank_id = $2
-                        """,
-                        doc_id,
-                        bank_id,
-                        file_metadata["file_storage_key"],
-                        file_metadata["file_original_name"],
-                        file_metadata["file_content_type"],
-                    )
 
         logger.info(f"[BATCH_RETAIN_TASK] Completed background batch retain for bank_id={bank_id}")
+
+    async def record_document_file(
+        self,
+        bank_id: str,
+        document_id: str,
+        *,
+        storage_key: str,
+        original_name: str,
+        content_type: str,
+    ) -> bool:
+        """Record on a document the uploaded file it was converted from. ``False`` if it is absent.
+
+        One entry point for both backends, because the reference is learned in the file-convert
+        task — after the retain that wrote the document — and only the document's owner knows
+        where it goes: a SQL ``documents`` row, or the store's own document record. Split across
+        the caller, the two halves drifted: the store-owned branch reported whether the document
+        was found and the SQL branch did not, so a reference written against a document that no
+        longer existed was silently dropped on one backend and logged on the other.
+        """
+        from .memories import get_memories
+
+        store = get_memories()
+        if store.store_owned_for(bank_id):
+            return await store.set_document_file(
+                bank_id=bank_id,
+                document_id=document_id,
+                storage_key=storage_key,
+                original_name=original_name,
+                content_type=content_type,
+            )
+        backend = await self._get_backend()
+        async with acquire_with_retry(backend) as conn:
+            updated = await conn.fetchval(
+                f"""
+                UPDATE {fq_table("documents")}
+                SET file_storage_key = $3,
+                    file_original_name = $4,
+                    file_content_type = $5,
+                    updated_at = NOW()
+                WHERE id = $1 AND bank_id = $2
+                RETURNING id
+                """,
+                document_id,
+                bank_id,
+                storage_key,
+                original_name,
+                content_type,
+            )
+        return updated is not None
 
     async def _handle_file_convert_retain(self, task_dict: dict[str, Any]):
         """
@@ -5906,6 +5929,7 @@ class MemoryEngine(MemoryEngineInterface):
 
         if previous_attachments:
             async with (await self._get_backend()).acquire() as conn:
+                await self._sync_store_owned_document_attachments(conn, bank_id, explicit_doc_ids)
                 await self._reclaim_orphaned_attachments(conn, bank_id, previous_attachments)
 
         # Call post-operation hook if validator is configured
@@ -7429,6 +7453,41 @@ class MemoryEngine(MemoryEngineInterface):
                 list(dict.fromkeys(document_ids)),
             )
         return [row["storage_key"] for row in rows]
+
+    async def _sync_store_owned_document_attachments(self, conn, bank_id: str, document_ids: "Sequence[str]") -> None:
+        """Drop the attachment rows a store-owned bank's documents stopped referencing.
+
+        A bank whose documents live in SQL does this inside the retain, from the one place every
+        document write funnels through (``fact_storage._upsert_document_row``). A store-owned bank
+        writes no such row, and its document writes do not funnel: the streaming session, the
+        delta path, the metadata-only path and the batch flush each write the record themselves.
+        So the rewrite runs here instead — once per retain, after every one of those paths has
+        converged on the stored record, which is also the only place the document's CANONICAL text
+        is known: an append's document is the stored base plus the new turn, not what the caller
+        sent, and which attachments a document carries is derived from that text and nothing else.
+
+        Deliberately gated by the caller on the documents having had attachment rows at all, so a
+        plain-text retain of a plain-text document does not touch Postgres for any of this.
+        """
+        from .memories import get_memories
+        from .retain.fact_storage import sync_document_attachments
+
+        store = get_memories()
+        if not store.store_owned_for(bank_id):
+            return
+        for document_id in dict.fromkeys(document_ids):
+            record = await store.get_document_record(bank_id=bank_id, document_id=document_id, include_text=True)
+            text = (record or {}).get("original_text")
+            if text is None:
+                # Either no record (this retain wrote no document) or a deployment with
+                # `store_document_text` disabled, where the canonical text is not kept and what the
+                # document references cannot be derived. Keeping the rows is the safe side of that
+                # choice: dropping them off a text we cannot read would take away attachments the
+                # document still displays.
+                continue
+            # No filenames: the names are already on the rows, written at the ingress, and this
+            # path has no newer ones to restate — passing none leaves them alone.
+            await sync_document_attachments(conn, bank_id, document_id, text)
 
     async def _drop_orphaned_attachments(self, conn, bank_id: str, document_id: str) -> list[str]:
         """Delete one document's attachment rows; return the blobs nothing names any more.
@@ -10176,9 +10235,18 @@ class MemoryEngine(MemoryEngineInterface):
                     # true for every bank it serves, so using it here reported a successful deletion
                     # for a document that never existed and turned the 404 this endpoint promises
                     # into a 200.
-                    doc_existed = (
-                        await _store.document_content_hash(bank_id=bank_id, document_id=document_id) is not None
-                    )
+                    #
+                    # One read answers both questions: whether the record exists, and where the
+                    # uploaded original the document was converted from lives. The SQL read above
+                    # returns nothing for such a bank — there is no row to hold the key — so
+                    # without taking it off the record here, the file a file retain kept outlived
+                    # the document it belonged to (`set_document_file` puts the key in the
+                    # record's metadata).
+                    from .memories.base import DOC_META_FILE_STORAGE_KEY
+
+                    _record = await _store.get_document_record(bank_id=bank_id, document_id=document_id)
+                    doc_existed = _record is not None
+                    file_storage_key = ((_record or {}).get("metadata") or {}).get(DOC_META_FILE_STORAGE_KEY)
                     await _store.delete_document(conn=conn, fq_table=fq_table, bank_id=bank_id, document_id=document_id)
                     # A store that owns the document store also drops the document RECORD (its
                     # extracted text + chunk bodies; the orphan sweep reclaims the blobs). This is
