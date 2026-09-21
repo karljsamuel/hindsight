@@ -1163,7 +1163,7 @@ candidates it holds.
 Setting `HINDSIGHT_API_RERANKER_TYPESAFE_PRUNE_CANDIDATES=true` adds a second question
 that cuts the ranked list where relevance ends, so recall returns the relevant
 candidates and nothing else. It is off by default because it meaningfully shrinks what
-recall returns. See Configuration for the full
+recall returns. See [Configuration](configuration.md#typesafe) for the full
 behaviour and its trade-offs.
 
 ### Alibaba Cloud Models
