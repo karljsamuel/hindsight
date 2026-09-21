@@ -1528,6 +1528,34 @@ For advanced authentication (JWT, OAuth, multi-tenant schemas), implement a cust
 | `HINDSIGHT_API_MODEL_INIT_TIMEOUT` | Wall-clock cap (seconds) on startup model/connection initialization. If embeddings, the cross-encoder, or LLM verification block (e.g. an offline model download or an unreachable provider), the server fails fast with a clear error instead of hanging forever. Increase if a legitimate first-time model download needs more time. | `300` |
 | `HINDSIGHT_API_STARTUP_WAIT_SECONDS` | **Docker image only.** How long the container waits for the API to answer `/health` before it stops and restarts. Raising `HINDSIGHT_API_MODEL_INIT_TIMEOUT` above the default raises this wait too, so a slow first-time model download is not cut short; set this to override the wait on its own. | `300`, or `HINDSIGHT_API_MODEL_INIT_TIMEOUT` + 30s when that is longer |
 
+### Egress proxy
+
+Outbound calls (LLM providers and gateways, remote embeddings and rerankers, document
+parsers, the Supabase tenant extension) follow the standard proxy environment variables —
+`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`. There is no Hindsight-specific proxy setting: set
+these on the process (pod env, systemd unit, shell) before it starts.
+
+Three things to know:
+
+- **The proxy URL itself must be `http://`.** On the API's own HTTP calls (embeddings,
+  rerankers, parsers, gateways reached directly) an `https://` proxy URL is ignored with a
+  warning, and `ALL_PROXY` / SOCKS is dropped. Provider SDKs that bring their own HTTP client
+  (OpenAI, Anthropic) do read `ALL_PROXY`, so don't rely on it either way — set `HTTP_PROXY`
+  and `HTTPS_PROXY`.
+- **Put local endpoints in `NO_PROXY`.** Nothing is exempted automatically — not even
+  `localhost` or `127.0.0.1`. A deployment that sets `HTTP_PROXY` and also runs a local
+  Ollama, LM Studio, llama.cpp or TEI must list those hosts in `NO_PROXY`, or their calls
+  are sent to the proxy. This includes the llama.cpp server Hindsight spawns itself: the
+  readiness probe is always direct, but the completions that follow go through the OpenAI
+  SDK and will honour the proxy.
+- **Credentials in `~/.netrc` are applied too**, to the destination host, not just the proxy.
+  A netrc entry matching a provider host does not override the `Authorization` header
+  Hindsight sends — the call fails outright with `Cannot combine AUTHORIZATION header with
+  AUTH argument`. Remove the entry, or point `NETRC` at a file without it.
+
+Webhook delivery is the one caller that ignores all of this on purpose: its SSRF guard
+validates the address it resolved, and a proxy would contact one that was never checked.
+
 ### Retrieval
 
 | Variable | Description | Default |
