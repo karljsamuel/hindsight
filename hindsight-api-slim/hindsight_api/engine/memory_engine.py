@@ -14941,24 +14941,32 @@ class MemoryEngine(MemoryEngineInterface):
         """
         await self._authenticate_tenant(request_context)
         await self._get_backend()
-        banks = await bank_utils.list_banks(self._backend, search_query=search_query)
-        if self._operation_validator:
-            from hindsight_api.extensions import BankListContext
-
-            result = await self._operation_validator.filter_bank_list(
-                BankListContext(banks=banks, request_context=request_context)
-            )
-            banks = result.banks
-        # Paging happens here rather than in SQL because filter_bank_list may drop any
-        # bank: a SQL page would hand back short (or empty) pages and a total counting
-        # banks the caller isn't allowed to see.
-        total = len(banks)
         # Clamped because the page is a Python slice, not a SQL LIMIT: a negative value
         # from a caller the HTTP layer doesn't validate (the MCP tool) would silently
         # trim from the end instead of raising.
         limit = max(limit, 0)
         offset = max(offset, 0)
-        page = banks[offset : offset + limit]
+        if self._operation_validator:
+            # The validator may drop ANY bank, so the page has to be cut after it runs — and it
+            # takes the list, not a page. Ranking the tenant is the price of a filter that can
+            # reject anything, and it is paid only by deployments that install one.
+            from hindsight_api.extensions import BankListContext
+
+            banks = await bank_utils.list_banks(self._backend, search_query=search_query)
+            result = await self._operation_validator.filter_bank_list(
+                BankListContext(banks=banks, request_context=request_context)
+            )
+            banks = result.banks
+            total = len(banks)
+            page = banks[offset : offset + limit]
+        else:
+            # No filter, so the page can be cut before the rows are read: the order comes from the
+            # store, already sorted, and Postgres fills the page by id. O(page) rather than
+            # O(total banks) — see `bank_utils.list_banks_page`.
+            bank_page = await bank_utils.list_banks_page(
+                self._backend, limit=limit, offset=offset, search_query=search_query
+            )
+            page, total = bank_page.banks, bank_page.total
         # Per-bank work below is done for the returned page only — the SQL fact count, a
         # live store count for banks whose memories live outside SQL, plus config resolution.
         await bank_utils.apply_sql_fact_counts(self._backend, page)
