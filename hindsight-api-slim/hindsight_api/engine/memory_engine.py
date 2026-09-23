@@ -5433,6 +5433,30 @@ class MemoryEngine(MemoryEngineInterface):
             await self.initialize()
         return self._backend
 
+    @asynccontextmanager
+    async def _store_read_conn(self, bank_id: str) -> AsyncIterator[DatabaseConnection | None]:
+        """The connection for a read the memories store answers entirely by itself.
+
+        A store-owned bank keeps its memories outside SQL, so these reads never touch the
+        connection they are handed — yet holding one still takes a pool slot for the whole
+        remote call, and on a busy pod that slot is what a SQL request is queued behind. Such a
+        bank gets ``None``; every other bank gets a pooled connection exactly as before.
+
+        Only for blocks whose every use of the connection is a store read that ignores it. A
+        store-owned store still reads SQL for some calls (its entity names live in Postgres), so
+        a block that reaches one of those, or runs SQL itself, keeps ``acquire_with_retry``.
+        """
+        from .memories import get_memories
+
+        # Before the store is consulted: this is also what initializes the engine, memories
+        # extension included.
+        backend = await self._get_backend()
+        if get_memories().store_owned_for(bank_id):
+            yield None
+            return
+        async with acquire_with_retry(backend) as conn:
+            yield conn
+
     async def health_check(self) -> dict:
         """
         Perform a health check by querying the database.
@@ -9143,7 +9167,7 @@ class MemoryEngine(MemoryEngineInterface):
                     # were read into a local and discarded), so the store-owned chunk walk in Step
                     # 5.5 and the source-facts step reuse them instead of reading them a second time.
                     if not all(sr.retrieval.source_memory_ids is not None for sr in observation_srs):
-                        async with acquire_with_retry(backend) as dedup_conn:
+                        async with self._store_read_conn(bank_id) as dedup_conn:
                             obs_by_id = {
                                 m.unit_id: [str(s) for s in (m.source_memory_ids or [])]
                                 for m in await get_memories().get_memories(
@@ -11551,10 +11575,9 @@ class MemoryEngine(MemoryEngineInterface):
             )
             await self._validate_operation(self._operation_validator.validate_bank_read(ctx))
         await self._require_bank_exists(bank_id)
-        backend = await self._get_backend()
         from .memories import get_memories
 
-        async with acquire_with_retry(backend) as conn:
+        async with self._store_read_conn(bank_id) as conn:
             return await get_memories().observation_scope_counts(
                 conn=conn, fq_table=fq_table, bank_id=bank_id, limit=limit, offset=offset
             )
@@ -15817,8 +15840,7 @@ class MemoryEngine(MemoryEngineInterface):
 
         from .memories import get_memories
 
-        backend = await self._get_backend()
-        async with acquire_with_retry(backend) as conn:
+        async with self._store_read_conn(bank_id) as conn:
             page = await get_memories().list_tags(conn=conn, fq_table=fq_table, bank_id=bank_id, limit=MAX_VOCABULARY)
 
         if page["total"] > MAX_VOCABULARY:
@@ -15876,8 +15898,7 @@ class MemoryEngine(MemoryEngineInterface):
         # SQL stores that is one paged query, never the whole histogram over the wire.
         from .memories import get_memories
 
-        backend = await self._get_backend()
-        async with acquire_with_retry(backend) as conn:
+        async with self._store_read_conn(bank_id) as conn:
             return await get_memories().list_tags(
                 conn=conn, fq_table=fq_table, bank_id=bank_id, pattern=pattern, limit=limit, offset=offset
             )
@@ -16182,7 +16203,6 @@ class MemoryEngine(MemoryEngineInterface):
             )
             await self._validate_operation(self._operation_validator.validate_bank_read(ctx))
 
-        backend = await self._get_backend()
         # The current reflect() caller reads last_consolidated_at,
         # pending_consolidation and last_memory_write_at, but `failed` is part of
         # this method's published contract (see interface.get_bank_freshness) so
@@ -16190,7 +16210,7 @@ class MemoryEngine(MemoryEngineInterface):
         # come from one scan, so keeping `failed` costs nothing extra.
         from .memories import get_memories
 
-        async with acquire_with_retry(backend) as conn:
+        async with self._store_read_conn(bank_id) as conn:
             fresh = await get_memories().consolidation_freshness(conn=conn, fq_table=fq_table, bank_id=bank_id)
 
         last = fresh["last_consolidated_at"]
@@ -16319,8 +16339,7 @@ class MemoryEngine(MemoryEngineInterface):
         # store gets a concrete `since` rather than a dialect interval string.
         since = datetime.now(timezone.utc) - cfg.step * cfg.count
 
-        backend = await self._get_backend()
-        async with acquire_with_retry(backend) as conn:
+        async with self._store_read_conn(bank_id) as conn:
             rows = await get_memories().memories_timeseries(
                 conn=conn, fq_table=fq_table, bank_id=bank_id, time_field=time_field, trunc=cfg.trunc, since=since
             )
@@ -17460,8 +17479,7 @@ class MemoryEngine(MemoryEngineInterface):
                 from .memories import get_memories
 
                 store = get_memories()
-                backend = await self._get_backend()
-                async with acquire_with_retry(backend) as conn:
+                async with self._store_read_conn(bank_id) as conn:
                     live_ids = await store.live_memory_ids(
                         conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=cited_ids
                     )
