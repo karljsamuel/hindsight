@@ -635,6 +635,28 @@ class TestOracleQueryRewriter:
         assert "result_metadata IS NOT NULL" in query
         assert "JSON_VALUE(result_metadata, '$.is_parent') = 'true'" in query
 
+    def test_connect_params_host_port_service(self):
+        from hindsight_api.engine.db.oracle import _oracle_connect_params
+
+        params = _oracle_connect_params("oracle://u:p@db:1522/SVC")
+        assert params == {"user": "u", "password": "p", "dsn": "db:1522/SVC"}
+
+    def test_connect_params_decode_credentials(self):
+        from hindsight_api.engine.db.oracle import _oracle_connect_params
+
+        params = _oracle_connect_params("oracle+oracledb://ADMIN:Pa%23ss%40w0rd@db/SVC")
+        assert params["user"] == "ADMIN"
+        assert params["password"] == "Pa#ss@w0rd"
+
+    def test_connect_params_full_descriptor(self):
+        from urllib.parse import quote
+
+        from hindsight_api.engine.db.oracle import _oracle_connect_params
+
+        desc = "(description=(address=(protocol=tcps)(port=1522)(host=adb.example.com))(connect_data=(service_name=x_low)))"
+        params = _oracle_connect_params(f"oracle://u:p@/?dsn={quote(desc)}")
+        assert params["dsn"] == desc
+
     def test_now_to_systimestamp(self):
         from hindsight_api.engine.db.oracle import _rewrite_pg_to_oracle
 

@@ -651,6 +651,36 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
 # ---------------------------------------------------------------------------
 
 
+def _oracle_connect_params(dsn: str) -> dict[str, Any]:
+    """Turn the configured database URL into oracledb connect kwargs.
+
+    Accepts ``oracle://user:pass@host:port/service`` and, for Autonomous
+    Database / TCPS setups that need a full connect descriptor or TNS alias,
+    ``oracle://user:pass@/?dsn=<descriptor-or-alias>``. Credentials are
+    URL-decoded, so passwords containing ``#``, ``@`` or ``%`` work when
+    percent-encoded in the URL. Anything that is not an ``oracle://`` URL is
+    passed through as the dsn.
+    """
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    parsed = urlparse(dsn)
+    if parsed.scheme not in ("oracle", "oracle+oracledb"):
+        return {"dsn": dsn}
+    params: dict[str, Any] = {
+        "user": unquote(parsed.username) if parsed.username else None,
+        "password": unquote(parsed.password) if parsed.password else None,
+    }
+    descriptor = parse_qs(parsed.query).get("dsn")
+    if descriptor and descriptor[0]:
+        params["dsn"] = descriptor[0]
+    else:
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 1521
+        service = parsed.path.lstrip("/") if parsed.path else "FREEPDB1"
+        params["dsn"] = f"{host}:{port}/{service}"
+    return params
+
+
 def _import_oracledb():
     """Lazy import oracledb to avoid hard dependency."""
     try:
@@ -1300,20 +1330,8 @@ class OracleBackend(DatabaseBackend):
 
         self._acquire_warn_threshold_s = get_config().db_acquire_warn_threshold_ms / 1000.0
 
-        # Parse URL-format DSN (oracle://user:pass@host:port/service)
-        from urllib.parse import urlparse
-
-        parsed = urlparse(dsn)
         pool_kwargs: dict[str, Any] = {"min": min_size, "max": max_size, "stmtcachesize": statement_cache_size}
-        if parsed.scheme in ("oracle", "oracle+oracledb"):
-            pool_kwargs["user"] = parsed.username
-            pool_kwargs["password"] = parsed.password
-            host = parsed.hostname or "localhost"
-            port = parsed.port or 1521
-            service = parsed.path.lstrip("/") if parsed.path else "FREEPDB1"
-            pool_kwargs["dsn"] = f"{host}:{port}/{service}"
-        else:
-            pool_kwargs["dsn"] = dsn
+        pool_kwargs.update(_oracle_connect_params(dsn))
 
         self._pool = oracledb.create_pool_async(**pool_kwargs)
 
