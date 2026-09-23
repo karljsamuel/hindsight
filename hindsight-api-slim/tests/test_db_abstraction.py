@@ -624,6 +624,17 @@ class TestOracleQueryRewriter:
             assert asyncio.run(conn.execute(q)) == "SET"
         raw.cursor.assert_not_called()
 
+    def test_not_jsonb_contains_is_parent_literal(self):
+        # list_operations(exclude_parents=True) filter: a jsonb literal, not a bind param.
+        from hindsight_api.engine.db.oracle import _rewrite_pg_to_oracle
+
+        query, _, _ = _rewrite_pg_to_oracle(
+            "SELECT id FROM async_operations WHERE NOT (result_metadata::jsonb @> '{\"is_parent\": true}'::jsonb)"
+        )
+        assert "@>" not in query
+        assert "result_metadata IS NOT NULL" in query
+        assert "JSON_VALUE(result_metadata, '$.is_parent') = 'true'" in query
+
     def test_now_to_systimestamp(self):
         from hindsight_api.engine.db.oracle import _rewrite_pg_to_oracle
 

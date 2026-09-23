@@ -368,6 +368,27 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
         flags=re.IGNORECASE,
     )
 
+    # NOT (col::jsonb @> '{"is_parent": true}'::jsonb) — used by list_operations
+    # (exclude_parents). _JSONB_CONTAINS_RE only handles bind params, so the literal
+    # form would reach Oracle verbatim. Must run BEFORE the cast strip. Keeps PG's
+    # three-valued logic: a NULL column makes NOT (NULL @> ...) NULL, i.e. excluded.
+    def _rewrite_not_jsonb_is_parent(m: re.Match) -> str:
+        col = m.group(1)
+        return (
+            f"({col} IS NOT NULL AND ("
+            f"CASE WHEN JSON_VALUE({col}, '$.type()') = 'object' "
+            f"AND JSON_VALUE({col}, '$.is_parent.type()') = 'boolean' "
+            f"AND JSON_VALUE({col}, '$.is_parent') = 'true' "
+            f"THEN 1 ELSE 0 END = 0))"
+        )
+
+    query = re.sub(
+        r"""NOT\s*\(\s*(\w+)(?:::jsonb)?\s*@>\s*'\{\s*["']?is_parent["']?\s*:\s*true\s*\}'(?:::jsonb)?\s*\)""",
+        _rewrite_not_jsonb_is_parent,
+        query,
+        flags=re.IGNORECASE,
+    )
+
     # Strip ::type casts (including bare ::jsonb on literals in generic contexts)
     query = _PG_CAST_RE.sub("", query)
 
