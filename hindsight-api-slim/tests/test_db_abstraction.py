@@ -612,6 +612,18 @@ class TestOracleQueryRewriter:
         assert returning_cols == ["status"]
         assert query.rstrip().endswith("RETURNING status INTO :ret_0")
 
+    def test_set_local_is_a_noop(self):
+        # PG-only session GUCs must not reach Oracle (ORA-00922).
+        from unittest.mock import MagicMock
+
+        from hindsight_api.engine.db.oracle import OracleConnection
+
+        raw = MagicMock()
+        conn = OracleConnection(raw)
+        for q in ("SET LOCAL enable_seqscan = off", "  set local lock_timeout = '5s'"):
+            assert asyncio.run(conn.execute(q)) == "SET"
+        raw.cursor.assert_not_called()
+
     def test_now_to_systimestamp(self):
         from hindsight_api.engine.db.oracle import _rewrite_pg_to_oracle
 

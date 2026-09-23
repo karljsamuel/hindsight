@@ -971,6 +971,11 @@ class OracleConnection(DatabaseConnection):
     # -- DML methods ------------------------------------------------------
 
     async def execute(self, query: str, *args: Any, timeout: float | None = None) -> str:
+        # PostgreSQL planner/session GUCs (SET LOCAL enable_seqscan, lock_timeout,
+        # hnsw.ef_search, ...) have no Oracle equivalent; running them raises
+        # ORA-00922. They are tuning hints scoped to the transaction, so skip them.
+        if query.lstrip().upper().startswith("SET LOCAL "):
+            return "SET"
         orig_query = query
         query, ignore_dup, ret_cols = _rewrite_pg_to_oracle(query)
         cursor = self._conn.cursor()
