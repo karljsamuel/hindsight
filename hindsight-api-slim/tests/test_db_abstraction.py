@@ -582,6 +582,36 @@ class TestOracleQueryRewriter:
         assert "::uuid" not in query
         assert "::varchar[]" not in query
 
+    def test_jsonb_merge_returns_clob(self):
+        # Without RETURNING CLOB, JSON_MERGEPATCH returns VARCHAR2(4000) with
+        # NULL ON ERROR, so large merged documents silently become NULL.
+        from hindsight_api.engine.db.oracle import _rewrite_pg_to_oracle
+
+        query, _, _ = _rewrite_pg_to_oracle("UPDATE banks SET config = config || $1::jsonb WHERE bank_id = $2")
+        assert "JSON_MERGEPATCH(config, :1 RETURNING CLOB)" in query
+
+        query, _, _ = _rewrite_pg_to_oracle(
+            "UPDATE banks SET config = COALESCE(config, '{}'::jsonb) || $1::jsonb WHERE bank_id = $2"
+        )
+        assert "JSON_MERGEPATCH(COALESCE(config, TO_CLOB('{}')), :1 RETURNING CLOB)" in query
+
+    def test_jsonb_merge_returning_clob_is_not_a_returning_clause(self):
+        # The function-level RETURNING CLOB must not be mistaken for a PG RETURNING clause.
+        from hindsight_api.engine.db.oracle import _rewrite_pg_to_oracle
+
+        query, _, returning_cols = _rewrite_pg_to_oracle(
+            "UPDATE banks SET config = COALESCE(config, '{}'::jsonb) || $1::jsonb, updated_at = now() WHERE bank_id = $2"
+        )
+        assert returning_cols is None
+        assert " INTO " not in query
+        assert query.rstrip().endswith("WHERE bank_id = :2")
+
+        query, _, returning_cols = _rewrite_pg_to_oracle(
+            "UPDATE async_operations SET result_metadata = result_metadata || $1::jsonb WHERE operation_id = $2 RETURNING status"
+        )
+        assert returning_cols == ["status"]
+        assert query.rstrip().endswith("RETURNING status INTO :ret_0")
+
     def test_now_to_systimestamp(self):
         from hindsight_api.engine.db.oracle import _rewrite_pg_to_oracle
 

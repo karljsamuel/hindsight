@@ -71,7 +71,9 @@ _ON_CONFLICT_DO_UPDATE_RE = re.compile(
     r"\bON\s+CONFLICT\s*\((?:[^()]*|\([^()]*\))*\)\s*DO\s+UPDATE\s+SET\b", re.IGNORECASE
 )
 
-_RETURNING_RE = re.compile(r"\bRETURNING\s+(.+)", re.IGNORECASE | re.DOTALL)
+# A PG RETURNING clause. "RETURNING <type>" (e.g. JSON_MERGEPATCH(..., :1 RETURNING CLOB))
+# is an Oracle JSON-function returning clause, not a statement-level RETURNING.
+_RETURNING_RE = re.compile(r"\bRETURNING\s+(?!(?:CLOB|BLOB|VARCHAR2|JSON)\b)(.+)", re.IGNORECASE | re.DOTALL)
 
 _ANY_RE = re.compile(r"=\s*ANY\s*\(\s*:(\d+)\s*\)", re.IGNORECASE)
 _NOT_ALL_RE = re.compile(r"!=\s*ALL\s*\(\s*:(\d+)\s*\)", re.IGNORECASE)
@@ -319,13 +321,18 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
     # $N → :N
     query = _PG_PARAM_RE.sub(r":\1", query)
 
-    # JSONB merge operator: col || :N::jsonb → JSON_MERGEPATCH(col, :N)
+    # JSONB merge operator: col || :N::jsonb → JSON_MERGEPATCH(col, :N RETURNING CLOB)
     # Must happen BEFORE cast strip so we can detect ::jsonb
-    query = re.sub(r"(\w+)\s*\|\|\s*(:\w+)::jsonb", r"JSON_MERGEPATCH(\1, \2)", query, flags=re.IGNORECASE)
+    # RETURNING CLOB is required: without it JSON_MERGEPATCH returns VARCHAR2(4000)
+    # with NULL ON ERROR, so a merged document over 4000 bytes silently becomes NULL
+    # (e.g. ORA-01407 when updating the NOT NULL banks.config column).
+    query = re.sub(
+        r"(\w+)\s*\|\|\s*(:\w+)::jsonb", r"JSON_MERGEPATCH(\1, \2 RETURNING CLOB)", query, flags=re.IGNORECASE
+    )
 
     # JSONB merge with complex left-hand expression (e.g. COALESCE(...)):
     #   COALESCE(col, '[]'::jsonb) || :N::jsonb
-    #   → JSON_MERGEPATCH(COALESCE(col, TO_CLOB('[]')), :N)
+    #   → JSON_MERGEPATCH(COALESCE(col, TO_CLOB('[]')), :N RETURNING CLOB)
     # The simple \w+ regex above won't match a closing paren.  We also
     # wrap any JSON string literals inside the COALESCE with TO_CLOB to
     # prevent ORA-00932 (CHAR vs CLOB type mismatch with CLOB columns).
@@ -334,7 +341,7 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
         bind_param = m.group(2)
         # Wrap any 'literal'::jsonb inside COALESCE with TO_CLOB
         coalesce_expr = re.sub(r"'([^']*)'::(jsonb|json)", r"TO_CLOB('\1')", coalesce_expr, flags=re.IGNORECASE)
-        return f"JSON_MERGEPATCH({coalesce_expr}, {bind_param})"
+        return f"JSON_MERGEPATCH({coalesce_expr}, {bind_param} RETURNING CLOB)"
 
     query = re.sub(
         r"(COALESCE\([^)]+\))\s*\|\|\s*(:\w+)::jsonb",
