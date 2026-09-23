@@ -474,16 +474,23 @@ async def _restore_rows(
     if not rows:
         return 0
     from ..memory_engine import get_current_schema
+    from ..schema import _is_oracle
 
-    schema = get_current_schema()
-    col_types = {
-        r["column_name"]: r["data_type"]
-        for r in await conn.fetch(
-            "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2",
-            schema,
+    oracle = _is_oracle()
+    if oracle:
+        # No information_schema on Oracle; the backend sets CURRENT_SCHEMA per session.
+        col_rows = await conn.fetch(
+            "SELECT LOWER(column_name) AS column_name, LOWER(data_type) AS data_type FROM all_tab_columns "
+            "WHERE owner = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AND table_name = UPPER($1)",
             table,
         )
-    }
+    else:
+        col_rows = await conn.fetch(
+            "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2",
+            get_current_schema(),
+            table,
+        )
+    col_types = {r["column_name"]: r["data_type"] for r in col_rows}
     inserted = 0
     for row in rows:
         cols = [c for c in row if c in col_types]
@@ -503,7 +510,8 @@ async def _restore_rows(
                 placeholders.append(f"${position}::jsonb")
                 continue
             if value is not None and isinstance(value, str):
-                if data_type in ("timestamp with time zone", "timestamp without time zone"):
+                # Oracle reports e.g. "timestamp(6) with time zone".
+                if data_type.startswith("timestamp"):
                     value = datetime.fromisoformat(value)
                 elif data_type == "date":
                     value = date.fromisoformat(value)
@@ -511,7 +519,8 @@ async def _restore_rows(
                     value = uuid.UUID(value)
             placeholders.append(f"${position}")
             values.append(value)
-        col_list = ", ".join(f'"{c}"' for c in cols)
+        # Oracle folds unquoted DDL identifiers to upper case; quoted lower case would not match.
+        col_list = ", ".join(f'"{c.upper()}"' if oracle else f'"{c}"' for c in cols)
         await conn.execute(
             f"INSERT INTO {fq_table(table)} ({col_list}) VALUES ({', '.join(placeholders)}) ON CONFLICT DO NOTHING",
             *values,
