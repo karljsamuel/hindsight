@@ -8184,15 +8184,9 @@ components:
         knowledge base is client-managed (CRUD); ``managed`` lets a client tag a node
         as system-owned vs. hand-authored.
       example:
-        children:
-        - null
-        - null
         kind: folder
-        parent_id: parent_id
-        managed: false
-        name: name
         description: description
-        id: id
+        last_refresh_failed_at: last_refresh_failed_at
         is_stale: true
         trigger:
           recall_chunks_max_tokens: 5
@@ -8226,10 +8220,17 @@ components:
           min_refresh_interval_seconds: 0
           keep_trace: false
           recall_max_tokens: 5
-        mental_model_id: mental_model_id
         tags:
         - tags
         - tags
+        children:
+        - null
+        - null
+        parent_id: parent_id
+        managed: false
+        name: name
+        id: id
+        mental_model_id: mental_model_id
         timestamp: timestamp
       properties:
         id:
@@ -8269,6 +8270,9 @@ components:
         is_stale:
           nullable: true
           type: boolean
+        last_refresh_failed_at:
+          nullable: true
+          type: string
         trigger:
           $ref: '#/components/schemas/MentalModelTrigger-Output'
         children:
@@ -8434,15 +8438,9 @@ components:
       description: The knowledge base as a nested folder/page tree.
       example:
         roots:
-        - children:
-          - null
-          - null
-          kind: folder
-          parent_id: parent_id
-          managed: false
-          name: name
+        - kind: folder
           description: description
-          id: id
+          last_refresh_failed_at: last_refresh_failed_at
           is_stale: true
           trigger:
             recall_chunks_max_tokens: 5
@@ -8476,20 +8474,21 @@ components:
             min_refresh_interval_seconds: 0
             keep_trace: false
             recall_max_tokens: 5
-          mental_model_id: mental_model_id
           tags:
           - tags
           - tags
+          children:
+          - null
+          - null
+          parent_id: parent_id
+          managed: false
+          name: name
+          id: id
+          mental_model_id: mental_model_id
           timestamp: timestamp
-        - children:
-          - null
-          - null
-          kind: folder
-          parent_id: parent_id
-          managed: false
-          name: name
+        - kind: folder
           description: description
-          id: id
+          last_refresh_failed_at: last_refresh_failed_at
           is_stale: true
           trigger:
             recall_chunks_max_tokens: 5
@@ -8523,10 +8522,17 @@ components:
             min_refresh_interval_seconds: 0
             keep_trace: false
             recall_max_tokens: 5
-          mental_model_id: mental_model_id
           tags:
           - tags
           - tags
+          children:
+          - null
+          - null
+          parent_id: parent_id
+          managed: false
+          name: name
+          id: id
+          mental_model_id: mental_model_id
           timestamp: timestamp
       properties:
         roots:
@@ -9831,6 +9837,7 @@ components:
         items:
         - max_tokens: 0
           created_at: created_at
+          last_refresh_failed_at: last_refresh_failed_at
           trigger:
             recall_chunks_max_tokens: 5
             refresh_cron: refresh_cron
@@ -9878,6 +9885,7 @@ components:
           id: id
         - max_tokens: 0
           created_at: created_at
+          last_refresh_failed_at: last_refresh_failed_at
           trigger:
             recall_chunks_max_tokens: 5
             refresh_cron: refresh_cron
@@ -10091,6 +10099,7 @@ components:
       example:
         max_tokens: 0
         created_at: created_at
+        last_refresh_failed_at: last_refresh_failed_at
         trigger:
           recall_chunks_max_tokens: 5
           refresh_cron: refresh_cron
@@ -10166,6 +10175,9 @@ components:
           nullable: true
           type: string
         last_memory_seen_at:
+          nullable: true
+          type: string
+        last_refresh_failed_at:
           nullable: true
           type: string
         created_at:
