@@ -1667,6 +1667,12 @@ def _resolve_refresh_tag_filtering(
     return RefreshTagFiltering(tags=model_tags, tags_match=tags_match, tag_groups=None)
 
 
+def _knowledge_tree_sort_key(row: Any) -> tuple[bool, int, str]:
+    """ORDER BY sort_order, name (PostgreSQL ASC: NULL sort_order last), in Python."""
+    sort_order = row["sort_order"]
+    return (sort_order is None, sort_order or 0, row["name"] or "")
+
+
 def _may_need_refresh(last_refreshed_at: datetime | None, watermark: datetime | None) -> bool:
     """Cheap half of staleness: rule a model current from the bank watermark alone.
 
@@ -19368,10 +19374,12 @@ class MemoryEngine(MemoryEngineInterface):
                 SELECT {self._KP_PAGE_SELECT}
                 FROM {self._kp_join()}
                 WHERE kp.bank_id = $1
-                ORDER BY kp.sort_order, kp.name
                 """,
                 bank_id,
             )
+            # Sorted here, not in SQL: knowledge_pages.name is a CLOB on Oracle and
+            # ORDER BY on a CLOB raises ORA-22848.
+            rows = sorted(rows, key=_knowledge_tree_sort_key)
             nodes = [self._row_to_knowledge_node(r) for r in rows]
             if with_staleness:
                 by_id = {n["id"]: n for n in nodes}

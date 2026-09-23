@@ -439,6 +439,22 @@ class TestTree:
         assert single_calls == 0, "no per-page fallback for plain flat-tag scopes"
 
 
+class TestKnowledgeTreeOrder:
+    """The tree is sorted in Python because knowledge_pages.name is a CLOB on Oracle."""
+
+    def test_sorts_by_sort_order_then_name_with_nulls_last(self):
+        from hindsight_api.engine.memory_engine import _knowledge_tree_sort_key
+
+        rows = [
+            {"sort_order": None, "name": "a"},
+            {"sort_order": 2, "name": "b"},
+            {"sort_order": 1, "name": "z"},
+            {"sort_order": 1, "name": "m"},
+        ]
+        ordered = [(r["sort_order"], r["name"]) for r in sorted(rows, key=_knowledge_tree_sort_key)]
+        assert ordered == [(1, "m"), (1, "z"), (2, "b"), (None, "a")]
+
+
 class TestWatermarkRule:
     """The pure rule behind every "may need refresh" badge."""
 
