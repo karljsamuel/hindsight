@@ -1686,6 +1686,12 @@ def _may_need_refresh(last_refreshed_at: datetime | None, watermark: datetime | 
         return True  # Never refreshed — nothing to be current with.
     if watermark is None:
         return False  # Empty bank.
+    # Oracle's TIMESTAMP columns come back naive while the bank watermark is aware;
+    # compare both in UTC, as engine/reflect/tools.py already does for last_refreshed_at.
+    if last_refreshed_at.tzinfo is None:
+        last_refreshed_at = last_refreshed_at.replace(tzinfo=UTC)
+    if watermark.tzinfo is None:
+        watermark = watermark.replace(tzinfo=UTC)
     return watermark > last_refreshed_at
 
 

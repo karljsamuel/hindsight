@@ -458,6 +458,15 @@ class TestWatermarkRule:
         refreshed = datetime.now(timezone.utc)
         assert _may_need_refresh(refreshed, refreshed + timedelta(microseconds=1)) is True
 
+    def test_naive_timestamps_compare_as_utc(self):
+        # Oracle TIMESTAMP columns come back naive; the watermark may be aware.
+        refreshed = datetime.now(timezone.utc)
+        naive = refreshed.replace(tzinfo=None)
+        assert _may_need_refresh(naive, refreshed) is False
+        assert _may_need_refresh(naive, refreshed + timedelta(seconds=1)) is True
+        assert _may_need_refresh(refreshed, naive - timedelta(seconds=1)) is False
+        assert _may_need_refresh(naive, naive + timedelta(seconds=1)) is True
+
 
 class TestSearch:
     """Doc-level hybrid search (BM25 + vector, RRF-fused). The BM25 arm runs on a
