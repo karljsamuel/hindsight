@@ -8,6 +8,8 @@ moved every memory provider out of the core tree, so it is now maintained by the
 [vectorize-io/hindsight](https://github.com/vectorize-io/hindsight/tree/main/hindsight-integrations/hermes)
 and the catalog pins it from there.
 
+[View Changelog →](https://hindsight.vectorize.io/changelog/integrations/hermes)
+
 ## Install
 
 Hindsight is in the Hermes plugin catalog, so the name is all you need:
