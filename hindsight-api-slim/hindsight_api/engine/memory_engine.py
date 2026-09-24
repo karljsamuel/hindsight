@@ -618,6 +618,7 @@ from .mental_model_refresh import (
 from .multi_llm import MultiLLMProvider
 from .query_analyzer import QueryAnalyzer
 from .reflect import (
+    DEFAULT_MENTAL_MODELS_READ_MAX_TOKENS,
     DEFAULT_OBSERVATIONS_TOOL_MAX_TOKENS,
     ReflectNoAnswerError,
     ReflectToolExecutionError,
@@ -632,7 +633,13 @@ from .reflect.retractions import (
     prune_based_on,
 )
 from .reflect.structured_doc import StructuredDocument
-from .reflect.tools import tool_expand, tool_recall, tool_search_mental_models, tool_search_observations
+from .reflect.tools import (
+    tool_expand,
+    tool_read_mental_models,
+    tool_recall,
+    tool_search_mental_models,
+    tool_search_observations,
+)
 from .response_models import (
     VALID_RECALL_FACT_TYPES,
     ConsolidationStrategiesPreview,
@@ -15382,6 +15389,15 @@ class MemoryEngine(MemoryEngineInterface):
                     last_memory_write_at=last_memory_write_at,
                 )
 
+        async def read_mental_models_fn(page_ids: list[str], max_tokens: int) -> dict[str, Any]:
+            # Honours the same exclusion the search does: a refresh excludes the page
+            # it is regenerating, and a read that ignored that would let the page be
+            # rebuilt from its own previous text.
+            excluded = set(exclude_mental_model_ids or [])
+            wanted = [pid for pid in page_ids if pid not in excluded]
+            async with backend.acquire() as conn:
+                return await tool_read_mental_models(conn, bank_id, wanted, max_tokens=max_tokens)
+
         # Get reflect source facts config (hierarchical: env → tenant → bank)
         config_dict = await self._config_resolver.get_bank_config(bank_id, request_context)
         reflect_source_facts_max_tokens = config_dict.get(
@@ -15448,6 +15464,7 @@ class MemoryEngine(MemoryEngineInterface):
             recall_max_tokens=effective_recall_max_tokens,
             recall_chunk_max_tokens=effective_recall_chunks_max_tokens,
             observations_max_tokens=effective_observations_max_tokens,
+            mental_models_read_max_tokens=DEFAULT_MENTAL_MODELS_READ_MAX_TOKENS,
         )
 
         async def search_observations_fn(q: str, max_tokens: int) -> dict[str, Any]:
@@ -15557,6 +15574,7 @@ class MemoryEngine(MemoryEngineInterface):
                         query=query,
                         bank_profile=profile,
                         search_mental_models_fn=search_mental_models_fn,
+                        read_mental_models_fn=read_mental_models_fn,
                         search_observations_fn=search_observations_fn,
                         recall_fn=recall_fn,
                         expand_fn=expand_fn,
@@ -15674,6 +15692,17 @@ class MemoryEngine(MemoryEngineInterface):
             )
             based_on["mental-models"] = []
             seen_model_ids: set[str] = set()
+            # A search now returns the best-ranked page whole and the others as a
+            # snippet, so a citation built from the search output alone would carry
+            # the truncated text (or, for the pages the model then read, nothing at
+            # all). Collect what `read_mental_models` returned first and prefer it.
+            read_contents: dict[str, str] = {
+                str(read_model["id"]): read_model.get("content", "")
+                for trace_call in agent_result.tool_trace
+                if trace_call.tool == "read_mental_models"
+                for read_model in trace_call.output.get("mental_models", [])
+                if read_model.get("id")
+            }
             for tc in agent_result.tool_trace:
                 if tc.tool == "get_mental_model":
                     # Single model lookup (with full details)
@@ -15709,7 +15738,9 @@ class MemoryEngine(MemoryEngineInterface):
                             seen_model_ids.add(model_id)
                             # Add to based_on as MemoryFact with type "mental-models"
                             model_name = model.get("name", "")
-                            model_content = model.get("content", "")
+                            model_content = (
+                                read_contents.get(model_id) or model.get("content") or model.get("snippet", "")
+                            )
                             based_on["mental-models"].append(
                                 MemoryFact(
                                     id=model_id,
