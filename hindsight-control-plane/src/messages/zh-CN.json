@@ -257,6 +257,9 @@
     "description": "同样可以访问 <name>{bankId}</name> 的额外 ID，可让调用方在不停机的情况下迁移到新 ID。",
     "placeholder": "新 ID",
     "add": "添加",
+    "shownAsLabel": "显示为",
+    "shownAsDescription": "控制台为该记忆库显示的 ID。仅影响显示 —— 在其他所有地方 {bankId} 仍是它的标识。",
+    "primaryTitle": "显示在记忆库 ID 的位置",
     "removeAria": "删除别名 {alias}",
     "removeTitle": "要删除别名 {alias} 吗？",
     "removeConfirm": "所有仍通过 {alias} 连接的应用会立即停止工作。消失的只是这个 ID —— {bankId} 及其记忆不受影响，之后也可以重新添加该别名。",
@@ -264,6 +267,7 @@
     "cancel": "取消",
     "loadFailed": "加载别名失败",
     "addFailed": "添加别名失败",
+    "primaryFailed": "更改显示的 ID 失败",
     "removeFailed": "删除别名失败"
   },
   "bankStats": {
@@ -1954,7 +1958,8 @@
       "bankAliases": {
         "list": "获取记忆库别名列表失败",
         "create": "创建记忆库别名失败",
-        "delete": "删除记忆库别名失败"
+        "delete": "删除记忆库别名失败",
+        "update": "更新记忆库别名失败"
       },
       "memories": {
         "list": "列出记忆单元失败",

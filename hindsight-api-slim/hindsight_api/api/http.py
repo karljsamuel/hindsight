@@ -1800,15 +1800,45 @@ class BankProfileResponse(BaseModel):
     background: str | None = Field(default=None, description="Deprecated: use mission instead")
 
 
+class BankAliasEntry(BaseModel):
+    """One id a bank answers to."""
+
+    alias: str
+    primary: bool = Field(
+        default=False,
+        description=(
+            "Whether this alias is shown in place of the bank's own id. Display only — "
+            "the bank keeps its id, and everything that names a bank still uses it. At "
+            "most one alias per bank can be primary, and none has to be."
+        ),
+    )
+
+
 class BankAliasesResponse(BaseModel):
     """Response model for a bank's aliases."""
 
     model_config = ConfigDict(
-        json_schema_extra={"example": {"bank_id": "user123", "aliases": ["user-123", "legacy-user123"]}}
+        json_schema_extra={
+            "example": {
+                "bank_id": "user123",
+                "aliases": [
+                    {"alias": "user-123", "primary": True},
+                    {"alias": "legacy-user123", "primary": False},
+                ],
+            }
+        }
     )
 
     bank_id: str = Field(description="The bank's own id, which an alias never replaces")
-    aliases: list[str] = Field(description="Extra ids that also reach this bank, oldest first")
+    aliases: list[BankAliasEntry] = Field(
+        description="Extra ids that also reach this bank, the primary one first then oldest first"
+    )
+
+
+class SetBankAliasPrimaryRequest(BaseModel):
+    """Request model for showing (or no longer showing) an alias in place of the bank id."""
+
+    primary: bool = Field(description="True to present the bank under this alias; False to go back to its own id.")
 
 
 class CreateBankAliasRequest(BaseModel):
@@ -1821,6 +1851,10 @@ class CreateBankAliasRequest(BaseModel):
             "The extra bank id. Same rules as a bank id (non-empty, at most 192 bytes of UTF-8, no "
             "control characters), and it must not already name a bank or another alias."
         )
+    )
+    primary: bool = Field(
+        default=False,
+        description="Also show the bank under this alias, replacing whichever alias is shown today.",
     )
 
 
@@ -1906,6 +1940,14 @@ class BankListItem(BaseModel):
         description=(
             "When anything was last written to this bank: a document retained (including "
             "appends to an existing document) or a fact stored. Null if the bank is empty."
+        ),
+    )
+    display_alias: str | None = Field(
+        default=None,
+        description=(
+            "The alias this bank is presented under, when one was promoted. Display only: "
+            "`bank_id` remains the bank's identity everywhere else. Null when no alias is primary, "
+            "in which case show `bank_id`."
         ),
     )
     matched_aliases: list[str] = Field(
@@ -8253,6 +8295,15 @@ def _register_routes(app: FastAPI):
             ),
         )
 
+    async def _alias_response(bank_id: str, request_context: RequestContext) -> BankAliasesResponse:
+        """The bank's aliases, shaped for the wire. Shared by all three alias routes,
+        which each answer with the whole list so a client never has to re-fetch."""
+        aliases = await app.state.memory.list_bank_aliases(bank_id, request_context=request_context)
+        return BankAliasesResponse(
+            bank_id=bank_id,
+            aliases=[BankAliasEntry(alias=a.alias, primary=a.primary) for a in aliases],
+        )
+
     @app.get(
         "/v1/default/banks/{bank_id}/aliases",
         response_model=BankAliasesResponse,
@@ -8268,8 +8319,7 @@ def _register_routes(app: FastAPI):
     async def api_list_bank_aliases(bank_id: str, request_context: RequestContext = Depends(get_request_context)):
         """List the extra ids this bank answers to."""
         try:
-            aliases = await app.state.memory.list_bank_aliases(bank_id, request_context=request_context)
-            return BankAliasesResponse(bank_id=bank_id, aliases=aliases)
+            return await _alias_response(bank_id, request_context)
         except OperationValidationError as e:
             raise HTTPException(status_code=e.status_code, detail=e.reason)
         except (AuthenticationError, HTTPException):
@@ -8297,15 +8347,51 @@ def _register_routes(app: FastAPI):
     ):
         """Add an extra id that reaches this bank."""
         try:
-            await app.state.memory.create_bank_alias(bank_id, request.alias, request_context=request_context)
-            aliases = await app.state.memory.list_bank_aliases(bank_id, request_context=request_context)
-            return BankAliasesResponse(bank_id=bank_id, aliases=aliases)
+            await app.state.memory.create_bank_alias(
+                bank_id, request.alias, primary=request.primary, request_context=request_context
+            )
+            return await _alias_response(bank_id, request_context)
         except OperationValidationError as e:
             raise HTTPException(status_code=e.status_code, detail=e.reason)
         except (AuthenticationError, HTTPException):
             raise
         except Exception as e:
             raise _internal_error(e, f"/v1/default/banks/{bank_id}/aliases")
+
+    @app.patch(
+        "/v1/default/banks/{bank_id}/aliases/{alias}",
+        response_model=BankAliasesResponse,
+        summary="Show this alias in place of the bank id",
+        description=(
+            "Present the bank under one of its aliases. Purely cosmetic: the bank keeps its own "
+            "`bank_id`, which every other part of the system — authorisation, metering, exports, "
+            "audit logs — continues to use.\n\n"
+            "Promoting an alias demotes whichever one was shown before, so a bank is presented "
+            "under at most one alias. Send `primary: false` to go back to showing its own id."
+        ),
+        operation_id="set_bank_alias_primary",
+        tags=["Banks"],
+    )
+    @audited("set_bank_alias_primary")
+    async def api_set_bank_alias_primary(
+        bank_id: str,
+        alias: str,
+        request: SetBankAliasPrimaryRequest,
+        request_context: RequestContext = Depends(get_request_context),
+    ):
+        """Choose which id this bank is displayed under."""
+        try:
+            if not await app.state.memory.set_bank_alias_primary(
+                bank_id, alias, request.primary, request_context=request_context
+            ):
+                raise HTTPException(status_code=404, detail=f"Bank '{bank_id}' has no alias '{alias}'")
+            return await _alias_response(bank_id, request_context)
+        except OperationValidationError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.reason)
+        except (AuthenticationError, HTTPException):
+            raise
+        except Exception as e:
+            raise _internal_error(e, f"/v1/default/banks/{bank_id}/aliases/{alias}")
 
     @app.delete(
         "/v1/default/banks/{bank_id}/aliases/{alias}",
@@ -8327,8 +8413,7 @@ def _register_routes(app: FastAPI):
         try:
             if not await app.state.memory.delete_bank_alias(bank_id, alias, request_context=request_context):
                 raise HTTPException(status_code=404, detail=f"Bank '{bank_id}' has no alias '{alias}'")
-            aliases = await app.state.memory.list_bank_aliases(bank_id, request_context=request_context)
-            return BankAliasesResponse(bank_id=bank_id, aliases=aliases)
+            return await _alias_response(bank_id, request_context)
         except OperationValidationError as e:
             raise HTTPException(status_code=e.status_code, detail=e.reason)
         except (AuthenticationError, HTTPException):

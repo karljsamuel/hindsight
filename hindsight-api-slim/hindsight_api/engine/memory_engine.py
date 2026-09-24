@@ -577,6 +577,7 @@ if TYPE_CHECKING:
     from hindsight_api.models import RequestContext
 
     from ..webhooks.url_guard import GuardedWebhookClient
+    from . import bank_aliases as bank_aliases_mod
     from .audit import AuditLogListResponse, AuditLogStatsResponse
     from .memories import MemoryScopeWatermark
     from .prompt_preview import PromptPreview
@@ -15164,7 +15165,15 @@ class MemoryEngine(MemoryEngineInterface):
         # Resolve the page's config in one batch (single config-column query + a single
         # tenant-config resolve) rather than one round-trip per bank.
         configs = await self._config_resolver.get_bank_configs([bank["bank_id"] for bank in page], request_context)
+        # The id each bank is PRESENTED as, when one of its aliases was promoted.
+        # Resolved for the page here rather than left to the caller: every client
+        # renders a bank list, and none of them should need a second round trip to
+        # learn what to label it.
+        from . import bank_aliases
+
+        display = await bank_aliases.primary_aliases(self._backend, [bank["bank_id"] for bank in page])
         for bank in page:
+            bank["display_alias"] = display.get(bank["bank_id"])
             resolved = _overlay_bank_config_disposition_mission(
                 bank["disposition"], bank["mission"], configs.get(bank["bank_id"], {})
             )
@@ -20476,8 +20485,8 @@ class MemoryEngine(MemoryEngineInterface):
         bank_id: str,
         *,
         request_context: "RequestContext",
-    ) -> list[str]:
-        """Every extra id this bank answers to, oldest first.
+    ) -> "list[bank_aliases_mod.BankAlias]":
+        """Every extra id this bank answers to, the primary one first.
 
         Args:
             bank_id: Bank identifier (may itself have been reached via an alias;
@@ -20505,6 +20514,7 @@ class MemoryEngine(MemoryEngineInterface):
         bank_id: str,
         alias: str,
         *,
+        primary: bool = False,
         request_context: "RequestContext",
     ) -> None:
         """Make ``alias`` another id this bank answers to.
@@ -20534,7 +20544,44 @@ class MemoryEngine(MemoryEngineInterface):
         await self._require_bank_exists(bank_id)
         from . import bank_aliases
 
-        await bank_aliases.create_alias(await self._get_backend(), bank_id, alias)
+        await bank_aliases.create_alias(await self._get_backend(), bank_id, alias, primary=primary)
+
+    async def set_bank_alias_primary(
+        self,
+        bank_id: str,
+        alias: str,
+        primary: bool,
+        *,
+        request_context: "RequestContext",
+    ) -> bool:
+        """Show ``alias`` in place of the bank's own id, or stop showing it.
+
+        Display only — the bank keeps its id, and everything that names a bank
+        (authorisation, metering, exports, audit) keeps using it. Gated by the same
+        write operation as creating an alias: choosing which id a bank is presented
+        as is part of managing its names.
+
+        Args:
+            bank_id: Bank identifier
+            alias: One of the bank's aliases
+            primary: True to show it, False to go back to showing the bank's own id
+            request_context: Request context for authentication
+
+        Returns:
+            False when the bank has no such alias, which the caller turns into a 404.
+        """
+        await self._authenticate_tenant(request_context)
+        if self._operation_validator:
+            from hindsight_api.extensions import BankWriteContext, BankWriteOperation
+
+            ctx = BankWriteContext(
+                bank_id=bank_id, operation=BankWriteOperation.CREATE_BANK_ALIAS, request_context=request_context
+            )
+            await self._validate_operation(self._operation_validator.validate_bank_write(ctx))
+        await self._require_bank_exists(bank_id)
+        from . import bank_aliases
+
+        return await bank_aliases.set_primary(await self._get_backend(), bank_id, alias, primary)
 
     async def delete_bank_alias(
         self,
