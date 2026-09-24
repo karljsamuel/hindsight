@@ -7266,14 +7266,12 @@ def _register_routes(app: FastAPI):
             # parent_id is applied only when present in the body, so passing null
             # moves the node to the root (distinct from "not provided"), which is
             # what KEEP_PARENT stands in for. Page options live on the backing
-            # mental model and each applies only when supplied (so tags=[] clears,
-            # distinct from "not provided").
-            page_fields = {"source_query", "tags", "max_tokens", "trigger"} & body.model_fields_set
-            if body.name is None and "parent_id" not in body.model_fields_set and not page_fields:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Provide name, parent_id, source_query, tags, max_tokens, and/or trigger to update",
-                )
+            # mental model and take the opposite convention: null there means "not
+            # changing this", while an empty VALUE is a real change (tags=[] clears
+            # them). So a body that is null all the way down changes nothing at all,
+            # and the engine rejects it with a 400 before reading anything — a no-op
+            # authorizes no operation, and would otherwise hand the node's metadata
+            # to a caller the validator never got to judge.
             # One call, one transaction: a rename must not survive the move that
             # fails after it, which is what left clients retrying against a tree
             # they never asked for.
@@ -7282,9 +7280,11 @@ def _register_routes(app: FastAPI):
                 node_id=node_id,
                 name=body.name,
                 parent_id=body.parent_id if "parent_id" in body.model_fields_set else KEEP_PARENT,
-                source_query=body.source_query if "source_query" in page_fields else None,
-                tags=body.tags if "tags" in page_fields else None,
-                max_tokens=body.max_tokens if "max_tokens" in page_fields else None,
+                # Each page option defaults to None on the model, so an absent field
+                # and an explicit null are the same "not supplied" the engine expects.
+                source_query=body.source_query,
+                tags=body.tags,
+                max_tokens=body.max_tokens,
                 # Only the trigger fields the client stated: the engine patches them over
                 # the page's current trigger, and a full dump would carry this model's own
                 # defaults (mode="full", exclude_mental_models=False) into every update.
@@ -7296,7 +7296,7 @@ def _register_routes(app: FastAPI):
             # A new source query means the content is stale — rebuild it. Scheduled
             # only once the patch has committed, so a refresh is never queued for a
             # change that rolled back.
-            if "source_query" in page_fields and body.source_query is not None and updated.get("mental_model_id"):
+            if body.source_query is not None and updated.get("mental_model_id"):
                 await app.state.memory.submit_async_refresh_mental_model(
                     bank_id=bank_id,
                     mental_model_id=updated["mental_model_id"],
