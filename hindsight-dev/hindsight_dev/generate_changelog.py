@@ -86,6 +86,7 @@ TABLE_VOLUME: dict[str, VolumeTier] = {
     "document_attachments": MEDIUM_VOLUME,
     # Configuration-sized: a handful of rows per bank or tenant.
     "banks": LOW_VOLUME,
+    "bank_aliases": LOW_VOLUME,
     "webhooks": LOW_VOLUME,
     "bank_stats_cache": LOW_VOLUME,
 }
