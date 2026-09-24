@@ -61,12 +61,13 @@ command, drop the SVG into a PR, an issue or a blog post.
 ## Clips for social
 
 `npm run export` records every figure, one clip per step, into `~/Downloads/interfig-clips` (outside the repo —
-they are throwaway social assets; `--out <dir>` picks another folder) as `<figure>-<step>.mp4` — H.264, sized to the figure, the step label and narration kept, the buttons hidden.
+they are throwaway social assets; `--out <dir>` picks another folder) as `<figure>-<step>.mp4` — H.264, sized to the figure, the step label and narration kept, the buttons hidden. Beside each clip it writes a `.md` of the same name holding that step's narration as bullets, ready to paste into a post.
 
 ```bash
 npm run export                                  # everything
 npm run export -- what-hindsight-does tempr     # only these figures
 npm run export -- --2x                          # play at 2x: half as long, same frames
+npm run export -- --square                      # pad to 1:1, for feeds that crop to a square
 npm run export -- --dark --gif                  # dark theme, and GIFs beside the MP4s
 ```
 
