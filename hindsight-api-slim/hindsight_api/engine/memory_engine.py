@@ -667,6 +667,7 @@ from .response_models import (
 )
 from .response_models import RecallResult as RecallResultModel
 from .retain import bank_utils, embedding_utils
+from .retain.fact_storage import _normalize_scopes
 from .retain.fold import FoldMemberRef
 from .retain.types import RetainBatchResult, RetainContentDict, merge_processed_content_tokens
 from .search.reranking import CrossEncoderReranker, apply_combined_scoring
@@ -1933,6 +1934,26 @@ def _summarize_refresh_tool_calls(
             )
         )
     return summaries
+
+
+def _renamed_scopes(scopes: Any, old_tags: list[str] | None, new_tags: list[str]) -> Any:
+    """Move a single-tag rename into an explicit ``observation_scopes`` spec (#4609).
+
+    An explicit ``list[list[str]]`` spec freezes tag strings at retain time, so a retag
+    that renames ``project:old`` -> ``project:new`` would leave consolidation rebuilding
+    observations under the old tag. Scalar modes re-derive from the unit's fresh tags
+    and need nothing. Only an unambiguous rename (exactly one tag removed, one added)
+    is remapped; any other retag returns the spec unchanged.
+    """
+    scopes = _normalize_scopes(scopes)
+    if not isinstance(scopes, list) or old_tags is None:
+        return scopes
+    removed = set(old_tags) - set(new_tags)
+    added = set(new_tags) - set(old_tags)
+    if len(removed) != 1 or len(added) != 1:
+        return scopes
+    old, new = removed.pop(), added.pop()
+    return [[new if t == old else t for t in scope] for scope in scopes]
 
 
 def _operation_details(operation_type: str, result_metadata: dict[str, Any]) -> dict[str, Any] | None:
@@ -10688,6 +10709,7 @@ class MemoryEngine(MemoryEngineInterface):
         async with acquire_with_retry(backend) as conn:
             async with conn.transaction():
                 from .memories import MemoryPatch, get_memories
+                from .memories.base import META_OBSERVATION_SCOPES
                 from .retain.entity_labels import label_tag_keys, split_label_tags
 
                 _store = get_memories()
@@ -10796,9 +10818,14 @@ class MemoryEngine(MemoryEngineInterface):
                     )
                     _doc_units = _doc_page.memories
                     if _doc_units:
-                        await _store.update_memories(
-                            bank_id, [MemoryPatch(unit_id=m.unit_id, tags=_retagged(m.tags)) for m in _doc_units]
-                        )
+                        _patches = []
+                        for m in _doc_units:
+                            _patch = MemoryPatch(unit_id=m.unit_id, tags=_retagged(m.tags))
+                            _scopes = _renamed_scopes(m.observation_scopes, current_tags, retag)
+                            if _scopes != _normalize_scopes(m.observation_scopes):
+                                _patch.metadata = {META_OBSERVATION_SCOPES: json.dumps(_scopes)}
+                            _patches.append(_patch)
+                        await _store.update_memories(bank_id, _patches)
                     _src_ids = [m.unit_id for m in _doc_units if m.fact_type in ("experience", "world")]
                     if _src_ids:
                         invalidated_obs = await _store.delete_stale_observations(
@@ -10811,11 +10838,24 @@ class MemoryEngine(MemoryEngineInterface):
                     # `tags` as well as `id`: the projection each unit must keep is read
                     # here, before the blanket write below overwrites it.
                     unit_rows = await conn.fetch(
-                        f"SELECT id, tags, fact_type FROM {fq_table('memory_units')} "
+                        f"SELECT id, tags, fact_type, observation_scopes FROM {fq_table('memory_units')} "
                         f"WHERE document_id = $1 AND bank_id = $2",
                         document_id,
                         bank_id,
                     )
+                    _by_scopes: dict[str, list] = {}
+                    for _row in unit_rows:
+                        _scopes = _renamed_scopes(_row["observation_scopes"], current_tags, retag)
+                        if _scopes != _normalize_scopes(_row["observation_scopes"]):
+                            _by_scopes.setdefault(json.dumps(_scopes), []).append(_row["id"])
+                    for _scopes_json, _ids in _by_scopes.items():
+                        await conn.execute(
+                            f"UPDATE {fq_table('memory_units')} SET observation_scopes = $1 "
+                            f"WHERE bank_id = $2 AND id = ANY($3::uuid[])",
+                            _scopes_json,
+                            bank_id,
+                            _ids,
+                        )
                     unit_ids = [str(row["id"]) for row in unit_rows if row["fact_type"] in ("experience", "world")]
 
                     await conn.execute(
