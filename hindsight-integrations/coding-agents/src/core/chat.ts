@@ -58,18 +58,26 @@ export async function ingestChats(
     async (s, i) => {
       const id = s.id || `s${i}`;
       const stamp = opts.stampFor?.(id);
-      // each turn gets an ABSOLUTE timestamp: its own if provided, else synthesized from the real clock,
-      // staggered per session + 1 min/turn to preserve ordering. List order is CHRONOLOGICAL (a later
-      // chat can amend an earlier one), so the LAST session is the newest — the previous `NOW - i*1h`
-      // inverted recency and made an amendment rank older than the decision it superseded.
+      // List order is CHRONOLOGICAL (a later chat can amend an earlier one), so the LAST session is
+      // the newest — the previous `NOW - i*1h` inverted recency and made an amendment rank older than
+      // the decision it superseded. This synthetic stagger is therefore only a FALLBACK, for a
+      // transcript that carries no clocks of its own.
       const sessBase = NOW - (sessions.length - 1 - i) * 3600000;
-      const baseIso = new Date(sessBase).toISOString();
+      // A backfilled session keeps the clock it actually happened on: when any turn carries a source
+      // timestamp, the first one dates the document (verbatim, offset included) and anchors the
+      // turns that have none. Dating it to the import made an old session surface as recent even
+      // though every turn inside it was dated correctly.
+      const sourceTs = (s.turns || [])
+        .map((t) => t.timestamp)
+        .find((v): v is string => typeof v === "string" && !Number.isNaN(Date.parse(v)));
+      const anchorMs = sourceTs ? Date.parse(sourceTs) : sessBase;
+      const baseIso = sourceTs ?? new Date(sessBase).toISOString();
       const turns = withRefId(
         `chat:${id}`,
         (s.turns || []).map((t, j) => ({
           role: t.role,
           content: t.text,
-          timestamp: t.timestamp || new Date(sessBase + (j + 1) * 60000).toISOString(),
+          timestamp: t.timestamp || new Date(anchorMs + (j + 1) * 60000).toISOString(),
         })),
         baseIso
       );
