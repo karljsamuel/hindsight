@@ -1424,6 +1424,7 @@
     "cumulative": "Cumulatif",
     "tokensInput": "Entrée",
     "tokensOutput": "Sortie",
+    "tokensThoughts": "Raisonnement",
     "tokensCached": "En cache",
     "tokensTotal": "Total",
     "tableHeaderTokens": "Tokens",

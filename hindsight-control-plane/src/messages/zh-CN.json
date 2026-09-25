@@ -1424,6 +1424,7 @@
     "cumulative": "累计",
     "tokensInput": "输入",
     "tokensOutput": "输出",
+    "tokensThoughts": "推理",
     "tokensCached": "缓存",
     "tokensTotal": "总计",
     "tableHeaderTokens": "Token",

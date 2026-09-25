@@ -341,6 +341,7 @@ class OpenAIResponsesLLM(LLMInterface):
             finish_reason=finish_reason,
             error=None,
             cached_tokens=usage.cached_tokens,
+            thoughts_tokens=usage.thoughts_tokens,
             tool_calls=tool_calls_dict,
         )
 
@@ -375,6 +376,7 @@ class OpenAIResponsesLLM(LLMInterface):
                         input_tokens=usage.input_tokens,
                         output_tokens=usage.output_tokens,
                         cached_tokens=usage.cached_tokens,
+                        thoughts_tokens=usage.thoughts_tokens,
                     )
                 )
                 return parse(response)

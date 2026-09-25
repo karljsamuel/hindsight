@@ -154,6 +154,7 @@ export interface LLMRequestEntry {
   duration_ms: number | null;
   input_tokens: number | null;
   output_tokens: number | null;
+  thoughts_tokens: number | null;
   cached_tokens: number | null;
   total_tokens: number | null;
   input: unknown | null;
@@ -174,6 +175,9 @@ export interface LLMRequestsResponse {
 export interface LLMRequestTokenSums {
   input: number;
   output: number;
+  // Absent on a server predating reasoning usage; the generated schema is
+  // nullable for the same reason.
+  thoughts: number | null;
   cached: number;
   total: number;
 }

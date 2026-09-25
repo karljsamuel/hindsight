@@ -14000,7 +14000,7 @@ class MemoryEngine(MemoryEngineInterface):
     _LLM_REQUEST_COLUMNS = (
         "id, bank_id, operation, scope, trace_id, span_id, parent_span_id, "
         "provider, model, status, started_at, ended_at, duration_ms, "
-        "input_tokens, output_tokens, cached_tokens, total_tokens, "
+        "input_tokens, output_tokens, cached_tokens, thoughts_tokens, total_tokens, "
         "input, output, error, llm_info, metadata"
     )
 
@@ -14024,6 +14024,7 @@ class MemoryEngine(MemoryEngineInterface):
             input_tokens=row["input_tokens"],
             output_tokens=row["output_tokens"],
             cached_tokens=row["cached_tokens"],
+            thoughts_tokens=row["thoughts_tokens"],
             total_tokens=row["total_tokens"],
             input=conn.parse_json(row["input"]) if row["input"] is not None else None,
             output=conn.parse_json(row["output"]) if row["output"] is not None else None,
@@ -14223,6 +14224,7 @@ class MemoryEngine(MemoryEngineInterface):
                        COALESCE(SUM(input_tokens), 0) AS input_tokens,
                        COALESCE(SUM(output_tokens), 0) AS output_tokens,
                        COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
+                       COALESCE(SUM(thoughts_tokens), 0) AS thoughts_tokens,
                        COALESCE(SUM(total_tokens), 0) AS total_tokens
                 FROM {table}
                 WHERE {where_sql}
@@ -14242,13 +14244,14 @@ class MemoryEngine(MemoryEngineInterface):
             key = row["bucket"].isoformat()
             if key not in statuses_by_bucket:
                 statuses_by_bucket[key] = {}
-                tokens_by_bucket[key] = {"input": 0, "output": 0, "cached": 0, "total": 0}
+                tokens_by_bucket[key] = {"input": 0, "output": 0, "cached": 0, "thoughts": 0, "total": 0}
                 order.append(key)
             statuses_by_bucket[key][row["status"]] = row["count"]
             tok = tokens_by_bucket[key]
             tok["input"] += row["input_tokens"]
             tok["output"] += row["output_tokens"]
             tok["cached"] += row["cached_tokens"]
+            tok["thoughts"] += row["thoughts_tokens"]
             tok["total"] += row["total_tokens"]
 
         return LLMRequestStatsResponse(

@@ -390,21 +390,17 @@ def _content_or_error(response: Any, *, provider: str, model: str, scope: str) -
 
 
 def _usage_from_openai_response(response: Any) -> LLMResponseUsage:
-    """Extract prompt/completion/cached token counts from an OpenAI-shaped usage block."""
-    usage = getattr(response, "usage", None)
-    input_tokens = (usage.prompt_tokens or 0) if usage else 0
-    output_tokens = (usage.completion_tokens or 0) if usage else 0
-    cached_tokens = 0
-    if usage and getattr(usage, "prompt_tokens_details", None):
-        cached_tokens = getattr(usage.prompt_tokens_details, "cached_tokens", 0) or 0
+    """Extract input / visible-output / cached / reasoning counts from an OpenAI-shaped usage block."""
+    usage = visible_token_usage(response)
     return LLMResponseUsage(
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cached_tokens=cached_tokens,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cached_tokens=usage.cached_tokens,
+        thoughts_tokens=usage.thoughts_tokens,
     )
 
 
-def _visible_token_usage(response: Any) -> TokenUsage:
+def visible_token_usage(response: Any) -> TokenUsage:
     """Normalize an OpenAI-shaped usage block into visible-only output plus reasoning.
 
     The ``TokenUsage`` contract — and the Gemini provider — treat
@@ -1368,8 +1364,8 @@ class OpenAICompatibleLLM(LLMInterface):
                 usage = response.usage
                 # ``output_tokens``/``total_tokens`` are visible-only past this
                 # point, with reasoning surfaced separately in
-                # ``thoughts_tokens`` — see ``_visible_token_usage``.
-                token_counts = _visible_token_usage(response)
+                # ``thoughts_tokens`` — see ``visible_token_usage``.
+                token_counts = visible_token_usage(response)
                 input_tokens = token_counts.input_tokens
                 output_tokens = token_counts.output_tokens
                 total_tokens = token_counts.total_tokens
@@ -1409,6 +1405,7 @@ class OpenAICompatibleLLM(LLMInterface):
                     finish_reason=finish_reason,
                     error=None,
                     cached_tokens=cached_tokens,
+                    thoughts_tokens=thoughts_tokens,
                 )
 
                 # Log slow calls
@@ -1677,6 +1674,7 @@ class OpenAICompatibleLLM(LLMInterface):
                 async with attempt_context() if attempt_context is not None else nullcontext():
                     set_stage(f"llm.{self.provider}.tools.attempt={attempt + 1}/{max_retries + 1}")
                     response = await self._client.chat.completions.create(**call_params)
+                    stash_response_usage(_usage_from_openai_response(response))
 
                 message = response.choices[0].message
                 finish_reason = response.choices[0].finish_reason
@@ -1695,9 +1693,9 @@ class OpenAICompatibleLLM(LLMInterface):
 
                 # Record metrics
                 duration = time.time() - start_time
-                # See ``_visible_token_usage``: ``output_tokens`` is visible-only,
+                # See ``visible_token_usage``: ``output_tokens`` is visible-only,
                 # with reasoning surfaced separately in ``thoughts_tokens``.
-                token_counts = _visible_token_usage(response)
+                token_counts = visible_token_usage(response)
                 input_tokens = token_counts.input_tokens
                 output_tokens = token_counts.output_tokens
                 cached_tokens = token_counts.cached_tokens
@@ -1740,6 +1738,8 @@ class OpenAICompatibleLLM(LLMInterface):
                     finish_reason=finish_reason,
                     error=None,
                     tool_calls=tool_calls_dict,
+                    cached_tokens=cached_tokens,
+                    thoughts_tokens=thoughts_tokens,
                 )
 
                 return LLMToolCallResult(

@@ -12967,6 +12967,17 @@
             ],
             "title": "Cached Tokens"
           },
+          "thoughts_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thoughts Tokens"
+          },
           "total_tokens": {
             "anyOf": [
               {
@@ -13024,6 +13035,7 @@
           "input_tokens",
           "output_tokens",
           "cached_tokens",
+          "thoughts_tokens",
           "total_tokens",
           "error",
           "llm_info",
@@ -13150,6 +13162,17 @@
           "cached": {
             "type": "integer",
             "title": "Cached"
+          },
+          "thoughts": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thoughts"
           },
           "total": {
             "type": "integer",

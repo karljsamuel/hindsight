@@ -3147,6 +3147,10 @@ export type LlmRequestEntry = {
    */
   cached_tokens: number | null;
   /**
+   * Thoughts Tokens
+   */
+  thoughts_tokens: number | null;
+  /**
    * Total Tokens
    */
   total_tokens: number | null;
@@ -3273,6 +3277,10 @@ export type LlmRequestTokenSums = {
    * Cached
    */
   cached: number;
+  /**
+   * Thoughts
+   */
+  thoughts?: number | null;
   /**
    * Total
    */

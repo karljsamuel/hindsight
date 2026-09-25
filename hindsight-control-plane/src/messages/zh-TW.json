@@ -1424,6 +1424,7 @@
     "cumulative": "累積",
     "tokensInput": "輸入",
     "tokensOutput": "輸出",
+    "tokensThoughts": "推理",
     "tokensCached": "快取",
     "tokensTotal": "總計",
     "tableHeaderTokens": "Token",

@@ -8836,6 +8836,7 @@ components:
         metadata:
           key: ""
         span_id: span_id
+        thoughts_tokens: 9
         error: error
         llm_info:
           key: ""
@@ -8846,7 +8847,7 @@ components:
         provider: provider
         bank_id: bank_id
         scope: scope
-        total_tokens: 9
+        total_tokens: 3
         started_at: started_at
         model: model
         output_tokens: 2
@@ -8904,6 +8905,9 @@ components:
         cached_tokens:
           nullable: true
           type: integer
+        thoughts_tokens:
+          nullable: true
+          type: integer
         total_tokens:
           nullable: true
           type: integer
@@ -8937,6 +8941,7 @@ components:
       - span_id
       - started_at
       - status
+      - thoughts_tokens
       - total_tokens
       - trace_id
       title: LLMRequestEntry
@@ -8953,6 +8958,7 @@ components:
           metadata:
             key: ""
           span_id: span_id
+          thoughts_tokens: 9
           error: error
           llm_info:
             key: ""
@@ -8963,7 +8969,7 @@ components:
           provider: provider
           bank_id: bank_id
           scope: scope
-          total_tokens: 9
+          total_tokens: 3
           started_at: started_at
           model: model
           output_tokens: 2
@@ -8977,6 +8983,7 @@ components:
           metadata:
             key: ""
           span_id: span_id
+          thoughts_tokens: 9
           error: error
           llm_info:
             key: ""
@@ -8987,7 +8994,7 @@ components:
           provider: provider
           bank_id: bank_id
           scope: scope
-          total_tokens: 9
+          total_tokens: 3
           started_at: started_at
           model: model
           output_tokens: 2
@@ -9029,7 +9036,8 @@ components:
         tokens:
           output: 5
           input: 1
-          total: 2
+          thoughts: 2
+          total: 7
           cached: 5
         time: time
       properties:
@@ -9064,7 +9072,8 @@ components:
           tokens:
             output: 5
             input: 1
-            total: 2
+            thoughts: 2
+            total: 7
             cached: 5
           time: time
         - total: 6
@@ -9073,7 +9082,8 @@ components:
           tokens:
             output: 5
             input: 1
-            total: 2
+            thoughts: 2
+            total: 7
             cached: 5
           time: time
         start: start
@@ -9106,7 +9116,8 @@ components:
       example:
         output: 5
         input: 1
-        total: 2
+        thoughts: 2
+        total: 7
         cached: 5
       properties:
         input:
@@ -9117,6 +9128,9 @@ components:
           type: integer
         cached:
           title: Cached
+          type: integer
+        thoughts:
+          nullable: true
           type: integer
         total:
           title: Total

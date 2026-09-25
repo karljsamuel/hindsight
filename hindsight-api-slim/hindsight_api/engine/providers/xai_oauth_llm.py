@@ -759,6 +759,7 @@ class XaiOAuthLLM(LLMInterface):
                         input_tokens=counts.input_tokens,
                         output_tokens=counts.output_tokens,
                         cached_tokens=counts.cached_tokens,
+                        thoughts_tokens=counts.thoughts_tokens,
                     )
                 )
 
@@ -882,6 +883,14 @@ class XaiOAuthLLM(LLMInterface):
                     completion = await self._request_completion(body, body["messages"])
 
                 counts = _token_counts(completion.usage)
+                stash_response_usage(
+                    LLMResponseUsage(
+                        input_tokens=counts.input_tokens,
+                        output_tokens=counts.output_tokens,
+                        cached_tokens=counts.cached_tokens,
+                        thoughts_tokens=counts.thoughts_tokens,
+                    )
+                )
                 choice = completion.choices[0] if completion.choices else None
                 message = choice.message if choice is not None else None
                 content = message.content if message is not None else None
@@ -1047,6 +1056,7 @@ class XaiOAuthLLM(LLMInterface):
                 finish_reason=finish_reason,
                 error=None,
                 cached_tokens=counts.cached_tokens,
+                thoughts_tokens=counts.thoughts_tokens,
                 tool_calls=(
                     [{"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in tool_calls]
                     if tool_calls

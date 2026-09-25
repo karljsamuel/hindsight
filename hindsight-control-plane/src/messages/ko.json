@@ -1424,6 +1424,7 @@
     "cumulative": "누적",
     "tokensInput": "입력",
     "tokensOutput": "출력",
+    "tokensThoughts": "추론",
     "tokensCached": "캐시됨",
     "tokensTotal": "합계",
     "tableHeaderTokens": "토큰",
