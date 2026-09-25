@@ -206,7 +206,11 @@ def apply_opencode_session(request: dict[str, Any], *, base_url: str | None) -> 
     """
     if not is_opencode_host(base_url):
         return
-    session_id = cache_affinity_id(request.get("messages"))
+    # The Responses API carries the conversation under ``input``, not
+    # ``messages``. Reading only ``messages`` left an untraced Responses call —
+    # the startup verification probe — with no id, so opencode-go rejected it
+    # with HTTP 400 MissingSessionID.
+    session_id = cache_affinity_id(request.get("messages") or request.get("input"))
     if session_id is None:
         return
     extra_headers = request.setdefault("extra_headers", {})
