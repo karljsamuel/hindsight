@@ -7,6 +7,7 @@
  * Hindsight API calls are intercepted via global fetch mocking.
  */
 
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk";
 import manifest from "../src/manifest.js";
@@ -832,5 +833,89 @@ describe("enabledAgentIds", () => {
 
     const retainCalls = fetchMock.mock.calls.filter(([url]: [string]) => /memories$/.test(url));
     expect(retainCalls.length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hindsight Cloud API key — secret reference
+// ---------------------------------------------------------------------------
+
+describe("manifest version", () => {
+  it("matches package.json, so the host shows the version that is installed", () => {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    expect(manifest.version).toBe(pkg.version);
+  });
+});
+
+describe("hindsightApiKeyRef", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("is declared as a secret-ref field that admits the picker's reference object", () => {
+    const field = (
+      manifest.instanceConfigSchema as {
+        properties: Record<string, { format?: string; oneOf?: Array<Record<string, unknown>> }>;
+      }
+    ).properties.hindsightApiKeyRef;
+
+    // Without `format` the host renders a plain text box, stores whatever is
+    // typed, and every resolve() fails closed on a bare string.
+    expect(field?.format).toBe("secret-ref");
+
+    // With `format` alone but `type: "string"`, the host's Ajv pass rejects what
+    // its own picker submits: "Configuration does not match the plugin's
+    // instanceConfigSchema". The schema must admit the reference object too.
+    const objectBranch = field?.oneOf?.find((branch) => branch.type === "object") as
+      | { required?: string[]; properties?: Record<string, unknown> }
+      | undefined;
+    expect(objectBranch).toBeDefined();
+    expect(objectBranch?.required).toEqual(["type", "secretId"]);
+    expect(field?.oneOf?.some((branch) => branch.type === "string")).toBe(true);
+  });
+
+  it("resolves the stored reference for the run's company and authenticates recall", async () => {
+    const fetchMock = mockFetch([{ url: /recall/, body: { results: [] } }]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const secretRef = { type: "secret_ref" as const, secretId: "sec-1" };
+    const harness = buildHarness({ ...DEFAULT_CONFIG, hindsightApiKeyRef: secretRef });
+    const resolve = vi.spyOn(harness.ctx.secrets, "resolve").mockResolvedValue("hs-cloud-key");
+    await setupPlugin(harness);
+    const issue = await seedIssue(harness, { companyId: "co-1", title: "Ship it" });
+
+    await harness.emit(
+      "agent.run.started",
+      { agentId: "ag-1", runId: "run-1", issueId: issue.id },
+      { companyId: "co-1" }
+    );
+
+    expect(resolve).toHaveBeenCalledWith(secretRef, {
+      companyId: "co-1",
+      configPath: "hindsightApiKeyRef",
+    });
+
+    const recallCall = fetchMock.mock.calls.find(([url]: [string]) => url.includes("recall"));
+    const headers = recallCall?.[1]?.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer hs-cloud-key");
+  });
+
+  it("never touches the secrets client when no reference is configured", async () => {
+    const fetchMock = mockFetch([{ url: /recall/, body: { results: [] } }]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const harness = buildHarness();
+    const resolve = vi.spyOn(harness.ctx.secrets, "resolve");
+    await setupPlugin(harness);
+    const issue = await seedIssue(harness, { companyId: "co-1", title: "Self-hosted" });
+
+    await harness.emit(
+      "agent.run.started",
+      { agentId: "ag-1", runId: "run-1", issueId: issue.id },
+      { companyId: "co-1" }
+    );
+
+    expect(resolve).not.toHaveBeenCalled();
   });
 });
