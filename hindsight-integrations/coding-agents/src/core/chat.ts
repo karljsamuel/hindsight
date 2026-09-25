@@ -194,6 +194,10 @@ function serialize(
   return next;
 }
 
+/** The `context` of a session write-back when `retainContext` is unset. */
+export const DEFAULT_RETAIN_CONTEXT =
+  "conversation between the user and you (the coding agent): user turns are the user's words and decisions, assistant turns are yours";
+
 /**
  * Live write-back: upsert a running session under a stable document_id, sending only what is new.
  *
@@ -268,7 +272,10 @@ async function writeSession(
   const submit = (content: string, operationId: string, append: boolean) =>
     client.retain(
       content,
-      "coding agent session",
+      // Configured context wins. Extraction reads this to decide whose claim a sentence is, so the
+      // default names both speakers: the previous "coding agent session" said nothing about
+      // authorship and let an assistant's proposal be recorded as the user's decision.
+      stamp?.context ?? DEFAULT_RETAIN_CONTEXT,
       refId,
       // Configured tags first, built-ins last and deduped: `source:chat` and `harness:<id>` are what
       // the documents list filters and draws its agent logo from, so a template cannot displace them.
