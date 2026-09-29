@@ -27,10 +27,11 @@ describe("HARNESS_NAMES", () => {
         "qwen-code",
         "factory-droid",
         "zcode",
+        "traecode",
         "kimi-code",
       ])
     );
-    expect(HARNESS_NAMES).toHaveLength(19);
+    expect(HARNESS_NAMES).toHaveLength(20);
   });
 
   // Family guard: a new harness that lands without a Docker E2E setup is never driven through its
@@ -39,7 +40,9 @@ describe("HARNESS_NAMES", () => {
   // showed it.
   it("gives every installable harness a Docker E2E setup and image", () => {
     // Antigravity's harness E2E is covered separately (see e2e/harnesses.ts).
-    const exempt = new Set(["antigravity-cli"]);
+    // TraeCode is the agent inside the TRAE desktop IDE, with no documented headless mode a
+    // container could drive; its hook wire is covered by journal-harnesses.test.ts instead.
+    const exempt = new Set(["antigravity-cli", "traecode"]);
     const root = fileURLToPath(new URL("../..", import.meta.url));
     const setups = new Set(ALL_HARNESS_SETUPS.map((setup) => setup.name));
     for (const name of HARNESS_NAMES.filter((n) => !exempt.has(n))) {

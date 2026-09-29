@@ -149,6 +149,7 @@ describe("every mcp-server.js registration names a harness", () => {
   /** Modules that reference the binary WITHOUT registering it, and why. */
   const EXEMPT: Record<string, string> = {
     "mcp-server.ts": "the server itself — it READS the variable, it does not register anything",
+    "core/util.ts": "isOurMcpEntry only RECOGNISES an existing registration, it writes none",
   };
 
   /**

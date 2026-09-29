@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,6 +7,29 @@ import { buildSessionStartContext, runSessionStartHook } from "./session-start";
 import { resolveConfig } from "./config";
 import { repoNameOf } from "./git";
 import { HOOK_HARNESSES } from "../harness/hook-lifecycle";
+import type { RawConfig } from "./config";
+
+/** The SessionStart event `runSessionStartHook` reads from fd 0; every other read stays real. */
+let stdin = "";
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    readFileSync: (target: unknown, ...rest: unknown[]) =>
+      target === 0 ? stdin : (actual.readFileSync as (...a: unknown[]) => unknown)(target, ...rest),
+  };
+});
+
+/** Unset = the real config loader; set = what `runSessionStartHook` resolves for this test. */
+let rawConfig: RawConfig | undefined;
+vi.mock("./config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./config")>();
+  return {
+    ...actual,
+    loadConfig: (...a: Parameters<typeof actual.loadConfig>) =>
+      rawConfig ? actual.resolveConfig(rawConfig) : actual.loadConfig(...a),
+  };
+});
 
 /** Default roster the mock client returns; asserted on by name below. */
 const listPagesOk = async () => ({ items: [{ id: "p1", name: "Component map" }] });
@@ -374,6 +397,47 @@ describe("runSessionStartHook anti-recursion guard", () => {
     // proves the guard fired first.
     await runSessionStartHook(HOOK_HARNESSES["claude-code"].sessionStart, makeClient);
     expect(makeClient).not.toHaveBeenCalled();
+  });
+});
+
+/** A host's per-repo MCP registration (TraeCode's) runs only once memory is live for the repo, and
+ *  its hint reaches the user through the session banner. */
+describe("runSessionStartHook host MCP registration", () => {
+  let repo: string;
+  const run = async (cfg: RawConfig) => {
+    rawConfig = { autoSeed: false, autoUpdate: false, ...cfg };
+    stdin = JSON.stringify({ cwd: repo, session_id: `sess-${repo.split("/").pop()}` });
+    const ensureMcpRegistration = vi.fn(() => "enable workspace MCP");
+    const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+    try {
+      await runSessionStartHook(
+        { ...HOOK_HARNESSES.traecode.sessionStart, ensureMcpRegistration },
+        () => ({ listPages: listPagesOk }) as never
+      );
+      return { ensureMcpRegistration, out: write.mock.calls.map((c) => String(c[0])).join("") };
+    } finally {
+      write.mockRestore();
+    }
+  };
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), "hs-ss-mcp-"));
+    execFileSync("git", ["init", "-q", repo]);
+  });
+  afterEach(() => {
+    rawConfig = undefined;
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it("registers for a live repo and shows the hint in the banner", async () => {
+    const { ensureMcpRegistration, out } = await run({});
+    expect(ensureMcpRegistration).toHaveBeenCalledWith(repo);
+    expect(JSON.parse(out).systemMessage).toContain("enable workspace MCP");
+  });
+
+  it("does not register for a repo that is not opted in", async () => {
+    const { ensureMcpRegistration } = await run({ optInOnly: true });
+    expect(ensureMcpRegistration).not.toHaveBeenCalled();
   });
 });
 

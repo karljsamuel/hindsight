@@ -67,7 +67,8 @@ export interface HookSpec {
   requireCwd?: boolean;
   /** Record this prompt in the session's own turn journal (core/turn-journal.ts). Set ONLY by the
    *  harnesses whose host keeps no durable transcript, because for them the journal IS the
-   *  transcript their Stop hook retains — see the ZCode entry in harness/hook-lifecycle.ts. */
+   *  transcript their Stop hook retains — see the ZCode and TraeCode entries in
+   *  harness/hook-lifecycle.ts. */
   journalPrompt?: boolean;
   /** Wrap injected context (and an optional user-facing notice) in the harness's native
    *  hook-output schema. Harnesses whose schema has no user-visible channel ignore `notice`. */

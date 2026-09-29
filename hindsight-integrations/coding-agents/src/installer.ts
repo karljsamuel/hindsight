@@ -45,7 +45,21 @@ import { HOOK_HARNESSES, type HookHarnessName } from "./harness/hook-lifecycle";
 import { importLocalHistory } from "./core/history";
 import { detectLlm, hasRustToolchain, hasUvx, type LlmChoice } from "./core/daemon";
 import { readLegacyEndpoint } from "./core/legacy";
-import { SKILL_DIRS } from "./core/skill-dirs";
+import { isOurMcpEntry } from "./core/util";
+import { SKILL_DIRS, resolveSkillDirs, traecodeDotDirName } from "./core/skill-dirs";
+import {
+  enableWorkspaceMcpSetting,
+  gateStateFileFor,
+  ensureWorkspaceMcpEnabled,
+  markWorkspaceMcpEnabled,
+  registerTraecodeWorkspaceMcp,
+  removeTraecodeWorkspaceMcpEntry,
+  traecodeUserDataDir,
+  traecodeWorkspaceStorageDir,
+  traecodeUserSettingsPath,
+  removeWorkspaceMcpEnabledKeys,
+  workspaceMcpGateState,
+} from "./core/traecode-mcp";
 import { formatUsageReport, readUsage } from "./core/usage";
 import { createInstallerUi, type SelectOption } from "./install-ui";
 
@@ -91,6 +105,9 @@ export interface InstallCtx {
   hasRust?: () => boolean;
   /** Reads an old per-agent plugin's endpoint; injectable for tests. */
   readLegacy?: (home: string, prefer: readonly string[]) => ReturnType<typeof readLegacyEndpoint>;
+  /** The raw CLI arguments after the command word — harness installers read flags off this
+   *  (e.g. traecode's --enable-workspace-mcp) without each one re-parsing argv. */
+  args?: readonly string[];
   log?: (m: string) => void;
   /** Styles an interactive readLineSync prompt (the CLI passes the InstallerUi rail style). */
   promptStyle?: (q: string) => string;
@@ -239,23 +256,6 @@ const mcpServerEntry = (
   env: { HINDSIGHT_MCP_HARNESS: harness },
 });
 
-/** Name ownership alone is insufficient: users can legitimately register another server as
- * `hindsight`. Match the exact script shape this package has emitted under its source, npm, and
- * staged directory names; an incidental "coding-agents" string must not grant ownership. */
-function isOurMcpEntry(entry: unknown): boolean {
-  if (!entry || typeof entry !== "object") return false;
-  const candidate = entry as { command?: unknown; args?: unknown };
-  if (candidate.command !== "node" || !Array.isArray(candidate.args)) return false;
-  const script = candidate.args[0];
-  if (typeof script !== "string") return false;
-  const parts = script.replaceAll("\\", "/").split("/").filter(Boolean);
-  return (
-    parts.at(-1) === "mcp-server.js" &&
-    parts.at(-2) === "dist" &&
-    (parts.at(-3) === "coding-agents" || parts.at(-3) === "hindsight-coding-agents")
-  );
-}
-
 /** Install/uninstall consume the same lifecycle declaration as the runtime entrypoints. Keeping
  * event names and command files here would allow a host to run a different lifecycle than it installs. */
 function mergeHarnessHooks(
@@ -302,7 +302,7 @@ function stripHarnessHooks(hooks: Record<string, any>, harness: HookHarnessName)
 /** This host's skills directory, from the map core/skill-sync.ts also reads — see SKILL_DIRS for
  *  why the two sides must not keep separate copies of these paths. */
 function skillsBaseFor(c: InstallCtx, harness: string): string {
-  const parts = SKILL_DIRS[harness];
+  const parts = resolveSkillDirs(harness, c.home);
   if (!parts) throw new Error(`${harness} installs a skill but names no directory in SKILL_DIRS`);
   return join(c.home, ...parts);
 }
@@ -933,6 +933,10 @@ export function flagValueArgs(args: string[], names: string[]): Set<string> {
 }
 
 const CONFIG_RELATIVE = [".hindsight", "coding-agent.json"];
+/** The runtime resolves its config as HINDSIGHT_CONFIG || ~/.hindsight/coding-agent.json
+ *  (core/config.ts CONFIG_PATH); every installer read/write must honor the same override. */
+const hindsightConfigPath = (c: InstallCtx): string =>
+  process.env.HINDSIGHT_CONFIG || join(c.home, ...CONFIG_RELATIVE);
 
 /**
  * Ask which of the three connection modes to use, once.
@@ -1023,10 +1027,9 @@ function configureServer(c: InstallCtx, args: string[], installing: readonly str
     c.log?.(`unknown --server "${explicit}" — expected one of: ${SERVER_MODES.join(", ")}`);
     return false;
   }
-  // The runtime resolves its config as HINDSIGHT_CONFIG || ~/.hindsight/coding-agent.json
-  // (core/config.ts CONFIG_PATH). The wizard must honor the same override, or a user with that
-  // var set would be configured into a file their sessions never read.
-  const configPath = process.env.HINDSIGHT_CONFIG || join(c.home, ...CONFIG_RELATIVE);
+  // Same override as the runtime, or a user with HINDSIGHT_CONFIG set would be configured into a
+  // file their sessions never read.
+  const configPath = hindsightConfigPath(c);
   const existing = readJson(configPath);
   const alreadyConfigured = !!(existing.serverMode || existing.apiUrl);
 
@@ -2011,6 +2014,249 @@ const zcode: HarnessInstaller = {
   },
 };
 
+/**
+ * TRAE splits its config across two roots: a dot-dir holding hooks.json/sandbox.json (and the
+ * skills root), and the app's Electron userData dir holding per-window storage (`User/
+ * workspaceStorage`; a `~/.trae-cn/mcp.json` is never read). Both roots are edition-branded: the
+ * CN build uses `~/.trae-cn` / "Trae CN", the international build `~/.trae` / "Trae", so every
+ * path resolves by probing for the brand dir that actually exists and falling back to the CN
+ * names (see traecodeDotDirName / traecodeUserDataDir).
+ */
+const traecodeMcpPath = (c: InstallCtx): string =>
+  join(traecodeUserDataDir(c.home), "User", "mcp.json");
+
+/** Remove OUR stale user-level MCP entry from `<userData>/User/mcp.json` (see the harness docs
+ *  for why it must not exist), leaving foreign entries and the rest of the document alone, and
+ *  deleting the file when nothing but our entry was in it. Returns whether anything was removed.
+ *  Never throws. */
+function removeTraecodeUserMcpEntry(c: InstallCtx): boolean {
+  try {
+    const mcpPath = traecodeMcpPath(c);
+    if (!existsSync(mcpPath)) return false;
+    const mcp = readJson(mcpPath);
+    if (!isOurMcpEntry(mcp.mcpServers?.hindsight)) return false;
+    delete mcp.mcpServers.hindsight;
+    if (Object.keys(mcp.mcpServers).length) writeJson(mcpPath, mcp);
+    else rmSync(mcpPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Trae gates workspace-level MCP files behind `trae.mcp.enableWorkspaceMcp` (global, default
+ * false) — without it the per-repo `.trae/mcp.json` this install relies on is never read and
+ * hindsight's MCP tools stay hidden. Flipping a global setting is the user's call, so it is
+ * asked HERE, on the installer's TTY: `install` is idempotent and re-run often, and the gate
+ * state makes the prompt self-silencing once answered. Non-interactive runs (CI, scripts, the
+ * test suite) print the manual step and touch nothing — a global setting must never flip
+ * without a human; `--enable-workspace-mcp` is that human, up front.
+ */
+function ensureTraecodeWorkspaceMcpGate(c: InstallCtx): void {
+  const settingsPath = traecodeUserSettingsPath(c.home);
+  if (workspaceMcpGateState(settingsPath) === "on") return;
+  const ask =
+    "\n" +
+    "  Trae ignores per-repo MCP configs until workspace MCP is enabled, which keeps\n" +
+    "  hindsight's MCP tools hidden. Enable it globally now? (one-time setting)\n";
+  const skipNote =
+    '  Skipped. Enable later in Trae settings (search "enableWorkspaceMcp") or re-run with\n' +
+    "  --enable-workspace-mcp.";
+  if (!(c.args ?? []).includes("--enable-workspace-mcp")) {
+    if (c.interactive !== true) {
+      c.log?.(`${ask}  ${skipNote}`);
+      return;
+    }
+    const answer = readLineSync(c, `${ask}  Enable workspace MCP? [Y/n]: `).trim().toLowerCase();
+    if (answer === "n" || answer === "no") {
+      c.log?.(skipNote);
+      return;
+    }
+  }
+  if (enableWorkspaceMcpSetting(settingsPath)) {
+    // The hooks run from the staged runtime (c.dist), not from this installer's own copy of the
+    // package, so the witness goes where THEY look for it.
+    markWorkspaceMcpEnabled({ stateFile: gateStateFileFor(c.dist) });
+    c.log?.(
+      `traecode: workspace MCP enabled in ${settingsPath} — restart Trae windows to pick it up`
+    );
+  } else {
+    c.log?.(
+      `traecode: could not update ${settingsPath} (comments or unreadable JSON) — set\n` +
+        `  "trae.mcp.enableWorkspaceMcp": true in Trae settings instead.`
+    );
+  }
+}
+
+/**
+ * TraeCode (TRAE CN's agent) keeps plain JSON files under `~/.trae-cn/`, so like Factory Droid the
+ * installer needs no CLI round-trip:
+ *
+ * - `hooks.json` - user-level hook registrations. TraeCode speaks Claude Code's hook protocol and
+ *   nests the event map under a top-level `hooks` key (Claude's settings.json shape), NOT at the
+ *   top level the way Droid's hooks.json is read. The host also writes and expects a top-level
+ *   `version` field, so the installer seeds it at 1 when absent and leaves it alone otherwise.
+ * - `skills/` - the companion skill, in TraeCode's own user-level root (see SKILL_DIRS).
+ * - `sandbox.json` - `filesystem.readWrite` rules for `~/.hindsight` (logs, config — without them
+ *   the hooks fail silently, verified on a live install) and for Trae's per-window storage DBs
+ *   (`<userData>/User/workspaceStorage`), which the SessionStart hook seeds with the workspace's
+ *   MCP enable switch (core/traecode-mcp.ts).
+ *
+ * Deliberately NOT touched: the user-level MCP file (`<userData>/User/mcp.json`). Trae launches
+ * user-level servers with the ELECTRON process's cwd (home), so a hindsight entry there is wrong
+ * in every configuration — with `optInOnly` it self-disables (zero tools), without it the tools
+ * resolve the HOME bank instead of the repo's. The only correct registration is per-repo
+ * `<repo>/.trae/mcp.json`, which install pre-seeds and the SessionStart hook tops up
+ * (core/traecode-mcp.ts); install migrates a stale user-level entry left by earlier versions
+ * away (ours only — a foreign `hindsight` entry is the user's own server and is never touched).
+ *
+ * TraeCode keeps sessions in an encrypted local DB or the cloud — there is no transcript file — so
+ * the journal-based lifecycle (see HOOK_HARNESSES.traecode) is the whole write-back path.
+ */
+const traecode: HarnessInstaller = {
+  name: "traecode",
+  detect: (c) => existsSync(join(c.home, traecodeDotDirName(c.home))) || onPath("trae"),
+  install(c) {
+    const hooksPath = join(c.home, traecodeDotDirName(c.home), "hooks.json");
+    const doc = readJson(hooksPath);
+    doc.version = doc.version ?? 1;
+    const hooks = (doc.hooks = doc.hooks ?? {});
+    mergeHarnessHooks(hooks, "traecode", c.dist);
+    writeJson(hooksPath, doc);
+    c.log?.(`traecode: hooks merged into ${hooksPath}`);
+    installSkill(c, "traecode");
+
+    // Migration: installs before 2026-09 registered the MCP server at the user level, where
+    // Trae's home-directory cwd breaks it (see the harness docs). The per-repo `.trae/mcp.json`
+    // the installer and SessionStart hook maintain is the only registration — drop the stale entry.
+    if (removeTraecodeUserMcpEntry(c)) {
+      c.log?.(
+        `traecode: stale user-level MCP entry removed from ${traecodeMcpPath(c)} — per-repo\n` +
+          "  .trae/mcp.json files register the server instead"
+      );
+    }
+
+    // TraeCode runs every hook inside its sandbox; the profile is generated per session from the
+    // defaults plus the user's `~/.trae-cn/sandbox.json` rules. The defaults cover network and the
+    // journal's tmpdir but NOT `~/.hindsight` (logs, config), so without this rule the hooks fail
+    // silently (exit 0, zero effect) and the only workaround would be running hooks unsandboxed.
+    // The per-window storage DBs get the same treatment: the SessionStart hook seeds the
+    // workspace's MCP enable switch there (core/traecode-mcp.ts).
+    const sandboxPath = join(c.home, traecodeDotDirName(c.home), "sandbox.json");
+    const sandbox = readJson(sandboxPath);
+    const fsRules = (sandbox.filesystem = sandbox.filesystem ?? {});
+    const readWrite = (fsRules.readWrite = fsRules.readWrite ?? []);
+    const needed = [join(c.home, ".hindsight"), traecodeWorkspaceStorageDir(c.home)];
+    let sandboxChanged = false;
+    for (const dir of needed) {
+      if (!readWrite.includes(dir)) {
+        readWrite.push(dir);
+        sandboxChanged = true;
+      }
+    }
+    if (sandboxChanged) {
+      writeJson(sandboxPath, sandbox);
+      c.log?.(`traecode: sandbox readWrite rules added (${needed.join(", ")})`);
+    }
+
+    // Pre-seed what the SessionStart hook would otherwise write per session: the per-repo MCP
+    // registration and the workspace enable switch for every repo in mapPathToBank. Trae's hook
+    // sandbox denies file creation in the workspace and (observed live 2026-09-21) drops
+    // sandbox.json rules targeting Trae's own storage, so on stock installs both hook writes
+    // fail — the installer runs unsandboxed and lands them. Because the hook checks before
+    // writing, a pre-seeded repo turns every later session into a read-only no-op.
+    const config = readJson(hindsightConfigPath(c));
+    const repos = Object.keys(config.mapPathToBank ?? {}).sort();
+    if (repos.length) {
+      const written: string[] = [];
+      const current: string[] = [];
+      const skipped: string[] = [];
+      let seeded = 0;
+      for (const repo of repos) {
+        // A map entry whose directory is gone must not grow a phantom `.trae` tree via mkdir -p.
+        if (!existsSync(repo)) {
+          skipped.push(repo);
+          continue;
+        }
+        const outcome = registerTraecodeWorkspaceMcp(repo, { home: c.home, dist: c.dist });
+        if (outcome === "registered") written.push(repo);
+        else if (outcome === "current") current.push(repo);
+        else skipped.push(repo);
+        if (ensureWorkspaceMcpEnabled(repo, { home: c.home }) !== "failed") seeded++;
+      }
+      c.log?.(
+        `traecode: per-repo MCP registration — ${written.length} written, ${current.length} ` +
+          `already current, ${skipped.length} skipped across ${repos.length} opted-in repo(s); ` +
+          `enable switch on for ${seeded}`
+      );
+      if (written.length) c.log?.(`  registered: ${written.join(", ")}`);
+      if (skipped.length) {
+        c.log?.(
+          `  skipped (missing repo, no dist build, or a foreign hindsight entry): ` +
+            skipped.join(", ")
+        );
+      }
+      // A freshly seeded switch takes effect in the NEXT window (Trae holds the running one's
+      // table in memory); if a repo was opened before this install, one panel flip covers it.
+      if (written.length) {
+        c.log?.(
+          "  new registrations appear in the next Trae window — if a repo's server still shows\n" +
+            "  disabled in the MCP panel, flip it on once there"
+        );
+      }
+    }
+
+    ensureTraecodeWorkspaceMcpGate(c);
+  },
+  uninstall(c) {
+    const hooksPath = join(c.home, traecodeDotDirName(c.home), "hooks.json");
+    if (existsSync(hooksPath)) {
+      const doc = readJson(hooksPath);
+      if (doc.hooks) {
+        stripHarnessHooks(doc.hooks, "traecode");
+        if (!Object.keys(doc.hooks).length) delete doc.hooks;
+      }
+      // A file holding nothing but `version` carries no information TraeCode needs: remove it
+      // rather than leave a husk. Foreign hooks keep the file (and the field) alive.
+      if (Object.keys(doc).length > 1) writeJson(hooksPath, doc);
+      else rmSync(hooksPath);
+    }
+    if (removeTraecodeUserMcpEntry(c)) {
+      c.log?.(`traecode: MCP entry removed from ${traecodeMcpPath(c)}`);
+    }
+    // The per-repo registrations the installer (or the hook) wrote: drop our entry from every
+    // opted-in repo's .trae/mcp.json, deleting the file when nothing remains in it. Foreign
+    // servers and foreign "hindsight" entries are never touched — same ownership check as the
+    // hook's. Missing repos skip silently; the storage sweep below still catches their switches.
+    const config = readJson(hindsightConfigPath(c));
+    const repoEntries = Object.keys(config.mapPathToBank ?? {}).sort();
+    const cleaned = repoEntries.filter((repo) =>
+      removeTraecodeWorkspaceMcpEntry(repo, { home: c.home })
+    );
+    if (cleaned.length) {
+      c.log?.(`traecode: per-repo MCP registration removed from:\n  ${cleaned.join("\n  ")}`);
+    }
+    const sandboxPath = join(c.home, traecodeDotDirName(c.home), "sandbox.json");
+    if (existsSync(sandboxPath)) {
+      const sandbox = readJson(sandboxPath);
+      const readWrite = sandbox.filesystem?.readWrite;
+      if (Array.isArray(readWrite)) {
+        const ours = [join(c.home, ".hindsight"), traecodeWorkspaceStorageDir(c.home)];
+        const filtered = readWrite.filter((p: string) => !ours.includes(p));
+        if (filtered.length !== readWrite.length) {
+          sandbox.filesystem.readWrite = filtered;
+          writeJson(sandboxPath, sandbox);
+        }
+      }
+    }
+    // The per-workspace enable switches the installer/hook seeded — an uninstall leaves no storage behind.
+    removeWorkspaceMcpEnabledKeys(c.home);
+    uninstallSkill(c, "traecode");
+    c.log?.(`traecode: hooks + MCP registration + skill removed`);
+  },
+};
+
 export const INSTALLERS: HarnessInstaller[] = [
   opencode,
   opencode2,
@@ -2031,6 +2277,7 @@ export const INSTALLERS: HarnessInstaller[] = [
   dsh,
   factoryDroid,
   zcode,
+  traecode,
 ];
 
 // The public executable was renamed from Gemini CLI to Antigravity's `agy`. Keep the
@@ -2086,6 +2333,7 @@ function importConversations(harness: string, ctx: InstallCtx): void {
 export function run(argv: string[], ctxIn: InstallCtx): number {
   let ctx = ctxIn;
   const [command, ...rawArgs] = argv;
+  ctx = { ...ctx, args: rawArgs };
   // `--import-conversations` backfills this repo's PAST sessions for the harness being installed —
   // the migration path off the older per-agent plugins, whose banks the server cannot merge into
   // this one. Opt-in: it re-extracts history and therefore costs tokens.
@@ -2128,7 +2376,7 @@ export function run(argv: string[], ctxIn: InstallCtx): number {
         `       hindsight-coding-agents update\n` +
         `       hindsight-coding-agents stats\n` +
         `       [--server cloud|self-hosted|daemon] [--api-url <url>] [--api-token <token>]\n` +
-        `       [--import-conversations]\n` +
+        `       [--import-conversations] [--enable-workspace-mcp]\n` +
         `  all      every agent detected on this machine\n` +
         `  harness  ${INSTALLERS.map((i) => i.name).join(", ")} (agy aliases antigravity-cli)\n` +
         `  update   re-stage the runtime only, leaving every host config untouched\n` +

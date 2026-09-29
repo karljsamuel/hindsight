@@ -12,6 +12,8 @@
  * credential is absent is SKIPPED, never failed — no one has all nine subscriptions.
  *
  * Antigravity is intentionally absent: its harness E2E is covered separately.
+ * TraeCode is absent too: it is the agent inside the TRAE desktop IDE, with no documented headless mode a
+ * container could drive. Its hook wire is covered by src/journal-harnesses.test.ts instead.
  */
 import { homedir } from "node:os";
 import { join } from "node:path";
