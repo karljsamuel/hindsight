@@ -107,11 +107,13 @@ export async function ingestChats(
   return failures;
 }
 
-/** Capability probe for the append path. Any failure answers "no": a write-back must never be lost
- *  because we couldn't work out whether the cheaper form of it was available. */
+/** Capability probe for the append path. A failed server-version probe answers "no": appending
+ *  without `operation_id` dedupe can double-write, so doubt falls back to a full replace. A failed
+ *  bank-config probe answers "yes" (see HindsightClient.supportsAppendRetain): banks store document
+ *  text by default, and only an explicit `store_document_text: false` rules append out (#4613). */
 async function supportsAppend(client: HindsightClient): Promise<boolean> {
   try {
-    return await client.supportsIdempotentRetain();
+    return await client.supportsAppendRetain();
   } catch {
     return false;
   }

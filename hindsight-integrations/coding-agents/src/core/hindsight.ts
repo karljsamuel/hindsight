@@ -477,6 +477,24 @@ export class HindsightClient {
   }
 
   /**
+   * Whether a session write-back may use `update_mode="append"`: the server must dedupe by
+   * `operation_id` AND the bank must keep document text, or the server rejects the append in the
+   * background (#4613). Only an explicit `store_document_text: false` answers "no" — an unreachable
+   * or unparseable config assumes the default (stored), so a flaky probe never downgrades appends.
+   */
+  async supportsAppendRetain(): Promise<boolean> {
+    if (!(await this.supportsIdempotentRetain())) return false;
+    try {
+      const r = await this.req("GET", this.bankUrl("/config"));
+      if (!r.ok) return true;
+      const j = (await r.json()) as { config?: { store_document_text?: boolean } };
+      return j.config?.store_document_text !== false;
+    } catch {
+      return true;
+    }
+  }
+
+  /**
    * Every document_id currently in the bank under a strategy tag (e.g. `source:git`), paginated into a
    * Set. Powers the incremental git-sync's "what's already ingested?" check — since git commits are stored
    * with document_id `git:<sha>`, the returned Set lets a caller diff a ref's commits against memory.
