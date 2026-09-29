@@ -1562,6 +1562,13 @@ class Budget(str, Enum):
     HIGH = "high"
 
 
+#: Budget a mental-model refresh runs at when its trigger names none. Not LOW: a
+#: refresh writes a whole document and, with ``exclude_mental_models``, has to read
+#: raw facts before it can, so halving ``reflect_max_iterations`` is exactly the wrong
+#: default for the heaviest reflect there is (#4856).
+DEFAULT_MENTAL_MODEL_REFRESH_BUDGET = Budget.MID
+
+
 def _resolve_thinking_budget(config_dict: dict, budget: "Budget | None", max_tokens: int) -> int:
     """
     Map a Budget enum level to the integer thinking_budget passed to retrieval.
@@ -15803,7 +15810,7 @@ class MemoryEngine(MemoryEngineInterface):
         )
 
         # Reflect options an operator can default per bank: caller arg (the reflect
-        # request, or the mental model's trigger) → bank reflect_default_options →
+        # request) → bank reflect_default_options →
         # the shipped default. Unlike the recall budgets these have no flat config
         # key of their own — they are reflect's own knobs, so they live together in
         # one object shaped like the request fields that carry them (#4483).
@@ -17797,10 +17804,25 @@ class MemoryEngine(MemoryEngineInterface):
         recall_include_chunks_override = trigger_data.get("include_chunks")
         recall_max_tokens_override = trigger_data.get("recall_max_tokens")
         recall_chunks_max_tokens_override = trigger_data.get("recall_chunks_max_tokens")
+        # A refresh resolves these itself instead of leaving them None for reflect to
+        # fill in, because reflect would fill them from the bank's
+        # ``reflect_default_options`` — which is tuned for answering a question, not for
+        # writing a document. The trigger (and, merged into it at creation time, the
+        # bank's ``knowledge_page_default_trigger``) is the whole story for a refresh, so
+        # the shipped fallbacks live here and reflect is handed explicit values.
         reflect_search_observations_max_tokens_override = trigger_data.get("reflect_search_observations_max_tokens")
+        if reflect_search_observations_max_tokens_override is None:
+            reflect_search_observations_max_tokens_override = DEFAULT_OBSERVATIONS_TOOL_MAX_TOKENS
         reflect_search_observations_include_entities_override = trigger_data.get(
             "reflect_search_observations_include_entities"
         )
+        if reflect_search_observations_include_entities_override is None:
+            reflect_search_observations_include_entities_override = True
+        # Refresh is the heaviest reflect in routine use, so it does not inherit the
+        # ad-hoc reflect default of LOW (which halves reflect_max_iterations and can run
+        # the loop out before the raw facts are read) — see #4856.
+        raw_budget = trigger_data.get("budget")
+        refresh_budget = Budget(raw_budget) if raw_budget else DEFAULT_MENTAL_MODEL_REFRESH_BUDGET
         requested_mode: RefreshMode = trigger_data.get("mode") or "full"
 
         current_content = (mental_model.get("content") or "").strip()
@@ -17905,6 +17927,7 @@ class MemoryEngine(MemoryEngineInterface):
             recall_chunks_max_tokens_override=recall_chunks_max_tokens_override,
             reflect_search_observations_max_tokens_override=reflect_search_observations_max_tokens_override,
             reflect_search_observations_include_entities_override=reflect_search_observations_include_entities_override,
+            budget=refresh_budget,
             # The refresh stores a document, so the agent states its structure and
             # the markdown is rendered from it. The model never writes the markdown
             # that gets persisted, and nothing has to read markdown back to find
