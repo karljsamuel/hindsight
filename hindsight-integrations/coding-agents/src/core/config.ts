@@ -114,6 +114,10 @@ export interface RawConfig {
    *  server decides when to give up, not an arbitrary client deadline (#3590). Unset, it inherits
    *  an explicitly-raised `reflectTimeoutMs` — a user who raised that meant "let reflect run". */
   reflectToolTimeoutMs?: number;
+  /** Retrieval timeout for autoInject "pages"/"recall" (default 7000), and the shared budget for
+   *  the page-search -> recall fallback after a reflect timeout/5xx. On hook harnesses, the full
+   *  reflect + fallback must fit the host's prompt-hook timeout (30s by default). */
+  injectTimeoutMs?: number;
   /** Reflect budget for the `hindsight_reflect` tool: "low" | "mid" | "high" (default "high").
    *  Drop to "mid"/"low" on a large bank where high-budget synthesis exceeds the server's wall
    *  timeout. The automatic session-start reflect is NOT affected — it always uses "low" to fit
@@ -293,6 +297,7 @@ export interface Config {
   maxParallelRetains: number;
   reflectTimeoutMs: number;
   reflectToolTimeoutMs: number;
+  injectTimeoutMs: number;
   reflectBudget: "low" | "mid" | "high";
   autoInject: AutoInject;
   pageSearchLimit: number;
@@ -452,6 +457,8 @@ function resolveCustomPages(raw: RawConfig["customPages"]): CustomPagesConfig {
 export const DEFAULT_REFLECT_TIMEOUT_MS = 20_000;
 /** Default timeout for the agent-invoked `hindsight_reflect` tool — see RawConfig.reflectToolTimeoutMs. */
 export const DEFAULT_REFLECT_TOOL_TIMEOUT_MS = 330_000;
+/** Default retrieval budget for automatic injection — see RawConfig.injectTimeoutMs. */
+export const DEFAULT_INJECT_TIMEOUT_MS = 7_000;
 
 const REFLECT_BUDGETS = ["low", "mid", "high"] as const;
 
@@ -567,6 +574,7 @@ export function resolveConfig(raw: RawConfig = {}): Config {
     reflectToolTimeoutMs:
       raw.reflectToolTimeoutMs ||
       Math.max(raw.reflectTimeoutMs || 0, DEFAULT_REFLECT_TOOL_TIMEOUT_MS),
+    injectTimeoutMs: raw.injectTimeoutMs || DEFAULT_INJECT_TIMEOUT_MS,
     reflectBudget: resolveReflectBudget(raw),
     autoInject: resolveAutoInject(raw),
     pageSearchLimit: raw.pageSearchLimit || DEFAULT_PAGE_SEARCH_LIMIT,
@@ -697,6 +705,7 @@ const ENV_KEYS = {
   maxParallelRetains: "HINDSIGHT_MAX_PARALLEL_RETAINS",
   reflectTimeoutMs: "HINDSIGHT_REFLECT_TIMEOUT_MS",
   reflectToolTimeoutMs: "HINDSIGHT_REFLECT_TOOL_TIMEOUT_MS",
+  injectTimeoutMs: "HINDSIGHT_INJECT_TIMEOUT_MS",
   reflectBudget: "HINDSIGHT_REFLECT_BUDGET",
   autoInject: "HINDSIGHT_AUTO_INJECT",
   pageSearchLimit: "HINDSIGHT_PAGE_SEARCH_LIMIT",
@@ -743,6 +752,7 @@ const ENV_NUMBERS = new Set<keyof RawConfig>([
   "maxParallelRetains",
   "reflectTimeoutMs",
   "reflectToolTimeoutMs",
+  "injectTimeoutMs",
   "pageSearchLimit",
   "pageRefreshEveryTurns",
   "seedLimit",

@@ -110,6 +110,42 @@ describe("maxParallelRetains", () => {
   });
 });
 
+describe("injectTimeoutMs (#4843)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("defaults to 7s independently of the reflect timeouts", () => {
+    expect(resolveConfig({}).injectTimeoutMs).toBe(7000);
+    expect(
+      resolveConfig({ reflectTimeoutMs: 15000, reflectToolTimeoutMs: 90000 }).injectTimeoutMs
+    ).toBe(7000);
+  });
+
+  it.each([2000, 15000])("honours an explicit %ims budget", (ms) => {
+    expect(resolveConfig({ injectTimeoutMs: ms }).injectTimeoutMs).toBe(ms);
+  });
+
+  it.each([2000, 15000])("reads the numeric %ims environment fallback", (ms) => {
+    vi.stubEnv("HINDSIGHT_INJECT_TIMEOUT_MS", String(ms));
+    expect(readEnvConfig().injectTimeoutMs).toBe(ms);
+    expect(loadConfig({ path: join(root, "missing.json") }).injectTimeoutMs).toBe(ms);
+  });
+
+  it("applies file, harness and bank overrides over the environment fallback", () => {
+    vi.stubEnv("HINDSIGHT_INJECT_TIMEOUT_MS", "15000");
+    writeJson(globalCfg, {
+      injectTimeoutMs: 5000,
+      harnesses: { dsh: { injectTimeoutMs: 2000 } },
+      banks: { slow: { injectTimeoutMs: 12000 } },
+    });
+    expect(loadConfig({ path: globalCfg }).injectTimeoutMs).toBe(5000);
+    const cfg = loadConfig({ path: globalCfg, harness: "dsh" });
+    expect(cfg.injectTimeoutMs).toBe(2000);
+    expect(applyBankConfig(cfg, "slow").cfg.injectTimeoutMs).toBe(12000);
+  });
+});
+
 /**
  * #3590: the hindsight_reflect tool aborted at a hardcoded 120s. The tool's window is now its own
  * knob, defaulting ABOVE the server's 300s reflect wall timeout — and it inherits an explicitly

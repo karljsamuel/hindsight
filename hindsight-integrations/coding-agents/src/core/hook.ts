@@ -86,10 +86,6 @@ interface HookClient {
   readonly bank?: string;
 }
 
-/** Shared deadline for the whole fallback chain (page search, then observation recall) that runs
- *  after a reflect timeout/5xx. Both are retrieval-only endpoints — no LLM — so seconds suffice. */
-const HOOK_FALLBACK_BUDGET_MS = 7_000;
-
 /** How many turns auto-inject may FAIL on before a session gives up on memory. The budget is
  *  turns, not time: each retry costs another full attempt (up to `reflectTimeoutMs` on the
  *  reflect path), so a dead server spends this many turns before every later turn is free. */
@@ -165,9 +161,12 @@ async function injectRecall(
 async function reflectFallback(
   harness: string,
   prompt: string,
-  client: HookClient
+  client: HookClient,
+  timeoutMs: number
 ): Promise<string | null | undefined> {
-  const deadline = Date.now() + HOOK_FALLBACK_BUDGET_MS;
+  // Page search and recall share ONE retrieval budget after reflect fails, rather than each
+  // spending a full injectTimeoutMs and doubling the time added to the host's hook window.
+  const deadline = Date.now() + timeoutMs;
   const remaining = () => Math.max(deadline - Date.now(), 1);
   return (
     (await injectPages(harness, prompt, client, remaining(), "reflect_fallback_pages")) ??
@@ -232,7 +231,7 @@ export async function buildHookOutput(args: {
       harness,
       prompt,
       client,
-      HOOK_FALLBACK_BUDGET_MS,
+      cfg.injectTimeoutMs,
       "inject_pages",
       PAGE_INJECT_LEAD
     );
@@ -248,7 +247,7 @@ export async function buildHookOutput(args: {
       harness,
       prompt,
       client,
-      HOOK_FALLBACK_BUDGET_MS,
+      cfg.injectTimeoutMs,
       "inject_recall",
       RECALL_INJECT_LEAD
     );
@@ -297,7 +296,7 @@ export async function buildHookOutput(args: {
         query: prompt.slice(0, 80),
       });
       if (e instanceof ReflectError && e.fallbackEligible) {
-        fallback = await reflectFallback(harness, prompt, client);
+        fallback = await reflectFallback(harness, prompt, client, cfg.injectTimeoutMs);
         // The fallback body is cached exactly like a reflect answer: injected once, not retried.
         if (fallback) reflectAnswer = fallback;
       }
