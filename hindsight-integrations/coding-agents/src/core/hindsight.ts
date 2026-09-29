@@ -564,6 +564,8 @@ export class HindsightClient {
       manage?: boolean;
       /** Extraction mode for the plugin's own strategies — see RawConfig.retainExtractionMode. */
       extractionMode?: RetainExtractionMode;
+      /** Bank-config fields to add where the bank is silent — see RawConfig.defaultBankConfig. */
+      defaults?: Record<string, unknown>;
     } = {}
   ): Promise<void> {
     if (opts.reset) {
@@ -579,7 +581,8 @@ export class HindsightClient {
       // re-synced to `extractionMode` (#4560). A reset just deleted the bank, so there is nothing to read.
       const manifest = codingBankManifest(
         opts.reset ? undefined : await this.readBankOverrides(),
-        opts.extractionMode
+        opts.extractionMode,
+        opts.defaults
       );
       if (!manifest) {
         this.log(`[bank] ${this.bank} already carries the coding structure — nothing to apply`);
