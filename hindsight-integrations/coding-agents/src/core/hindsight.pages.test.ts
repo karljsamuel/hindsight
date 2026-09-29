@@ -236,6 +236,40 @@ describe("HindsightClient knowledge-page reads", () => {
     expect(calls[0].url).toContain("/knowledge-base/pages/kp-1");
   });
 
+  it("getPage returns the body once, with a dated field the model can judge (#4836)", async () => {
+    stubFetch([], async () => ({
+      id: "p1",
+      name: "Pricing decisions",
+      description: "What has been decided about pricing?",
+      tags: ["type:knowledge-page"],
+      timestamp: "2026-09-17T10:00:00Z",
+      body: "The threshold is compared against the discounted subtotal.",
+      // The API also returns the SAME body with YAML frontmatter on top; passing the response
+      // through handed the model the page twice.
+      markdown:
+        "---\nname: Pricing decisions\n---\nThe threshold is compared against the discounted subtotal.",
+    }));
+    const c = new HindsightClient({ apiUrl: "http://x", bank: "repo-a" });
+    expect(await c.getPage("p1")).toEqual({
+      id: "p1",
+      name: "Pricing decisions",
+      description: "What has been decided about pricing?",
+      tags: ["type:knowledge-page"],
+      last_updated_at: "2026-09-17T10:00:00Z",
+      body: "The threshold is compared against the discounted subtotal.",
+    });
+  });
+
+  it("getPage falls back to the full markdown when a page has no body", async () => {
+    stubFetch([], async () => ({ id: "p2", name: "Empty", markdown: "---\nname: Empty\n---\n" }));
+    const c = new HindsightClient({ apiUrl: "http://x", bank: "repo-a" });
+    expect(await c.getPage("p2")).toEqual({
+      id: "p2",
+      name: "Empty",
+      body: "---\nname: Empty\n---\n",
+    });
+  });
+
   it("searchKnowledgePages sends the client's pageSearchLimit — the tool and the hook share it", async () => {
     const calls: any[] = [];
     stubFetchRouted(calls, [
