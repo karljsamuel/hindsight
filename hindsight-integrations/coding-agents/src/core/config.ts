@@ -15,7 +15,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_SEED_LIMIT } from "./seed";
-import { isOptedIn } from "./bank";
+import { isOptedIn, pathSection } from "./bank";
 import { log } from "./log";
 import {
   DEFAULT_OBSERVATION_SCOPES,
@@ -269,6 +269,13 @@ export interface RawConfig {
    *               "coding-agent::old-name": { "bank": "team::shared" },
    *               "coding-agent::big-mono": { "gitIngest": "full", "retainSessions": false } } */
   banks?: Record<string, Omit<RawConfig, "banks" | "harnesses"> & { bank?: string }>;
+  /** Per-DIRECTORY overrides, keyed by absolute path prefix (`~` allowed; longest prefix wins;
+   *  a linked worktree uses its main checkout's entry). Applied after bank resolution and before
+   *  the `banks.<id>` section, so one entry can send every repo under a directory to another
+   *  server or tenant while each repo keeps its own bank. Bank-resolution fields are ignored here,
+   *  as in `banks`. Example:
+   *    "paths": { "~/work/client-x": { "apiToken": "client-x-key" } } */
+  paths?: Record<string, Omit<RawConfig, "banks" | "harnesses" | "paths">>;
 }
 
 /** Fully-resolved config: every field present. */
@@ -321,6 +328,7 @@ export interface Config {
   retainExtractionMode: RetainExtractionMode;
   observationScopes: ObservationScopes;
   banks: Record<string, Omit<RawConfig, "banks" | "harnesses"> & { bank?: string }>;
+  paths: Record<string, Omit<RawConfig, "banks" | "harnesses" | "paths">>;
   logLevel: "debug" | "info" | "warn" | "error";
   autoUpdate: boolean;
 }
@@ -623,6 +631,7 @@ export function resolveConfig(raw: RawConfig = {}): Config {
         : {},
     observationScopes: resolveObservationScopes(raw.observationScopes),
     banks: raw.banks && typeof raw.banks === "object" ? raw.banks : {},
+    paths: raw.paths && typeof raw.paths === "object" ? raw.paths : {},
     logLevel: ["debug", "info", "warn", "error"].includes(raw.logLevel as string)
       ? (raw.logLevel as "debug" | "info" | "warn" | "error")
       : "info",
@@ -641,10 +650,16 @@ function readRaw(path: string): RawConfig {
   }
 }
 
-/** Shallow-merge b over a; `harnesses` never survives into a layer; `banks` merges by bank id. */
+/** Shallow-merge b over a; `harnesses` never survives into a layer; `banks` merges by bank id and
+ *  `paths` by prefix. */
 function mergeRaw(a: RawConfig, b: RawConfig): RawConfig {
   const { harnesses: _drop, ...flat } = b;
-  return { ...a, ...flat, banks: { ...(a.banks ?? {}), ...(b.banks ?? {}) } };
+  return {
+    ...a,
+    ...flat,
+    banks: { ...(a.banks ?? {}), ...(b.banks ?? {}) },
+    paths: { ...(a.paths ?? {}), ...(b.paths ?? {}) },
+  };
 }
 
 /**
@@ -835,16 +850,30 @@ export function applyBankConfig(
   // before anything creates a bank.
   if (directory !== undefined && !isOptedIn(cfg, directory))
     return { cfg: { ...cfg, disabled: true }, bankId: resolvedId };
+  const byPath = directory === undefined ? undefined : pathSection(cfg, cfg.paths, directory);
+  if (byPath) {
+    // A path entry never renames the bank: only `banks.<id>` may, below.
+    const { bank: _rename, ...rest } = overrideFields(byPath);
+    cfg = { ...cfg, ...resolvePartial(cfg, rest as RawConfig) };
+  }
   const section = cfg.banks[resolvedId];
   if (!section) return { cfg, bankId: resolvedId };
-  const safe: Record<string, unknown> = { ...section };
-  for (const k of BANK_OVERRIDE_EXCLUDED) delete safe[k];
-  delete safe.banks;
+  const safe = overrideFields(section);
   // `bank` renames the destination — single hop, selected by the ORIGINAL resolved id (the
   // target's own banks section, if any, is deliberately NOT consulted: no chaining).
   const bankId = typeof safe.bank === "string" && safe.bank ? (safe.bank as string) : resolvedId;
   delete safe.bank;
   return { cfg: { ...cfg, ...resolvePartial(cfg, safe as RawConfig) }, bankId };
+}
+
+/** An override section minus what it may not set: the resolution/approval fields and the nested
+ *  maps (a section cannot carry sections of its own). */
+function overrideFields(section: object): Record<string, unknown> {
+  const safe: Record<string, unknown> = { ...section };
+  for (const k of BANK_OVERRIDE_EXCLUDED) delete safe[k];
+  delete safe.banks;
+  delete safe.paths;
+  return safe;
 }
 
 /** Resolve just the fields present in `patch`, defaulting against the CURRENT cfg (not the global
@@ -858,5 +887,18 @@ function resolvePartial(cfg: Config, patch: RawConfig): Partial<Config> {
   }
   // The legacy key resolves into a differently-named field, so the loop above can't carry it.
   if ("autoReflect" in patch && !("autoInject" in patch)) out.autoInject = full.autoInject;
+  // `apiUrl` is derived from `serverMode` + `apiPort`, so an override naming any of the three
+  // re-derives all three against the current cfg: `{ serverMode: "daemon" }` alone must also move
+  // the URL to the local daemon, and `{ apiUrl }` under a global daemon mode stays ignored.
+  if ("serverMode" in patch || "apiUrl" in patch || "apiPort" in patch) {
+    const conn = resolveConfig({
+      serverMode: patch.serverMode ?? cfg.serverMode,
+      apiPort: patch.apiPort ?? cfg.apiPort,
+      apiUrl: patch.apiUrl ?? (cfg.serverMode === "daemon" ? undefined : cfg.apiUrl),
+    });
+    out.serverMode = conn.serverMode;
+    out.apiUrl = conn.apiUrl;
+    out.apiPort = conn.apiPort;
+  }
   return out;
 }
