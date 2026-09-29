@@ -2,7 +2,7 @@
 
 Long-term project memory for **coding agents**, backed by [Hindsight](https://vectorize.io/hindsight).
 One package, several agents: a shared reflect-and-inject core with a thin entry point per agent
-(**Claude Code**, **Codex CLI**, **DeepAgents Dcode**, **opencode**, **opencode 2**, **Kilo CLI**, **Cursor CLI**, **GitHub Copilot CLI**, **Grok Build**, **Qwen Code**, **Factory Droid**, **ZCode**, **Antigravity CLI**, **Devin CLI**, **Cline CLI**, **pi**, **Prime Agent**, **DeepSeek Harness**). Ingestion is fully
+(**Claude Code**, **Codex CLI**, **DeepAgents Dcode**, **opencode**, **opencode 2**, **Kilo CLI**, **Cursor CLI**, **GitHub Copilot CLI**, **Grok Build**, **Qwen Code**, **Kimi Code**, **Factory Droid**, **ZCode**, **Antigravity CLI**, **Devin CLI**, **Cline CLI**, **pi**, **Prime Agent**, **DeepSeek Harness**). Ingestion is fully
 automatic — there is no setup command: a repo's git history and conversations flow into its memory
 bank in the background as you work.
 
@@ -160,6 +160,19 @@ Native hooks in `~/.qwen/settings.json`, plus MCP and the companion skill.
 > Recall fires on genuine submissions only — `UserPromptSubmit` also fires on tool-result
 > continuations, so interactive sessions recall once per prompt while headless (`qwen -p`),
 > `serve`, SDK and ACP sessions seed and retain but do not recall.
+
+#### <img src="https://hindsight.vectorize.io/img/harness/kimi-code.svg" alt="" width="20" height="20" /> Kimi Code
+
+```bash
+npx @vectorize-io/hindsight-coding-agents install kimi-code
+```
+
+Native hooks in `~/.kimi-code/config.toml`, plus MCP in `~/.kimi-code/mcp.json` and the companion skill.
+(Hooks and MCP go under `$KIMI_CODE_HOME` instead when it is set.)
+
+> Kimi's SessionStart hook cannot reach the model, so the session briefing is silent there;
+> recalled memory arrives on the first prompt instead, as a `<hook_result>` block. Sessions are
+> retained from every agent's `wire.jsonl` under the session directory, subagents included.
 
 #### <img src="https://hindsight.vectorize.io/img/harness/factory-droid.svg" alt="" width="20" height="20" /> Factory Droid
 

@@ -14,6 +14,7 @@ import { pathToFileURL } from "node:url";
 import { INSTALLERS, MARKER, parseJsonc, run, type InstallCtx } from "./installer";
 import { SKILL_DIRS } from "./core/skill-dirs";
 import { parse as parseToml } from "smol-toml";
+import { HOOK_HARNESSES } from "./harness/hook-lifecycle";
 
 // Every test gets a FRESH temp dir as ctx.home (never the real $HOME) and a stubbed
 // claudeMcp so the real `claude` CLI is never executed. run() is always called with
@@ -193,6 +194,111 @@ describe("claude-code installer", () => {
     run(["install", "claude-code"], ctx);
     run(["uninstall", "claude-code"], ctx);
     expect(readJson(settingsPath(ctx)).hooks).toBeUndefined();
+  });
+});
+
+describe("kimi-code installer", () => {
+  // Parsed as real TOML, so a malformed block fails here rather than in the user's CLI.
+  const hookEntries = (toml: string) =>
+    (parseToml(toml).hooks as Record<string, unknown>[] | undefined) ?? [];
+
+  it("emits ONLY event/command/timeout on every entry", () => {
+    // The load-bearing invariant. Kimi validates [[hooks]] against a strict 4-key schema, and an
+    // unknown key does not drop that ENTRY — it drops EVERY hook in the file, at warning severity
+    // only. A silent total loss of capture, so assert the key set rather than the values.
+    const ctx = makeCtx();
+    expect(run(["install", "kimi-code"], ctx)).toBe(0);
+    const toml = readFileSync(join(ctx.home, ".kimi-code", "config.toml"), "utf8");
+    const ours = toml.slice(toml.indexOf("# HINDSIGHT_CODING_AGENTS_KIMI_START"));
+    const entries = hookEntries(ours);
+    expect(entries).toHaveLength(3);
+    for (const e of entries) {
+      expect(Object.keys(e).sort()).toEqual(["command", "event", "timeout"]);
+    }
+  });
+
+  it("takes its events and timeouts from the lifecycle spec, in seconds", () => {
+    // Seconds here, unlike qwen-code's identically named millisecond field. Reading them off the
+    // spec means a spec change that the runtime honours cannot silently skip the installer.
+    const ctx = makeCtx();
+    expect(run(["install", "kimi-code"], ctx)).toBe(0);
+    const toml = readFileSync(join(ctx.home, ".kimi-code", "config.toml"), "utf8");
+    const ours = toml.slice(toml.indexOf("# HINDSIGHT_CODING_AGENTS_KIMI_START"));
+    const got = hookEntries(ours).map((e) => [e.event, e.timeout]);
+    const want = Object.values(HOOK_HARNESSES["kimi-code"].install).map((h) => [
+      h.event,
+      h.timeout,
+    ]);
+    expect(got).toEqual(want);
+    expect(got.map((g) => g[1])).toEqual([30, 30, 60]);
+  });
+
+  it("preserves a user's own hooks and does not duplicate ours on re-install", () => {
+    const ctx = makeCtx();
+    const path = join(ctx.home, ".kimi-code", "config.toml");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, '[[hooks]]\nevent = "Stop"\ncommand = "their-tool"\ntimeout = 5\n');
+    expect(run(["install", "kimi-code"], ctx)).toBe(0);
+    expect(run(["install", "kimi-code"], ctx)).toBe(0);
+    const toml = readFileSync(path, "utf8");
+    expect(toml).toContain("their-tool");
+    expect(toml.match(/HINDSIGHT_CODING_AGENTS_KIMI_START/g)).toHaveLength(1);
+    expect(toml.match(/kimi-stop-hook\.js/g)).toHaveLength(1);
+  });
+
+  it("registers a stdio MCP server that needs no bearer-token env var", () => {
+    // A hand-written http entry needs HINDSIGHT_API_KEY exported into Kimi's environment, or it
+    // 401s and the tools never appear. Ours is the packaged stdio server, which reads endpoint and
+    // token from ~/.hindsight/coding-agent.json — and it overwrites such an entry.
+    const ctx = makeCtx();
+    const mcpPath = join(ctx.home, ".kimi-code", "mcp.json");
+    mkdirSync(dirname(mcpPath), { recursive: true });
+    writeFileSync(
+      mcpPath,
+      JSON.stringify({
+        mcpServers: {
+          hindsight: { url: "http://old", bearerTokenEnvVar: "HINDSIGHT_API_KEY" },
+          theirs: { url: "http://keep-me" },
+        },
+      })
+    );
+    expect(run(["install", "kimi-code"], ctx)).toBe(0);
+    const mcp = JSON.parse(readFileSync(mcpPath, "utf8"));
+    expect(mcp.mcpServers.theirs.url).toBe("http://keep-me");
+    expect(mcp.mcpServers.hindsight.command).toBe("node");
+    expect(mcp.mcpServers.hindsight.env.HINDSIGHT_MCP_HARNESS).toBe("kimi-code");
+    expect(mcp.mcpServers.hindsight.bearerTokenEnvVar).toBeUndefined();
+    expect(mcp.mcpServers.hindsight.url).toBeUndefined();
+  });
+
+  it("honours KIMI_CODE_HOME, where the CLI and the transcript reader both look", () => {
+    const ctx = makeCtx();
+    const kimiHome = join(ctx.home, "custom-kimi");
+    const original = process.env.KIMI_CODE_HOME;
+    process.env.KIMI_CODE_HOME = kimiHome;
+    try {
+      expect(run(["install", "kimi-code"], ctx)).toBe(0);
+      expect(hookEntries(readFileSync(join(kimiHome, "config.toml"), "utf8"))).toHaveLength(3);
+      expect(existsSync(join(kimiHome, "mcp.json"))).toBe(true);
+      expect(existsSync(join(ctx.home, ".kimi-code", "config.toml"))).toBe(false);
+    } finally {
+      if (original === undefined) delete process.env.KIMI_CODE_HOME;
+      else process.env.KIMI_CODE_HOME = original;
+    }
+  });
+
+  it("uninstall removes our block, our MCP entry, and nothing else", () => {
+    const ctx = makeCtx();
+    const path = join(ctx.home, ".kimi-code", "config.toml");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, '[[hooks]]\nevent = "Stop"\ncommand = "their-tool"\ntimeout = 5\n');
+    expect(run(["install", "kimi-code"], ctx)).toBe(0);
+    expect(run(["uninstall", "kimi-code"], ctx)).toBe(0);
+    const toml = readFileSync(path, "utf8");
+    expect(toml).toContain("their-tool");
+    expect(toml).not.toContain("HINDSIGHT_CODING_AGENTS_KIMI");
+    const mcp = JSON.parse(readFileSync(join(ctx.home, ".kimi-code", "mcp.json"), "utf8"));
+    expect(mcp.mcpServers.hindsight).toBeUndefined();
   });
 });
 
@@ -1750,6 +1856,7 @@ describe("run() CLI behavior", () => {
       "copilot-cli",
       "grok-build",
       "qwen-code",
+      "kimi-code",
       "cline-cli",
       "dcode",
       "dsh",

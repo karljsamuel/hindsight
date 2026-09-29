@@ -52,6 +52,7 @@ describe("resolveHarnessLogo", () => {
     "factory-droid",
     "grok-build",
     "kilo",
+    "kimi-code",
     "opencode",
     "opencode2",
     "pi",

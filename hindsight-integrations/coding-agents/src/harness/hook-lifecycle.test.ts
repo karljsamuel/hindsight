@@ -200,6 +200,34 @@ describe("HOOK_HARNESSES lifecycle contract", () => {
       zcode.retain.journal?.assistantText({ responseText: "", responsePreview: "trunc" })
     ).toBe("trunc");
     expect(zcode.retain.journal?.assistantText({})).toBe("");
+
+    // Payloads captured from the real @moonshot-ai/kimi-code 2.1.1 CLI. Its prompt is a BLOCK ARRAY,
+    // not a string: reading it as a string made runHook throw on `.trim()` and recall never ran.
+    const kimi = HOOK_HARNESSES["kimi-code"];
+    expect(kimi.configStyle).toBe("toml-array");
+    expect(
+      kimi.prompt.parse({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "session_413e",
+        cwd: "/repo",
+        client_type: "kimi_code_cli",
+        prompt: [
+          { type: "text", text: "which statuses" },
+          { type: "image_url", image_url: { url: "data:" } },
+          { type: "text", text: "are retryable?" },
+        ],
+        is_steer: false,
+      })
+    ).toEqual({
+      prompt: "which statuses\nare retryable?",
+      cwd: "/repo",
+      sessionId: "session_413e",
+    });
+    expect(kimi.prompt.parse({ prompt: "not blocks" }).prompt).toBe("");
+    // `message` is Kimi's only injection channel; SessionStart output is dropped by the host.
+    expect(kimi.prompt.emit("context", "visible")).toEqual({ message: "context" });
+    expect(kimi.prompt.emit("", "visible")).toEqual({ message: "visible" });
+    expect(kimi.sessionStart.emit({ systemMessage: "s", additionalContext: "c" })).toEqual({});
   });
 
   /**
