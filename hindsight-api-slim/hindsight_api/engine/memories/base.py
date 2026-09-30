@@ -1742,6 +1742,34 @@ class MemoriesExtension(Extension, ABC):
             for scope in scopes
         }
 
+    @abstractmethod
+    async def newest_memory_updated_at(
+        self,
+        *,
+        conn,
+        fq_table,
+        bank_id: str,
+        until: datetime,
+        since: datetime | None = None,
+        fact_types: list[str] | None = None,
+        tags: list[str] | None = None,
+        tags_match: str = "any",
+        tag_groups: list | None = None,
+    ) -> datetime | None:
+        """The newest ``updated_at`` in the given scope within ``(since, until]``, or None.
+
+        Backs the mental-model refresh, which reads it for two answers: whether the
+        scope holds anything to reflect over at all (None means no), and the
+        watermark the refresh persists — the newest memory it could have read, so the
+        next staleness check asks about writes after it. ``since`` is the delta
+        window's lower bound (None for a full refresh), which is also what lets a
+        store bound the read to the writes since the last refresh.
+
+        The scope is the same as :meth:`any_memory_updated_since`'s. Abstract rather
+        than defaulted: a store that answered None here would leave every refresh
+        with nothing to read, which is silent rather than wrong-looking.
+        """
+
     async def latest_memory_write_at(self, *, conn, fq_table, bank_id: str) -> datetime | None:
         """The newest ``updated_at`` across the bank's memories, or None if it has none.
 

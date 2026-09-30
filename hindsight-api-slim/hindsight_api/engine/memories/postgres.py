@@ -429,6 +429,31 @@ class PostgresMemories(MemoriesExtension):
     ) -> dict[str, bool]:
         return await reads.any_memory_updated_since_batch(conn=conn, fq_table=fq_table, bank_id=bank_id, scopes=scopes)
 
+    async def newest_memory_updated_at(
+        self,
+        *,
+        conn,
+        fq_table,
+        bank_id: str,
+        until: datetime,
+        since: datetime | None = None,
+        fact_types: list[str] | None = None,
+        tags: list[str] | None = None,
+        tags_match: str = "any",
+        tag_groups: list | None = None,
+    ) -> datetime | None:
+        return await reads.newest_memory_updated_at(
+            conn=conn,
+            fq_table=fq_table,
+            bank_id=bank_id,
+            until=until,
+            since=since,
+            fact_types=fact_types,
+            tags=tags,
+            tags_match=tags_match,
+            tag_groups=tag_groups,
+        )
+
     async def latest_memory_write_at(self, *, conn, fq_table, bank_id: str) -> datetime | None:
         return await reads.latest_memory_write_at(conn=conn, fq_table=fq_table, bank_id=bank_id)
 

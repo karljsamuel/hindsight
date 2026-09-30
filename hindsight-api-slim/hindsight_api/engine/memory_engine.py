@@ -1729,15 +1729,6 @@ class RefreshTagFiltering:
 
 
 @dataclass(frozen=True)
-class _MentalModelScopeFilter:
-    """SQL scope (tag + fact-type filter) shared by the staleness check and the
-    processed-watermark query, so both see an identical set of in-scope memories."""
-
-    where: list[str]
-    params: list[Any]
-
-
-@dataclass(frozen=True)
 class _MentalModelScopeWatermark:
     """What one ``MAX(updated_at)`` over a mental model's scope tells a refresh.
 
@@ -1749,9 +1740,9 @@ class _MentalModelScopeWatermark:
     """
 
     newest_in_scope: datetime | None
-    """Newest in-scope memory visible at the refresh snapshot; None when the scope
-    holds nothing at all. Unclamped, so it answers "is there anything here?" —
-    and, compared against the delta window's lower bound, "anything *new*?"."""
+    """Newest in-scope memory visible at the refresh snapshot, within the delta window
+    when there is one; None when there is nothing to read. Unclamped, so it answers
+    "is there anything here?" — or, for a delta refresh, "anything *new*?"."""
 
     watermark: datetime | None
     """The ``last_memory_seen_at`` a successful refresh persists: ``newest_in_scope``
@@ -17705,10 +17696,12 @@ class MemoryEngine(MemoryEngineInterface):
         self,
         bank_id: str,
         mental_model_id: str,
-        scope_filter: "_MentalModelScopeFilter",
+        tag_filtering: RefreshTagFiltering,
+        fact_types: list[str] | None,
         refresh_cutoff: datetime,
+        created_after: datetime | None,
     ) -> _MentalModelScopeWatermark:
-        """One ``MAX(updated_at)`` over the model's scope, read for both its answers.
+        """One read of the newest memory in the model's scope, used for both its answers.
 
         ``watermark`` is what a successful refresh persists: the newest in-scope memory
         visible at the snapshot, clamped so it never regresses below the model's current
@@ -17718,19 +17711,23 @@ class MemoryEngine(MemoryEngineInterface):
         and is caught next time; ``None`` leaves the column untouched, so an in-flight
         first row is not skipped.
 
-        ``newest_in_scope`` is the same reading *unclamped*, and is what the refresh's
-        emptiness check (#3875) decides on — it has to be carried out of here rather
-        than re-queried, because the clamp destroys exactly the information that check
-        needs: a model whose watermark is already set reports that watermark whether its
-        scope holds a thousand memories or none.
+        ``newest_in_scope`` is the same reading *unclamped*, bounded below by the delta
+        window's ``created_after``, and is what the refresh's emptiness check (#3875)
+        decides on — it has to be carried out of here rather than re-queried, because the
+        clamp destroys exactly the information that check needs: a model whose watermark
+        is already set reports that watermark whether its scope holds a thousand memories
+        or none.
+
+        The memories half is the store's (``newest_memory_updated_at``), never SQL over
+        ``memory_units`` here: under a store that owns its rows that table is empty, and
+        reading it made every refresh see an empty scope and skip (#4966).
 
         Kept as its own method — like ``_mental_model_refresh_cutoff`` — so mock unit
         tests of the refresh wiring can stub it instead of reaching a real pool.
         """
+        from .memories import get_memories
+
         backend = await self._get_backend()
-        assert self._dialect is not None
-        watermark_params = [*scope_filter.params, refresh_cutoff]
-        watermark_where = [*scope_filter.where, f"updated_at <= ${len(watermark_params)}"]
         async with acquire_with_retry(backend) as conn:
             current_memory_seen_at = await conn.fetchval(
                 f"SELECT COALESCE(last_memory_seen_at, last_refreshed_at) "
@@ -17738,9 +17735,16 @@ class MemoryEngine(MemoryEngineInterface):
                 bank_id,
                 mental_model_id,
             )
-            newest_in_scope = await conn.fetchval(
-                f"SELECT MAX(updated_at) FROM {fq_table('memory_units')} WHERE {' AND '.join(watermark_where)}",
-                *watermark_params,
+            newest_in_scope = await get_memories().newest_memory_updated_at(
+                conn=conn,
+                fq_table=fq_table,
+                bank_id=bank_id,
+                until=refresh_cutoff,
+                since=created_after,
+                fact_types=fact_types,
+                tags=tag_filtering.tags,
+                tags_match=tag_filtering.tags_match,
+                tag_groups=tag_filtering.tag_groups,
             )
         if newest_in_scope is None:
             return _MentalModelScopeWatermark(newest_in_scope=None, watermark=None)
@@ -17911,18 +17915,6 @@ class MemoryEngine(MemoryEngineInterface):
         refresh_cutoff = await self._mental_model_refresh_cutoff(bank_id, mental_model_id)
         if refresh_cutoff is None:
             return None
-        # Persist the watermark as the newest in-scope memory actually visible at the
-        # snapshot — NOT now(). now() can sit ahead of the real data: updated_at is the
-        # writing transaction's start time, but a row only becomes visible at COMMIT,
-        # which can land after this snapshot. Anchoring to the newest row we saw means
-        # such a straddling commit stays newer than the watermark and is caught next
-        # time, instead of being stamped "already processed" and dropped forever.
-        scope_filter = self._build_mm_scope_filter(bank_id, tag_filtering, fact_types)
-        scope_watermark = await self._mental_model_scope_watermark(
-            bank_id, mental_model_id, scope_filter, refresh_cutoff
-        )
-        processed_watermark = scope_watermark.watermark
-
         # Run reflect with the source query, excluding the mental model being refreshed
         # Skip creating a nested "hindsight.reflect" span since we already have "hindsight.mental_model_refresh"
         mm_name = mental_model.get("name") or mental_model_id
@@ -17974,6 +17966,17 @@ class MemoryEngine(MemoryEngineInterface):
                 else:
                     created_after = seen_at_raw
                 reflect_kwargs["created_after"] = created_after
+        # Persist the watermark as the newest in-scope memory actually visible at the
+        # snapshot — NOT now(). now() can sit ahead of the real data: updated_at is the
+        # writing transaction's start time, but a row only becomes visible at COMMIT,
+        # which can land after this snapshot. Anchoring to the newest row we saw means
+        # such a straddling commit stays newer than the watermark and is caught next
+        # time, instead of being stamped "already processed" and dropped forever.
+        scope_watermark = await self._mental_model_scope_watermark(
+            bank_id, mental_model_id, tag_filtering, fact_types, refresh_cutoff, created_after
+        )
+        processed_watermark = scope_watermark.watermark
+
         # Tell the reflect agent what this page is about, and — full vs delta — how to
         # treat time: see build_mental_model_refresh_context.
         from .reflect.prompts import build_mental_model_refresh_context
@@ -17997,16 +18000,12 @@ class MemoryEngine(MemoryEngineInterface):
         #
         # So ask first whether this model's flags leave the agent anything to retrieve.
         # The watermark reading already answers it for memories, at no cost: it is the
-        # newest memory visible at the snapshot *within this model's scope*, so
-        # tags/tag_groups/fact_types are already applied to it. ``None`` means the scope
-        # is empty; otherwise the delta window's lower bound settles it, because a max
-        # newer than the bound is exactly "at least one row is in the window" — the same
-        # comparison recall makes with ``updated_at > created_after``. Full mode has no
-        # lower bound, so any memory at all counts. Only when that comes back empty is
-        # there a query to pay, and only while sibling documents are still in reach.
-        has_sources = scope_watermark.newest_in_scope is not None and (
-            created_after is None or scope_watermark.newest_in_scope > created_after
-        )
+        # newest memory visible at the snapshot *within this model's scope and window*,
+        # so tags/tag_groups/fact_types and the delta window's ``created_after`` — the
+        # same bound recall applies as ``updated_at > created_after`` — are already
+        # applied to it. ``None`` means nothing to read. Only when that comes back empty
+        # is there a query to pay, and only while sibling documents are still in reach.
+        has_sources = scope_watermark.newest_in_scope is not None
         if not has_sources and not exclude_mental_models:
             has_sources = await self._bank_has_readable_document(bank_id, excluding_id=mental_model_id)
         if has_sources:
@@ -19545,51 +19544,6 @@ class MemoryEngine(MemoryEngineInterface):
             # than a stale index.
             await self._deindex_knowledge_pages(bank_id, [mental_model_id])
         return deleted
-
-    def _build_mm_scope_filter(
-        self,
-        bank_id: str,
-        tag_filtering: RefreshTagFiltering,
-        fact_types: list[str] | None,
-    ) -> _MentalModelScopeFilter:
-        """Build the tag + fact-type WHERE clause for a mental model's memory scope.
-
-        Deliberately excludes any ``updated_at`` bound so both callers add their own:
-        the staleness check appends ``updated_at > last_refreshed_at``; the refresh
-        appends ``updated_at <= cutoff`` under ``MAX(updated_at)``. ``bank_id`` is
-        ``$1``; the caller appends its extra param last and references it by index.
-        """
-        params: list[Any] = [bank_id]
-        where = ["bank_id = $1"]
-
-        built = build_tags_where_clause(
-            tag_filtering.tags,
-            param_offset=len(params) + 1,
-            match=tag_filtering.tags_match,
-        )
-        tag_clause = built.sql
-        tag_params = built.params
-        next_param = built.next_param_offset
-        if tag_clause:
-            where.append(tag_clause.removeprefix("AND "))
-            params.extend(tag_params)
-
-        built = build_tag_groups_where_clause(
-            tag_filtering.tag_groups,
-            param_offset=next_param,
-        )
-        group_clause = built.sql
-        group_params = built.params
-        if group_clause:
-            where.append(group_clause.removeprefix("AND "))
-            params.extend(group_params)
-        # Untagged MM without tag_groups → no tag constraint, matching any bank memory.
-
-        if fact_types:
-            params.append(list(fact_types))
-            where.append(f"fact_type = ANY(${len(params)}::text[])")
-
-        return _MentalModelScopeFilter(where=where, params=params)
 
     # =====================================================================
     # KNOWLEDGE BASE (folders + pages over mental models)
