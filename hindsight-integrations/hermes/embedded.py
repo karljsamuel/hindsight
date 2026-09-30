@@ -98,15 +98,14 @@ def _local_runtime_hint(reason: str | None) -> str:
 
     Both packages are declared in this plugin's ``pyproject.toml``, so a miss means the
     environment was rebuilt without them (a pm generation that dropped the plugin member, a
-    stripped venv), not that the user has to install a server by hand. Reinstalling the plugin
-    is the fix. NousResearch/hermes-agent#7718, #123784.
+    stripped venv), not that the user has to install a server by hand. ``hermes pm repair`` is the
+    fix; Hermes' own missing-dependency warning names the same command. NousResearch/hermes-agent#7718, #123784.
     """
     text = (reason or "").lower()
     if "no module named" in text and any(m in text for m in ("hindsight_client", "hindsight_embed")):
         return (
             " The plugin's own packages (hindsight-client, hindsight-embed) are missing from "
-            "this environment: run 'hermes plugins install hindsight' (or 'hermes memory setup') "
-            "to reinstall them. The Hindsight server itself is NOT needed here — it runs as a "
+            "this environment: run 'hermes pm repair' and restart Hermes to rebuild them. The Hindsight server itself is NOT needed here — it runs as a "
             "separate process."
         )
     return ""

@@ -107,7 +107,7 @@ def _warn_if_client_outdated() -> None:
     NousResearch/hermes-agent#126494; upstream af26acab73 now raises ImportError). There is
     nothing to repair at runtime anyway: the floor is declared in this plugin's
     ``pyproject.toml``, so a version below it means the environment was built or stripped without
-    it, which a plugin reinstall fixes and a lazy install would only paper over.
+    it, which a plugin update fixes and a lazy install would only paper over.
     """
     try:
         from importlib.metadata import version as pkg_version
@@ -118,7 +118,7 @@ def _warn_if_client_outdated() -> None:
         if Version(installed) < Version(_MIN_CLIENT_VERSION):
             logger.warning(
                 "hindsight-client %s is older than this plugin needs (>=%s). "
-                "Run 'hermes plugins install hindsight' to reinstall its declared dependencies.",
+                "Run 'hermes plugins update hindsight' to prepare its declared dependencies.",
                 installed,
                 _MIN_CLIENT_VERSION,
             )
