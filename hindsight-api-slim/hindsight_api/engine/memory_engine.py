@@ -47,6 +47,7 @@ from ..config import (
     DEFAULT_STORE_DOCUMENT_TEXT,
     ENV_MODEL_INIT_TIMEOUT,
     LLM_STRATEGY_METADATA,
+    ConfigLike,
     HindsightConfig,
     LLMMemberConfig,
     LLMStrategyConfig,
@@ -399,6 +400,30 @@ _AUTH_ERROR_MARKERS = (
 )
 
 
+def _iso_or_none(value: "datetime | str | None") -> "str | None":
+    """An ISO timestamp for the response model, whichever shape the extractor produced.
+
+    The chunked path yields ``retain.types.ExtractedFact``, whose ``occurred_start`` /
+    ``occurred_end`` are ``datetime``; the LLM path yields the response model, whose are already
+    ISO strings. ``response_models.ExtractedFact`` declares ``str | None``, so handing it a
+    datetime would fail validation. Latent today: chunks mode sets no occurred dates.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    return value.isoformat()
+
+
+def _occurrences_for_chunk(
+    chunk_occurrences: "list[list[AttachmentOccurrence]]", index: "int | None"
+) -> "list[AttachmentOccurrence]":
+    """A fact's chunk's attachment occurrences, or none when the fact has no chunk.
+
+    A function rather than a conditional inline in the comprehension: the index has to be read
+    once and tested once, and a comprehension's iterable position cannot hold a walrus.
+    """
+    return chunk_occurrences[index] if index is not None else []
+
+
 def _is_auth_error(error: Exception) -> bool:
     """Whether a probe exception looks like an auth failure (typically a bad API key).
 
@@ -406,12 +431,15 @@ def _is_auth_error(error: Exception) -> bool:
     matching known auth markers in the (provider-wrapped) message. Used only to pick a
     status label — the raw error itself is never returned to the client.
     """
-    seen: list[Exception] = []
+    # `BaseException`, because that is what a `__cause__` / `__context__` walk yields --
+    # KeyboardInterrupt and SystemExit included. The list was declared `Exception` and the
+    # mismatch suppressed at the append rather than fixed at the declaration.
+    seen: list[BaseException] = []
     current: BaseException | None = error
     for _ in range(6):  # bounded walk to avoid pathological cycles
         if current is None or current in seen:
             break
-        seen.append(current)  # type: ignore[arg-type]
+        seen.append(current)
         code = getattr(current, "status_code", None) or getattr(current, "code", None)
         if code in (401, 403, "401", "403"):
             return True
@@ -592,9 +620,10 @@ if TYPE_CHECKING:
     from .audit import AuditLogListResponse, AuditLogStatsResponse
     from .memories import MemoriesExtension, MemoryScopeWatermark
     from .prompt_preview import PromptPreview
-    from .retain.attachment_content import LoadedAttachment, RetainAttachment
+    from .retain.attachment_content import AttachmentOccurrence, LoadedAttachment, RetainAttachment
     from .retain.attachment_store import StoredAttachment
     from .transfer import BankImportResult, ImportResult, TransferScope
+    from .transfer.importer import OnConflict
     from .vector_index_health import CoverageTrigger
 
 
@@ -761,7 +790,7 @@ class ByteStreamCounter:
         return chunk
 
 
-def _member_to_llm(member: "LLMMemberConfig", config: HindsightConfig, defaults: _LLMCallDefaults) -> LLMConfig:
+def _member_to_llm(member: "LLMMemberConfig", config: ConfigLike, defaults: _LLMCallDefaults) -> LLMConfig:
     """Build an LLMProvider from one indexed multi-LLM member.
 
     ``LLMProvider`` uses its arguments verbatim (it no longer reads global config),
@@ -789,7 +818,10 @@ def _member_to_llm(member: "LLMMemberConfig", config: HindsightConfig, defaults:
     return LLMConfig(
         provider=member.provider,
         api_key=member.api_key or "",
-        base_url=member.base_url,
+        # `or ""` exactly as api_key above: `LLMProvider` declares `base_url: str`, a member may
+        # leave it unset, and every provider tests it for truthiness -- so unset reaches them the
+        # same way either way.
+        base_url=member.base_url or "",
         model=member.model,
         reasoning_effort=member.reasoning_effort or config.llm_reasoning_effort,
         extra_body=member.extra_body,
@@ -826,7 +858,7 @@ def _member_call_defaults(member: "LLMMemberConfig", defaults: "_LLMCallDefaults
 
 def _build_llm(
     base: LLMConfig,
-    config: HindsightConfig,
+    config: ConfigLike,
     prefix: str,
     defaults: _LLMCallDefaults,
     fallback_prefix: str = "",
@@ -876,9 +908,7 @@ def _build_llm(
     return MultiLLMProvider([base, *extra], strategy)
 
 
-async def validate_retain_batch_support(
-    retain_llm_config: "LLMConfig | MultiLLMProvider", config: HindsightConfig
-) -> None:
+async def validate_retain_batch_support(retain_llm_config: "LLMConfig | MultiLLMProvider", config: ConfigLike) -> None:
     """Fail startup when batch retain is enabled but nothing configured can serve it.
 
     Otherwise the server would silently fall back to sync mode on every retain,
@@ -1602,7 +1632,7 @@ def _resolve_thinking_budget(config_dict: dict, budget: "Budget | None", max_tok
     return int(fixed[effective_budget])
 
 
-def _resolve_reranker_max_candidates(config: HindsightConfig, budget: "Budget | None") -> int:
+def _resolve_reranker_max_candidates(config: ConfigLike, budget: "Budget | None") -> int:
     """Map a Budget level to the cross-encoder candidate cap.
 
     Returns the per-level override (reranker_max_candidates_<level>) when it is set (> 0),
@@ -3692,7 +3722,10 @@ class MemoryEngine(MemoryEngineInterface):
         operation_id = task_dict.get("operation_id")
         filename = task_dict.get("original_filename", "unknown")
 
-        if not all([bank_id, storage_key, document_id]):
+        # Checked one name at a time rather than through `all([...])`: identical truthiness, but
+        # this form actually narrows each away from None for everything below, which is what makes
+        # the storage and validator calls verifiable.
+        if not bank_id or not storage_key or not document_id:
             raise ValueError("bank_id, storage_key, and document_id are required for file_convert_retain task")
 
         logger.info(f"[FILE_CONVERT_RETAIN] Starting for bank_id={bank_id}, document_id={document_id}, file={filename}")
@@ -5280,7 +5313,11 @@ class MemoryEngine(MemoryEngineInterface):
         async def start_pg0():
             """Start pg0 if configured."""
             if self._use_pg0:
-                kwargs: dict[str, object] = {"name": self._pg0_instance_name}
+                # `Any`, not `object`: this is a kwargs BAG built conditionally below, so its
+                # inferred value type is the union of everything in it and the `**` unpack is
+                # then checked against that union for every parameter -- one diagnostic each,
+                # none of them real. Each value's own type is checked where it is assigned.
+                kwargs: dict[str, Any] = {"name": self._pg0_instance_name}
                 if self._pg0_port is not None:
                     kwargs["port"] = self._pg0_port
                 # Preserve an explicitly empty password: pg0://user:@instance is
@@ -5544,7 +5581,12 @@ class MemoryEngine(MemoryEngineInterface):
 
             await _apply_session_settings(conn, settings)
 
-        await self._backend.initialize(
+        # Optional on the engine -- pg0 fills it in above when configured -- but the backend
+        # cannot open a pool without one, and failing here names the cause instead of surfacing
+        # as a driver error several frames down.
+        if not self.db_url:
+            raise ValueError("Database URL is required: set a database URL or enable pg0")
+        await self._require_backend().initialize(
             self.db_url,
             min_size=self._pool_min_size,
             max_size=self._pool_max_size,
@@ -5589,7 +5631,7 @@ class MemoryEngine(MemoryEngineInterface):
         # Initialize config resolver for hierarchical configuration
         from ..config_resolver import ConfigResolver
 
-        self._config_resolver = ConfigResolver(backend=self._backend, tenant_extension=self._tenant_extension)
+        self._config_resolver = ConfigResolver(backend=self._require_backend(), tenant_extension=self._tenant_extension)
         logger.debug("Config resolver initialized for hierarchical configuration")
 
         # Initialize file storage
@@ -5652,7 +5694,7 @@ class MemoryEngine(MemoryEngineInterface):
                 )
             ]
         self._webhook_manager = WebhookManager(
-            backend=self._backend,
+            backend=self._require_backend(),
             global_webhooks=webhook_global,
             tenant_extension=self._tenant_extension,
         )
@@ -5699,11 +5741,24 @@ class MemoryEngine(MemoryEngineInterface):
             await self.initialize()
         return self._read_backend
 
+    def _require_backend(self) -> DatabaseBackend:
+        """The backend, for a caller that already knows one exists.
+
+        ``_backend`` is declared optional because ``close()`` clears it, but it is built in
+        ``__init__`` and every use below runs between the two. Without this the optionality
+        has to be re-stated at each use, and the alternative -- asserting once -- does not
+        survive the next method call, so it reads as unchecked code rather than as the
+        lifecycle it is.
+        """
+        if self._backend is None:
+            raise RuntimeError("MemoryEngine is closed: its database backend has been released")
+        return self._backend
+
     async def _get_backend(self) -> DatabaseBackend:
         """Get the database backend, auto-initializing if needed."""
         if not self._initialized:
             await self.initialize()
-        return self._backend
+        return self._require_backend()
 
     @asynccontextmanager
     async def _store_read_conn(self, bank_id: str) -> AsyncIterator[DatabaseConnection | None]:
@@ -6158,7 +6213,9 @@ class MemoryEngine(MemoryEngineInterface):
         # SINGLE item, whose slices all replay the same full body). The
         # orchestrator streams a large document chunk-batch by chunk-batch on its
         # own, so a single pass stays memory-bounded.
-        explicit_doc_ids = [item.get("document_id") for item in contents if item.get("document_id")]
+        # Walrus so the value TESTED is the value kept; reading `document_id` twice left the list
+        # typed `list[str | None]` even though the filter had just excluded None.
+        explicit_doc_ids = [doc_id for item in contents if (doc_id := item.get("document_id"))]
         has_shared_document = len(explicit_doc_ids) != len(set(explicit_doc_ids))
 
         # Where these documents' attachments are stored, before this retain rewrites
@@ -8118,7 +8175,9 @@ class MemoryEngine(MemoryEngineInterface):
         self,
         bank_id: str,
         archive_bytes: bytes,
-        on_conflict: str,
+        # The importer's own type. Both callers validate before reaching here -- the async entry
+        # point rejects anything else, and the task path replays a value it wrote itself.
+        on_conflict: "OnConflict",
         request_context: "RequestContext",
     ) -> "ImportResult":
         """Run the deterministic import inline (shared by the worker handler).
@@ -9786,7 +9845,7 @@ class MemoryEngine(MemoryEngineInterface):
                             continue
 
                         row = chunks_lookup[chunk_id]
-                        chunk_text = row["chunk_text"]
+                        chunk_text = cast(str, row["chunk_text"])
                         chunk_tokens = count_tokens(chunk_text)
 
                         if total_chunk_tokens + chunk_tokens > max_chunk_tokens:
@@ -10162,7 +10221,7 @@ class MemoryEngine(MemoryEngineInterface):
                 memory_facts.append(
                     MemoryFact(
                         id=result_id,
-                        text=result_dict.get("text"),
+                        text=cast(str, result_dict.get("text")),
                         fact_type=result_dict.get("fact_type", "world"),
                         entities=entity_names,
                         context=result_dict.get("context"),
@@ -10516,7 +10575,7 @@ class MemoryEngine(MemoryEngineInterface):
                 },
                 "created_at": doc["created_at"].isoformat() if doc["created_at"] else None,
                 "updated_at": doc["updated_at"].isoformat() if doc["updated_at"] else None,
-                "tags": list(doc["tags"]) if doc["tags"] else [],
+                "tags": list(cast("list[str]", tags)) if (tags := doc["tags"]) else [],
                 "document_metadata": document_metadata or None,
                 "retain_params": retain_params_parsed or None,
                 "observation_scopes": observation_scopes or None,
@@ -11113,7 +11172,15 @@ class MemoryEngine(MemoryEngineInterface):
                 from .memories import get_memories
 
                 _store = get_memories()
-                if not _store.store_owned_for(bank_id):
+                # `bank_id` is genuinely optional on this method and may still be None here: for a
+                # SQL store the bank is read off the row inside this very branch. The default
+                # `store_owned_for` ignores its argument and answers from the class attribute, so
+                # every store in tree behaves identically either way -- but a ROUTER store that
+                # partitions banks across backends is being asked about "no bank", which its
+                # contract (`bank_id: str`) does not cover. That gap predates this annotation and
+                # closing it means deciding what a router should answer for an unknown bank, so it
+                # is stated here rather than papered over by widening the seam for implementers.
+                if not _store.store_owned_for(cast(str, bank_id)):
                     row = await conn.fetchrow(
                         f"SELECT bank_id, fact_type FROM {fq_table('memory_units')} WHERE id = $1",
                         str(unit_uuid),
@@ -11152,7 +11219,8 @@ class MemoryEngine(MemoryEngineInterface):
                 # observations inserted concurrently by consolidation (otherwise a
                 # racing insert committed between the sweep and the delete would
                 # leave an orphan referencing this just-deleted source memory).
-                if not _store.store_owned_for(bank_id):
+                # Same unknown-bank caveat as the first `store_owned_for` above.
+                if not _store.store_owned_for(cast(str, bank_id)):
                     # Links in lock order before the cascade reaches them (see delete_unit_links).
                     if bank_id:
                         await self._backend.ops.delete_unit_links(conn, fq_table("memory_links"), bank_id, [unit_id])
@@ -11166,7 +11234,9 @@ class MemoryEngine(MemoryEngineInterface):
                         # above join memory_units/unit_entities, which a store-owned bank keeps no
                         # rows in, and stale-observation cleanup routes to the store as well. So
                         # nothing in this Postgres transaction has to be atomic with it.
-                        await _store.delete_facts(bank_id, [unit_id])
+                        # Reached only when `store_owned_for` said yes, which a bank-partitioned
+                        # store can only do for a bank it was told about.
+                        await _store.delete_facts(cast(str, bank_id), [unit_id])
 
                 # Invalidate observations referencing this (now-deleted) source memory
                 if bank_id and fact_type in ("experience", "world"):
@@ -11229,8 +11299,11 @@ class MemoryEngine(MemoryEngineInterface):
         # document still citing it would go on stating it unnoticed.
         if deleted and bank_id:
             await self._submit_refreshes_for_retracted_grounding(bank_id, request_context=request_context)
+            # `bank_id`, like every other delete site. This passed `bank_id_for_graph_maintenance`,
+            # which is None when the deleted unit is not a world/experience fact (an observation),
+            # so that delete never reconciled the bank's vector indexes.
             await self._submit_vector_index_maintenance_quietly(
-                bank_id_for_graph_maintenance, request_context, after="memory deletion", grew=False
+                bank_id, request_context, after="memory deletion", grew=False
             )
 
         return result
@@ -12777,6 +12850,12 @@ class MemoryEngine(MemoryEngineInterface):
             Dict with nodes, edges, table_rows, total_units, and limit
         """
         await self._authenticate_tenant(request_context)
+        # Declared optional for backwards compatibility, but every path below requires a bank:
+        # the existence check, the store's `graph_view`, and the authorization context all take
+        # `str`. Without this the call fails later and less clearly -- the only caller is an HTTP
+        # route whose `bank_id` is a path parameter, so None does not arrive in practice.
+        if bank_id is None:
+            raise ValueError("bank_id is required to read graph data")
         if self._operation_validator:
             from hindsight_api.extensions import BankReadContext, BankReadOperation
 
@@ -12801,7 +12880,11 @@ class MemoryEngine(MemoryEngineInterface):
                 document_id=document_id,
                 chunk_id=chunk_id,
                 tags=tags,
-                tags_match=tags_match,
+                # `get_graph_data` and its one HTTP caller both declare a plain `str` here, and
+                # nothing validates it -- an unknown mode reaches the SQL builders, which fall back
+                # to "any". Narrowing the query parameter would turn that into a 400, which is a
+                # better answer but an API change; this states the gap without making it.
+                tags_match=cast(TagsMatch, tags_match),
                 limit=limit,
             )
             units = page["units"]
@@ -13261,8 +13344,8 @@ class MemoryEngine(MemoryEngineInterface):
                     ExtractedFact(
                         text=fact.fact_text,
                         fact_type=fact.fact_type,
-                        occurred_start=fact.occurred_start,
-                        occurred_end=fact.occurred_end,
+                        occurred_start=_iso_or_none(fact.occurred_start),
+                        occurred_end=_iso_or_none(fact.occurred_end),
                         entities=list(fact.entities or []),
                         chunk_index=chunk_of[i],
                         attachments=[
@@ -13271,7 +13354,7 @@ class MemoryEngine(MemoryEngineInterface):
                                 type=att.kind,
                                 media_type=att.media_type,
                             )
-                            for att in (chunk_occurrences[chunk_of[i]] if chunk_of[i] is not None else [])
+                            for att in _occurrences_for_chunk(chunk_occurrences, chunk_of[i])
                         ],
                     )
                     for i, fact in enumerate(chunked.facts)
@@ -13824,7 +13907,7 @@ class MemoryEngine(MemoryEngineInterface):
             cumulative_ids: list[str] = list(current_source_ids)
             enriched: list[dict] = []
             for entry in reversed(raw_history):
-                new_ids_in_entry: set[str] = set(entry.get("new_source_memory_ids", []))
+                new_ids_in_entry: set[str] = set(cast("list[str]", entry.get("new_source_memory_ids", [])))
                 source_facts = []
                 for sid in cumulative_ids:
                     fact = source_map.get(sid, {"id": sid, "text": None, "type": None, "context": None})
@@ -16057,7 +16140,9 @@ class MemoryEngine(MemoryEngineInterface):
             )
             # based_on stores facts, mental models, and directives
             # Note: directives list stores raw directive dicts (not MemoryFact), which will be converted to Directive objects
-            based_on: dict[str, list[MemoryFact] | list[dict[str, Any]]] = {
+            # `list[Any]`: the fact-type keys hold `MemoryFact`, "directives" holds raw dicts.
+            # Declared as a union of the two list types, EVERY append is wrong for one arm of it.
+            based_on: dict[str, list[Any]] = {
                 "world": [],
                 "experience": [],
                 "opinion": [],
@@ -20082,7 +20167,7 @@ class MemoryEngine(MemoryEngineInterface):
                 for r in rows
                 if r["mental_model_id"] in order
             ]
-            out.sort(key=lambda d: order[d["mental_model_id"]])
+            out.sort(key=lambda d: order[cast(str, d["mental_model_id"])])
             return out[:limit]
 
         # BM25 clauses for the configured text-search backend (same per-backend

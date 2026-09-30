@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ...search.tags import (
+    TagsMatch,
     build_tag_groups_where_clause,
     build_tags_where_clause,
     build_tags_where_clause_simple,
@@ -200,7 +201,7 @@ async def scan_memories(
     limit: int = 100,
     page_token: str = "",
     tags: list[str] | None = None,
-    tags_match: str = "any",
+    tags_match: TagsMatch = "any",
     tag_groups: list | None = None,
     document_id: str | None = None,
     metadata_equals: dict[str, str] | None = None,
@@ -497,7 +498,7 @@ async def any_memory_updated_since(
     since: datetime,
     fact_types: list[str] | None = None,
     tags: list[str] | None = None,
-    tags_match: str = "any",
+    tags_match: TagsMatch = "any",
     tag_groups: list | None = None,
 ) -> bool:
     """Whether any memory in ``bank_id``'s scope was written after ``since``.
