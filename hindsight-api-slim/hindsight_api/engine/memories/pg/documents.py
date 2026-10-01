@@ -167,7 +167,7 @@ async def recall_chunks(*, backend, fq_table: Callable[[str], str], chunk_ids: l
     async with acquire_with_retry(backend) as conn:
         chunks_rows = await conn.fetch(
             f"""
-            SELECT chunk_id, chunk_text, chunk_index
+            SELECT chunk_id, chunk_text, chunk_index, document_id
             FROM {fq_table("chunks")}
             WHERE chunk_id = ANY($1::text[])
             """,
@@ -356,6 +356,18 @@ async def current_document_tags(
     if _doc_row is None:
         return DocumentTags(found=False, tags=None)
     return DocumentTags(found=True, tags=list(_doc_row["tags"] or []))
+
+
+async def documents_tags(
+    *, conn, fq_table: Callable[[str], str], bank_id: str, document_ids: list[str]
+) -> dict[str, list[str]]:
+    """document id -> its `documents.tags`, for the ids that have a row in this bank."""
+    rows = await conn.fetch(
+        f"SELECT id, tags FROM {fq_table('documents')} WHERE id = ANY($1) AND bank_id = $2",
+        document_ids,
+        bank_id,
+    )
+    return {row["id"]: list(row["tags"] or []) for row in rows}
 
 
 async def update_document_tags(

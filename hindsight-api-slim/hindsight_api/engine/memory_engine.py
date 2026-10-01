@@ -709,6 +709,7 @@ from .search.tags import (
 )
 from .search.types import ScoredResult
 from .source_facts import select_source_facts_within_budget
+from .source_scope import tag_filter_is_active, visible_document_ids
 from .task_backend import TaskBackend
 from .time_filter import DOCUMENT_TIME_FIELDS, validate_time_window
 
@@ -9613,6 +9614,24 @@ class MemoryEngine(MemoryEngineInterface):
                     chunks_lookup = await _chunk_store.recall_chunks(
                         backend=backend, fq_table=fq_table, bank_id=bank_id, chunk_ids=chunk_ids_ordered
                     )
+                    if chunks_lookup and tag_filter_is_active(tags, tags_match, tag_groups):
+                        # Source text follows its DOCUMENT's tags, not the fact's (#5030): a fact
+                        # shared through a tag like ``kind:rule`` must not carry the rest of a
+                        # document the reader's filter excludes. A chunk with no document fails
+                        # closed — ``None`` is never among the visible ids.
+                        async with self._store_read_conn(bank_id) as conn:
+                            _visible_docs = await visible_document_ids(
+                                conn,
+                                fq_table,
+                                bank_id,
+                                (row["document_id"] for row in chunks_lookup.values()),
+                                tags=tags,
+                                tags_match=tags_match,
+                                tag_groups=tag_groups,
+                            )
+                        chunks_lookup = {
+                            cid: row for cid, row in chunks_lookup.items() if row["document_id"] in _visible_docs
+                        }
 
                     # Process chunks in relevance order, respecting token budget
                     for chunk_id in chunk_ids_ordered:
@@ -14851,7 +14870,9 @@ class MemoryEngine(MemoryEngineInterface):
 
         async def expand_fn(memory_ids: list[str], depth: str) -> dict[str, Any]:
             async with backend.acquire() as conn:
-                return await tool_expand(conn, bank_id, memory_ids, depth)
+                return await tool_expand(
+                    conn, bank_id, memory_ids, depth, tags=tags, tags_match=tags_match, tag_groups=tag_groups
+                )
 
         # Load directives from the dedicated directives table.
         # Directives are hard rules that must be followed in all responses.

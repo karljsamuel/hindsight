@@ -2575,8 +2575,9 @@ class MemoriesExtension(Extension, ABC):
         return ObservationChunkIds(chunk_ids_by_observation=by_obs, sources_by_observation=sources_read)
 
     async def recall_chunks(self, *, backend, fq_table, bank_id: str, chunk_ids: list[str]) -> dict[str, Any]:
-        """The recall ``include_chunks`` candidates by chunk_id: rows with ``chunk_text`` and
-        ``chunk_index``. Absent chunks are omitted.
+        """The recall ``include_chunks`` candidates by chunk_id: rows with ``chunk_text``,
+        ``chunk_index`` and ``document_id`` (the last decides whether a tag-scoped reader may see
+        the chunk, #5030). Absent chunks are omitted.
 
         Default: a store that owns the document store keeps no `chunks` rows, so the metadata is
         synthesized from the chunk ids themselves — the id carries the document and the index,
@@ -2791,6 +2792,16 @@ class MemoriesExtension(Extension, ABC):
             found=_record is not None,
             tags=list(_record["tags"] or []) if _record is not None and "tags" in _record else None,
         )
+
+    async def documents_tags(self, *, conn, fq_table, bank_id: str, document_ids: list[str]) -> dict[str, list[str]]:
+        """document id -> the tags it carries, for the ids that exist. Read to decide whether a
+        tag-scoped reader may see a document's source text (#5030), so an id left out is hidden.
+
+        Default: the store's records; a record that does not carry a "tags" key is left out
+        rather than read as untagged, which an ``any`` filter would admit. Postgres reads the
+        `documents` rows."""
+        records = await self.get_document_records(bank_id=bank_id, document_ids=document_ids)
+        return {did: list(rec["tags"] or []) for did, rec in records.items() if "tags" in rec}
 
     async def update_document_tags(
         self, *, conn, fq_table, bank_id: str, document_id: str, tags: list[str] | None, found: bool
@@ -3728,8 +3739,9 @@ class MemoriesExtension(Extension, ABC):
     # -- reflect's `expand` tool: memories by id, then their chunks and documents --
 
     async def expand_memories(self, *, conn, fq_table, bank_id: str, unit_ids: list[uuid.UUID]) -> list:
-        """``id`` (a UUID), ``text``, ``chunk_id``, ``document_id``, ``fact_type``, ``context`` for
-        each of ``unit_ids`` that exists, as mappings. Postgres returns its rows as they are."""
+        """``id`` (a UUID), ``text``, ``chunk_id``, ``document_id``, ``fact_type``, ``context``,
+        ``tags`` for each of ``unit_ids`` that exists, as mappings. Postgres returns its rows as
+        they are."""
         stored = await self.get_memories(
             conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[str(u) for u in unit_ids]
         )
@@ -3741,6 +3753,7 @@ class MemoriesExtension(Extension, ABC):
                 "document_id": s.document_id,
                 "fact_type": s.fact_type,
                 "context": s.context,
+                "tags": s.tags,
             }
             for s in stored
         ]

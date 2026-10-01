@@ -872,6 +872,11 @@ class PostgresMemories(MemoriesExtension):
             conn=conn, fq_table=fq_store_table, bank_id=bank_id, document_id=document_id
         )
 
+    async def documents_tags(self, *, conn, fq_table, bank_id: str, document_ids: list[str]) -> dict[str, list[str]]:
+        return await documents.documents_tags(
+            conn=conn, fq_table=fq_store_table, bank_id=bank_id, document_ids=document_ids
+        )
+
     async def update_document_tags(
         self, *, conn, fq_table, bank_id: str, document_id: str, tags: list[str] | None, found: bool
     ) -> bool:
