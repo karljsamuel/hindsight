@@ -72,6 +72,12 @@ def typesafe_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> It
             "HINDSIGHT_API_RERANKER_TYPESAFE_API_KEY": "stub-key",
             "HINDSIGHT_API_RERANKER_TYPESAFE_BASE_URL": stub_server.url,
             "HINDSIGHT_API_RERANKER_TYPESAFE_PRUNE_CANDIDATES": "true",
+            # HTTP only. Both servers share one database, so a worker here claims the OTHER
+            # server's queued work — every story's consolidation and refreshes — and runs it with
+            # this server's reranker, pruning by whatever cut level a TypeSafe story last set. The
+            # story then reads a result its own server never produced, and fails one run in a few
+            # depending on which worker polled first.
+            "HINDSIGHT_API_WORKER_ENABLED": "false",
         },
     )
     yield server
