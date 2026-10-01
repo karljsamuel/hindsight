@@ -633,6 +633,9 @@ impl ApiClient {
                     limit.map(|l| l as u64),
                     offset.map(|o| o as u64),
                     None,
+                    None,
+                    None,
+                    None,
                 )
                 .humanized()
                 .await?;
@@ -649,7 +652,7 @@ impl ApiClient {
         self.runtime.block_on(async {
             let response = self
                 .client
-                .get_entity(bank_id, entity_id, None)
+                .get_entity(bank_id, entity_id, None, None, None, None)
                 .humanized()
                 .await?;
             Ok(response.into_inner())

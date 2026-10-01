@@ -729,6 +729,10 @@ export class HindsightClient {
       startDate?: string;
       /** ISO-8601, exclusive. */
       endDate?: string;
+      /** Filter by the memories' tags. */
+      tags?: string[];
+      /** How `tags` match; the server defaults to "any". */
+      tagsMatch?: "any" | "all" | "any_strict" | "all_strict" | "exact";
       signal?: AbortSignal;
     }
   ): Promise<ListMemoryUnitsResponse> {
@@ -747,6 +751,8 @@ export class HindsightClient {
         time_field: options?.timeField,
         start_date: options?.startDate,
         end_date: options?.endDate,
+        tags: options?.tags,
+        tags_match: options?.tagsMatch,
       },
       signal: options?.signal,
     });

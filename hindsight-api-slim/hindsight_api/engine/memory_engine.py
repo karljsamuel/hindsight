@@ -15192,6 +15192,9 @@ class MemoryEngine(MemoryEngineInterface):
         bank_id: str,
         *,
         search: str | None = None,
+        tags: list[str] | None = None,
+        tags_match: TagsMatch = "any",
+        tag_groups: list[TagGroup] | None = None,
         limit: int = 100,
         offset: int = 0,
         request_context: "RequestContext",
@@ -15202,6 +15205,11 @@ class MemoryEngine(MemoryEngineInterface):
         Args:
             bank_id: bank IDentifier
             search: Optional case-insensitive substring match on canonical_name.
+            tags: Optional tag filter on the memories that mention each entity. Only
+                entities a matching memory mentions are listed, and their counts and
+                dates cover the matching memories only (#5031).
+            tags_match: How ``tags`` match (same modes as ``list_memory_units``).
+            tag_groups: Compound tag filter, AND-ed with ``tags`` (fuzzy leaves allowed).
             limit: Maximum number of entities to return
             offset: Offset for pagination
             request_context: Request context for authentication.
@@ -15218,6 +15226,7 @@ class MemoryEngine(MemoryEngineInterface):
             )
             await self._validate_operation(self._operation_validator.validate_bank_read(ctx))
         await self._require_bank_exists(bank_id)
+        tag_groups = await self._resolve_fuzzy_tag_groups(bank_id, tag_groups)
         from .memories import get_memories
 
         backend = await self._get_backend()
@@ -15228,6 +15237,9 @@ class MemoryEngine(MemoryEngineInterface):
                 fq_table=fq_table,
                 bank_id=bank_id,
                 search=search,
+                tags=tags,
+                tags_match=tags_match,
+                tag_groups=tag_groups,
                 limit=limit,
                 offset=offset,
             )
@@ -15238,6 +15250,9 @@ class MemoryEngine(MemoryEngineInterface):
         *,
         limit: int = 1000,
         min_count: int = 1,
+        tags: list[str] | None = None,
+        tags_match: TagsMatch = "any",
+        tag_groups: list[TagGroup] | None = None,
         request_context: "RequestContext",
     ) -> dict[str, Any]:
         """
@@ -15246,6 +15261,11 @@ class MemoryEngine(MemoryEngineInterface):
         Returns nodes for entities and edges from the materialized
         entity_cooccurrences table. Edges are ordered by cooccurrence_count DESC
         and capped at `limit` to keep the payload renderable.
+
+        With a tag filter the materialized table cannot be used — it has no tags —
+        so edges and node mention counts are recomputed from the matching memories.
+        Keeping the stored edges and only dropping hidden nodes would still leak
+        how often visible entities appear together out of scope (#5031).
         """
         await self._authenticate_tenant(request_context)
         if self._operation_validator:
@@ -15256,6 +15276,7 @@ class MemoryEngine(MemoryEngineInterface):
             )
             await self._validate_operation(self._operation_validator.validate_bank_read(ctx))
         await self._require_bank_exists(bank_id)
+        tag_groups = await self._resolve_fuzzy_tag_groups(bank_id, tag_groups)
 
         # Asked of the store: one that owns its entities keeps no rows in the SQL
         # entity_cooccurrences/entities tables and answers from its own aggregate.
@@ -15263,7 +15284,14 @@ class MemoryEngine(MemoryEngineInterface):
 
         async with self._store_read_conn(bank_id) as conn:
             return await get_memories().entity_graph(
-                conn=conn, fq_table=fq_table, bank_id=bank_id, limit=limit, min_count=min_count
+                conn=conn,
+                fq_table=fq_table,
+                bank_id=bank_id,
+                limit=limit,
+                min_count=min_count,
+                tags=tags,
+                tags_match=tags_match,
+                tag_groups=tag_groups,
             )
 
     async def _resolve_fuzzy_tag_groups(
@@ -15817,9 +15845,18 @@ class MemoryEngine(MemoryEngineInterface):
         bank_id: str,
         entity_id: str,
         *,
+        tags: list[str] | None = None,
+        tags_match: TagsMatch = "any",
+        tag_groups: list[TagGroup] | None = None,
         request_context: "RequestContext",
     ) -> dict[str, Any] | None:
-        """Get entity details including metadata and observations."""
+        """Get entity details including metadata and observations.
+
+        With ``tags`` or ``tag_groups``, the entity is returned only when a matching memory mentions
+        it — otherwise ``None`` (a 404), the same answer as an unknown id, so a scoped
+        reader cannot tell it exists elsewhere — and its counts and dates cover the
+        matching memories only (#5031).
+        """
         try:
             entity_uuid = uuid.UUID(entity_id)
         except ValueError:
@@ -15832,13 +15869,20 @@ class MemoryEngine(MemoryEngineInterface):
                 bank_id=bank_id, operation=BankReadOperation.GET_ENTITY, request_context=request_context
             )
             await self._validate_operation(self._operation_validator.validate_bank_read(ctx))
+        tag_groups = await self._resolve_fuzzy_tag_groups(bank_id, tag_groups)
         from .memories import get_memories
 
         # Resolved against the store's registry: one that owns its entities writes no SQL
         # `entities` rows, and the caller 404'd an entity `list_entities` had just returned.
         async with self._store_read_conn(bank_id) as conn:
             return await get_memories().get_entity_detail(
-                conn=conn, fq_table=fq_table, bank_id=bank_id, entity_id=entity_uuid
+                conn=conn,
+                fq_table=fq_table,
+                bank_id=bank_id,
+                entity_id=entity_uuid,
+                tags=tags,
+                tags_match=tags_match,
+                tag_groups=tag_groups,
             )
 
     async def _delete_stale_observations_for_memories(
