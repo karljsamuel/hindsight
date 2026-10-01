@@ -1653,6 +1653,50 @@ paths:
           title: Bank Id
           type: string
         style: simple
+      - description: "Only return pages carrying these tags (matched per `tags_match`,\
+          \ like recall)."
+        explode: true
+        in: query
+        name: tags
+        required: false
+        schema:
+          items:
+            type: string
+          nullable: true
+          type: array
+        style: form
+      - description: "How `tags` match a page's tags: any, all, any_strict, all_strict,\
+          \ exact. 'any'/'all' also return untagged pages; the _strict modes and 'exact'\
+          \ do not."
+        explode: true
+        in: query
+        name: tags_match
+        required: false
+        schema:
+          default: any
+          description: "How `tags` match a page's tags: any, all, any_strict, all_strict,\
+            \ exact. 'any'/'all' also return untagged pages; the _strict modes and\
+            \ 'exact' do not."
+          enum:
+          - any
+          - all
+          - any_strict
+          - all_strict
+          - exact
+          title: Tags Match
+          type: string
+        style: form
+      - description: "JSON-encoded compound tag filter, same shape as recall's `tag_groups`,\
+          \ e.g. `[{\"or\":[{\"tags\":[\"user:kate\"],\"match\":\"all_strict\"},{\"\
+          tags\":[\"team\"]}]}]`. Top-level groups are AND-ed, and AND-ed with `tags`."
+        explode: true
+        in: query
+        name: tag_groups
+        required: false
+        schema:
+          nullable: true
+          type: string
+        style: form
       - explode: false
         in: header
         name: authorization
@@ -1844,6 +1888,50 @@ paths:
           minimum: 1
           title: Limit
           type: integer
+        style: form
+      - description: "Only return pages carrying these tags (matched per `tags_match`,\
+          \ like recall)."
+        explode: true
+        in: query
+        name: tags
+        required: false
+        schema:
+          items:
+            type: string
+          nullable: true
+          type: array
+        style: form
+      - description: "How `tags` match a page's tags: any, all, any_strict, all_strict,\
+          \ exact. 'any'/'all' also return untagged pages; the _strict modes and 'exact'\
+          \ do not."
+        explode: true
+        in: query
+        name: tags_match
+        required: false
+        schema:
+          default: any
+          description: "How `tags` match a page's tags: any, all, any_strict, all_strict,\
+            \ exact. 'any'/'all' also return untagged pages; the _strict modes and\
+            \ 'exact' do not."
+          enum:
+          - any
+          - all
+          - any_strict
+          - all_strict
+          - exact
+          title: Tags Match
+          type: string
+        style: form
+      - description: "JSON-encoded compound tag filter, same shape as recall's `tag_groups`,\
+          \ e.g. `[{\"or\":[{\"tags\":[\"user:kate\"],\"match\":\"all_strict\"},{\"\
+          tags\":[\"team\"]}]}]`. Top-level groups are AND-ed, and AND-ed with `tags`."
+        explode: true
+        in: query
+        name: tag_groups
+        required: false
+        schema:
+          nullable: true
+          type: string
         style: form
       - explode: false
         in: header

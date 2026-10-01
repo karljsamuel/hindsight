@@ -211,6 +211,22 @@ export interface OperationProgress {
   detail?: Record<string, number> | null;
 }
 
+/** Tag filter for the knowledge-base tree and search (recall's tags / tags_match). */
+export interface KnowledgeTagFilter {
+  tags?: string[];
+  tags_match?: TagsMatch;
+}
+
+/** `&tags=..&tags_match=..`, or "" when the filter is empty. */
+function knowledgeTagQuery(filter?: KnowledgeTagFilter): string {
+  const params = new URLSearchParams();
+  filter?.tags?.forEach((tag) => params.append("tags", tag));
+  if (filter?.tags_match && (filter.tags?.length || filter.tags_match === "exact"))
+    params.set("tags_match", filter.tags_match);
+  const qs = params.toString();
+  return qs ? `&${qs}` : "";
+}
+
 export type TagsMatch = "any" | "all" | "any_strict" | "all_strict" | "exact";
 
 // Time axes the two list endpoints can filter and order by. The chosen axis does
@@ -857,16 +873,16 @@ export class ControlPlaneClient {
   /**
    * Get the knowledge base as a nested folder/page tree.
    */
-  async getKnowledgeTree(bankId: string) {
+  async getKnowledgeTree(bankId: string, filter?: KnowledgeTagFilter) {
     return this.fetchApi<{ roots: KnowledgeNode[] }>(
-      `/api/knowledge-base/tree?bank_id=${encodeURIComponent(bankId)}`
+      `/api/knowledge-base/tree?bank_id=${encodeURIComponent(bankId)}${knowledgeTagQuery(filter)}`
     );
   }
 
   /**
    * Hybrid search (BM25 + vector) across a bank's knowledge pages.
    */
-  async searchKnowledgePages(bankId: string, q: string, limit = 10) {
+  async searchKnowledgePages(bankId: string, q: string, limit = 10, filter?: KnowledgeTagFilter) {
     return this.fetchApi<{
       results: Array<{
         id: string;
@@ -878,7 +894,7 @@ export class ControlPlaneClient {
       }>;
       total: number;
     }>(
-      `/api/knowledge-base/search?bank_id=${encodeURIComponent(bankId)}&q=${encodeURIComponent(q)}&limit=${limit}`
+      `/api/knowledge-base/search?bank_id=${encodeURIComponent(bankId)}&q=${encodeURIComponent(q)}&limit=${limit}${knowledgeTagQuery(filter)}`
     );
   }
 

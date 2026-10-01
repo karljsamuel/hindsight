@@ -2386,6 +2386,64 @@
             }
           },
           {
+            "name": "tags",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only return pages carrying these tags (matched per `tags_match`, like recall).",
+              "title": "Tags"
+            },
+            "description": "Only return pages carrying these tags (matched per `tags_match`, like recall)."
+          },
+          {
+            "name": "tags_match",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "any",
+                "all",
+                "any_strict",
+                "all_strict",
+                "exact"
+              ],
+              "type": "string",
+              "description": "How `tags` match a page's tags: any, all, any_strict, all_strict, exact. 'any'/'all' also return untagged pages; the _strict modes and 'exact' do not.",
+              "default": "any",
+              "title": "Tags Match"
+            },
+            "description": "How `tags` match a page's tags: any, all, any_strict, all_strict, exact. 'any'/'all' also return untagged pages; the _strict modes and 'exact' do not."
+          },
+          {
+            "name": "tag_groups",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "JSON-encoded compound tag filter, same shape as recall's `tag_groups`, e.g. `[{\"or\":[{\"tags\":[\"user:kate\"],\"match\":\"all_strict\"},{\"tags\":[\"team\"]}]}]`. Top-level groups are AND-ed, and AND-ed with `tags`.",
+              "title": "Tag Groups"
+            },
+            "description": "JSON-encoded compound tag filter, same shape as recall's `tag_groups`, e.g. `[{\"or\":[{\"tags\":[\"user:kate\"],\"match\":\"all_strict\"},{\"tags\":[\"team\"]}]}]`. Top-level groups are AND-ed, and AND-ed with `tags`."
+          },
+          {
             "name": "authorization",
             "in": "header",
             "required": false,
@@ -2672,6 +2730,64 @@
               "title": "Limit"
             },
             "description": "Maximum results to return"
+          },
+          {
+            "name": "tags",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only return pages carrying these tags (matched per `tags_match`, like recall).",
+              "title": "Tags"
+            },
+            "description": "Only return pages carrying these tags (matched per `tags_match`, like recall)."
+          },
+          {
+            "name": "tags_match",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "any",
+                "all",
+                "any_strict",
+                "all_strict",
+                "exact"
+              ],
+              "type": "string",
+              "description": "How `tags` match a page's tags: any, all, any_strict, all_strict, exact. 'any'/'all' also return untagged pages; the _strict modes and 'exact' do not.",
+              "default": "any",
+              "title": "Tags Match"
+            },
+            "description": "How `tags` match a page's tags: any, all, any_strict, all_strict, exact. 'any'/'all' also return untagged pages; the _strict modes and 'exact' do not."
+          },
+          {
+            "name": "tag_groups",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "JSON-encoded compound tag filter, same shape as recall's `tag_groups`, e.g. `[{\"or\":[{\"tags\":[\"user:kate\"],\"match\":\"all_strict\"},{\"tags\":[\"team\"]}]}]`. Top-level groups are AND-ed, and AND-ed with `tags`.",
+              "title": "Tag Groups"
+            },
+            "description": "JSON-encoded compound tag filter, same shape as recall's `tag_groups`, e.g. `[{\"or\":[{\"tags\":[\"user:kate\"],\"match\":\"all_strict\"},{\"tags\":[\"team\"]}]}]`. Top-level groups are AND-ed, and AND-ed with `tags`."
           },
           {
             "name": "authorization",

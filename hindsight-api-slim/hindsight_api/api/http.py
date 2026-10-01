@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from opentelemetry.trace import Span
 
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator, model_validator
 
 from hindsight_api import MemoryEngine
 from hindsight_api.config import RETAIN_EXTRACTION_MODES
@@ -215,6 +215,7 @@ from hindsight_api.engine.interface import BankTemplateImportWrite
 from hindsight_api.engine.memory_engine import (
     KEEP_PARENT,
     Budget,
+    KnowledgeTagFilter,
     RetainOperationConflictError,
     VisionNotSupportedError,
     _current_schema,
@@ -3576,6 +3577,34 @@ def _knowledge_node_model(node: dict[str, Any]) -> KnowledgeNode:
         last_refresh_failed_at=node.get("last_refresh_failed_at") if is_page else None,
         trigger=node.get("trigger") if is_page else None,
     )
+
+
+def _knowledge_tag_filter(
+    tags: list[str] | None = Query(
+        None,
+        description="Only return pages carrying these tags (matched per `tags_match`, like recall).",
+    ),
+    tags_match: TagsMatch = Query(
+        "any",
+        description="How `tags` match a page's tags: any, all, any_strict, all_strict, exact. "
+        "'any'/'all' also return untagged pages; the _strict modes and 'exact' do not.",
+    ),
+    tag_groups: str | None = Query(
+        None,
+        description="JSON-encoded compound tag filter, same shape as recall's `tag_groups`, e.g. "
+        '`[{"or":[{"tags":["user:kate"],"match":"all_strict"},{"tags":["team"]}]}]`. '
+        "Top-level groups are AND-ed, and AND-ed with `tags`.",
+    ),
+) -> KnowledgeTagFilter:
+    """Query-string tag filter shared by the knowledge-base tree and search."""
+    try:
+        groups = _TAG_GROUPS_ADAPTER.validate_json(tag_groups) if tag_groups else None
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=f"Invalid tag_groups: {e}")
+    return KnowledgeTagFilter(tags=tags or None, tags_match=tags_match, tag_groups=groups)
+
+
+_TAG_GROUPS_ADAPTER: TypeAdapter[list[TagGroup]] = TypeAdapter(list[TagGroup])
 
 
 def _build_knowledge_tree(nodes: list[dict[str, Any]]) -> list[KnowledgeNode]:
@@ -7085,12 +7114,13 @@ def _register_routes(app: FastAPI):
     )
     async def api_knowledge_base_tree(
         bank_id: str,
+        tag_filter: KnowledgeTagFilter = Depends(_knowledge_tag_filter),
         request_context: RequestContext = Depends(get_request_context),
     ):
         """Return the folder/page tree for a bank."""
         try:
             nodes = await app.state.memory.list_knowledge_nodes(
-                bank_id=bank_id, with_staleness=True, request_context=request_context
+                bank_id=bank_id, with_staleness=True, tag_filter=tag_filter, request_context=request_context
             )
             return KnowledgeTreeResponse(roots=_build_knowledge_tree(nodes))
         except OperationValidationError as e:
@@ -7244,12 +7274,13 @@ def _register_routes(app: FastAPI):
         bank_id: str,
         q: str = Query(..., description="Search query", min_length=1),
         limit: int = Query(10, ge=1, le=50, description="Maximum results to return"),
+        tag_filter: KnowledgeTagFilter = Depends(_knowledge_tag_filter),
         request_context: RequestContext = Depends(get_request_context),
     ):
         """Return knowledge pages ranked by fused BM25 + vector relevance."""
         try:
             results = await app.state.memory.search_knowledge_pages(
-                bank_id=bank_id, query=q, limit=limit, request_context=request_context
+                bank_id=bank_id, query=q, limit=limit, tag_filter=tag_filter, request_context=request_context
             )
             return KnowledgePageSearchResponse(
                 results=[KnowledgePageSearchResult(**r) for r in results],

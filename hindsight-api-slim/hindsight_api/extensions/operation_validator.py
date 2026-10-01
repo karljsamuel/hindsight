@@ -446,6 +446,12 @@ class BankReadContext:
     bank_id: str
     operation: BankReadOperation
     request_context: "RequestContext"
+    # The caller's tag filter, set only on the reads that take one (knowledge-base tree
+    # and search). A validator narrows what they return by answering with
+    # ``ValidationResult.accept_with(tags=..., tags_match=..., tag_groups=...)``.
+    tags: list[str] | None = None
+    tags_match: "TagsMatch" = "any"
+    tag_groups: "list[TagGroup] | None" = None
 
 
 @dataclass

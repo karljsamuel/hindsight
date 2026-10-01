@@ -8395,7 +8395,26 @@ export type GetKnowledgeBaseTreeData = {
      */
     bank_id: string;
   };
-  query?: never;
+  query?: {
+    /**
+     * Tags
+     *
+     * Only return pages carrying these tags (matched per `tags_match`, like recall).
+     */
+    tags?: Array<string> | null;
+    /**
+     * Tags Match
+     *
+     * How `tags` match a page's tags: any, all, any_strict, all_strict, exact. 'any'/'all' also return untagged pages; the _strict modes and 'exact' do not.
+     */
+    tags_match?: "any" | "all" | "any_strict" | "all_strict" | "exact";
+    /**
+     * Tag Groups
+     *
+     * JSON-encoded compound tag filter, same shape as recall's `tag_groups`, e.g. `[{"or":[{"tags":["user:kate"],"match":"all_strict"},{"tags":["team"]}]}]`. Top-level groups are AND-ed, and AND-ed with `tags`.
+     */
+    tag_groups?: string | null;
+  };
   url: "/v1/default/banks/{bank_id}/knowledge-base/tree";
 };
 
@@ -8566,6 +8585,24 @@ export type SearchKnowledgeBaseData = {
      * Maximum results to return
      */
     limit?: number;
+    /**
+     * Tags
+     *
+     * Only return pages carrying these tags (matched per `tags_match`, like recall).
+     */
+    tags?: Array<string> | null;
+    /**
+     * Tags Match
+     *
+     * How `tags` match a page's tags: any, all, any_strict, all_strict, exact. 'any'/'all' also return untagged pages; the _strict modes and 'exact' do not.
+     */
+    tags_match?: "any" | "all" | "any_strict" | "all_strict" | "exact";
+    /**
+     * Tag Groups
+     *
+     * JSON-encoded compound tag filter, same shape as recall's `tag_groups`, e.g. `[{"or":[{"tags":["user:kate"],"match":"all_strict"},{"tags":["team"]}]}]`. Top-level groups are AND-ed, and AND-ed with `tags`.
+     */
+    tag_groups?: string | null;
   };
   url: "/v1/default/banks/{bank_id}/knowledge-base/search";
 };

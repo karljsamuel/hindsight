@@ -26,6 +26,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterat
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, ParamSpec, TypeVar, cast
 
 import asyncpg
@@ -590,6 +591,7 @@ from .interface import BankConfigState, BankTemplateImportWrite, MemoryEngineInt
 if TYPE_CHECKING:
     from hindsight_api.config_resolver import ValidatedBankConfigUpdate
     from hindsight_api.extensions import (
+        BankReadOperation,
         BankWriteOperation,
         MemoryCurationAction,
         OperationValidatorExtension,
@@ -695,10 +697,13 @@ from .retain.types import RetainBatchResult, RetainContentDict, merge_processed_
 from .search.reranking import CrossEncoderReranker, apply_combined_scoring
 from .search.tag_resolution import MAX_VOCABULARY, TagResolutionError, needs_resolution, resolve_tag_groups
 from .search.tags import (
+    TagClause,
     TagGroup,
     TagsMatch,
     build_tag_groups_where_clause,
     build_tags_where_clause,
+    filter_results_by_tag_groups,
+    filter_results_by_tags,
     strict_tag_group,
     strict_tags_match,
 )
@@ -1742,6 +1747,42 @@ class RefreshTagFiltering:
 
 
 @dataclass(frozen=True)
+class KnowledgeTagFilter:
+    """Which knowledge pages a tree or search read may return, by their tags.
+
+    Same semantics as recall's ``tags``/``tags_match``/``tag_groups``, applied to the
+    page's mental-model tags. The default (no tags, no groups) filters nothing.
+    """
+
+    tags: list[str] | None = None
+    tags_match: TagsMatch = "any"
+    tag_groups: list[TagGroup] | None = None
+
+    @property
+    def active(self) -> bool:
+        return bool(self.tags) or bool(self.tag_groups) or self.tags_match == "exact"
+
+    def clause(self, param_offset: int) -> TagClause:
+        """SQL over the page's mental-model ``tags``, starting with ``AND`` (or empty).
+
+        The column is left unqualified on purpose: Oracle's dialect rewrites ``tags && :n``
+        / ``tags @> :n`` with a regex that only matches a bare column name, so ``mm.tags``
+        would come out as broken SQL there. It is unambiguous in the ``kp``/``mm`` join
+        because ``knowledge_pages`` has no ``tags`` column.
+        """
+        flat = build_tags_where_clause(self.tags, param_offset, "", self.tags_match)
+        groups = build_tag_groups_where_clause(self.tag_groups, flat.next_param_offset, "")
+        return TagClause(f"{flat.sql} {groups.sql}", flat.params + groups.params, groups.next_param_offset)
+
+    def matches(self, tags: list[str] | None) -> bool:
+        probe = [SimpleNamespace(tags=tags)]
+        return bool(
+            filter_results_by_tags(probe, self.tags, self.tags_match)
+            and filter_results_by_tag_groups(probe, self.tag_groups)
+        )
+
+
+@dataclass(frozen=True)
 class _MentalModelScopeWatermark:
     """What one ``MAX(updated_at)`` over a mental model's scope tells a refresh.
 
@@ -1788,6 +1829,19 @@ def _resolve_refresh_tag_filtering(
     trigger_tags_match = trigger_data.get("tags_match")
     tags_match: TagsMatch = trigger_tags_match if trigger_tags_match else ("all_strict" if model_tags else "any")
     return RefreshTagFiltering(tags=model_tags, tags_match=tags_match, tag_groups=None)
+
+
+def _prune_knowledge_rows(rows: list[Any], tag_filter: KnowledgeTagFilter) -> list[Any]:
+    """Keep the pages ``tag_filter`` matches and the folders above them."""
+    parent = {r["id"]: r["parent_id"] for r in rows}
+    keep: set[str] = set()
+    for r in rows:
+        if r["kind"] == "page" and tag_filter.matches(r["mm_tags"]):
+            node_id = r["id"]
+            while node_id is not None and node_id not in keep:
+                keep.add(node_id)
+                node_id = parent.get(node_id)
+    return [r for r in rows if r["id"] in keep]
 
 
 def _knowledge_tree_sort_key(row: Any) -> tuple[bool, int, str]:
@@ -18578,8 +18632,52 @@ class MemoryEngine(MemoryEngineInterface):
         node["last_refreshed_at"] = mm.get("last_refreshed_at")
         return node
 
+    async def _knowledge_read_filter(
+        self,
+        bank_id: str,
+        operation: "BankReadOperation",
+        tag_filter: KnowledgeTagFilter,
+        request_context: "RequestContext",
+    ) -> KnowledgeTagFilter:
+        """Validate a knowledge-base read and return the tag filter it runs with.
+
+        The validator sees the caller's filter and may replace any part of it (the
+        same ``accept_with`` enrichment recall honours), which is how an extension
+        trims the tree or search to a caller's own pages. Fuzzy leaves are then
+        resolved, after the validator, so a validator-supplied group is resolved too.
+        """
+        await self._authenticate_tenant(request_context)
+        if self._operation_validator and not _nested_operation_authorized.get():
+            from hindsight_api.extensions import BankReadContext
+
+            ctx = BankReadContext(
+                bank_id=bank_id,
+                operation=operation,
+                request_context=request_context,
+                tags=tag_filter.tags,
+                tags_match=tag_filter.tags_match,
+                tag_groups=tag_filter.tag_groups,
+            )
+            result = await self._validate_operation(self._operation_validator.validate_bank_read(ctx))
+            if result:
+                tag_filter = KnowledgeTagFilter(
+                    tags=result.tags if result.tags is not None else tag_filter.tags,
+                    tags_match=result.tags_match if result.tags_match is not None else tag_filter.tags_match,
+                    tag_groups=result.tag_groups if result.tag_groups is not None else tag_filter.tag_groups,
+                )
+        await self._require_bank_exists(bank_id)
+        # Fuzzy tokens resolve against the bank's *memory* tags (the vocabulary recall uses);
+        # page tags are scopes over those memories, so the two vocabularies coincide in practice.
+        tag_groups = await self._resolve_fuzzy_tag_groups(bank_id, tag_filter.tag_groups)
+        return replace(tag_filter, tag_groups=tag_groups)
+
     async def list_knowledge_nodes(
-        self, bank_id: str, *, with_staleness: bool = False, request_context: "RequestContext"
+        self,
+        bank_id: str,
+        *,
+        with_staleness: bool = False,
+        tag_filter: KnowledgeTagFilter | None = None,
+        request_context: "RequestContext",
     ) -> list[dict[str, Any]]:
         """Return every folder/page node in the bank (flat; caller builds the tree).
 
@@ -18599,18 +18697,16 @@ class MemoryEngine(MemoryEngineInterface):
         shortcut in front of it, read live there rather than taken from a cache, so
         it rules pages *out* of the scoped query without ever standing in for its
         answer.
-        """
-        await self._authenticate_tenant(request_context)
-        if self._operation_validator and not _nested_operation_authorized.get():
-            from hindsight_api.extensions import BankReadContext, BankReadOperation
 
-            ctx = BankReadContext(
-                bank_id=bank_id,
-                operation=BankReadOperation.GET_KNOWLEDGE_BASE_TREE,
-                request_context=request_context,
-            )
-            await self._validate_operation(self._operation_validator.validate_bank_read(ctx))
-        await self._require_bank_exists(bank_id)
+        ``tag_filter`` keeps only the pages whose tags match it, and the folders on
+        the path to one: a folder left empty by the filter is dropped, since its name
+        can say as much as the pages under it.
+        """
+        from hindsight_api.extensions import BankReadOperation
+
+        tag_filter = await self._knowledge_read_filter(
+            bank_id, BankReadOperation.GET_KNOWLEDGE_BASE_TREE, tag_filter or KnowledgeTagFilter(), request_context
+        )
         backend = await self._get_backend()
         async with acquire_with_retry(backend) as conn:
             rows = await conn.fetch(
@@ -18624,6 +18720,8 @@ class MemoryEngine(MemoryEngineInterface):
             # Sorted here, not in SQL: knowledge_pages.name is a CLOB on Oracle and
             # ORDER BY on a CLOB raises ORA-22848.
             rows = sorted(rows, key=_knowledge_tree_sort_key)
+            if tag_filter.active:
+                rows = _prune_knowledge_rows(rows, tag_filter)
             nodes = [self._row_to_knowledge_node(r) for r in rows]
             if with_staleness:
                 by_id = {n["id"]: n for n in nodes}
@@ -18699,7 +18797,13 @@ class MemoryEngine(MemoryEngineInterface):
         return node
 
     async def search_knowledge_pages(
-        self, bank_id: str, query: str, *, limit: int = 10, request_context: "RequestContext"
+        self,
+        bank_id: str,
+        query: str,
+        *,
+        limit: int = 10,
+        tag_filter: KnowledgeTagFilter | None = None,
+        request_context: "RequestContext",
     ) -> list[dict[str, Any]]:
         """Doc-level hybrid search over a bank's knowledge pages.
 
@@ -18729,18 +18833,15 @@ class MemoryEngine(MemoryEngineInterface):
         ranking is ``ts_rank_cd`` alone, which weighs term density and proximity but
         not term rarity. That fallback is broad by design: an exhaustive AND returned
         nothing at all for ordinary multi-word questions.
-        """
-        await self._authenticate_tenant(request_context)
-        if self._operation_validator and not _nested_operation_authorized.get():
-            from hindsight_api.extensions import BankReadContext, BankReadOperation
 
-            ctx = BankReadContext(
-                bank_id=bank_id,
-                operation=BankReadOperation.SEARCH_KNOWLEDGE_BASE,
-                request_context=request_context,
-            )
-            await self._validate_operation(self._operation_validator.validate_bank_read(ctx))
-        await self._require_bank_exists(bank_id)
+        ``tag_filter`` restricts every arm to the pages whose tags match it, before
+        ranking, so a filtered search still fills ``limit`` from the matching pages.
+        """
+        from hindsight_api.extensions import BankReadOperation
+
+        tag_filter = await self._knowledge_read_filter(
+            bank_id, BankReadOperation.SEARCH_KNOWLEDGE_BASE, tag_filter or KnowledgeTagFilter(), request_context
+        )
         query = (query or "").strip()
         if not query:
             return []
@@ -18775,6 +18876,9 @@ class MemoryEngine(MemoryEngineInterface):
             if not matches:
                 return []
             order = {m.page_id: i for i, m in enumerate(matches)}
+            # ponytail: the store ranks the whole page set, so a filter applied at hydration can
+            # leave fewer than `limit` hits; push the filter into the store protocol if that bites.
+            store_tags = tag_filter.clause(3)
             backend = await self._get_backend()
             async with acquire_with_retry(backend) as conn:
                 rows = await conn.fetch(
@@ -18783,9 +18887,11 @@ class MemoryEngine(MemoryEngineInterface):
                            LEFT(mm.content, 280) AS snippet, mm.source_query, mm.last_refreshed_at AS updated_at
                     FROM {join}
                     WHERE kp.bank_id = $1 AND kp.kind = 'page' AND kp.mental_model_id = ANY($2::text[])
+                          {store_tags.sql}
                     """,
                     bank_id,
                     list(order),
+                    *store_tags.params,
                 )
             # Rank by the store's ordering, not the join's: the SELECT above returns rows in
             # whatever order the planner chose, and dropping back to that would silently discard
@@ -18834,6 +18940,8 @@ class MemoryEngine(MemoryEngineInterface):
 
         backend = await self._get_backend()
         async with acquire_with_retry(backend) as conn:
+            # Two binds precede the filter on the vector-only and BM25-only paths, three on the fused one.
+            tags_clause = tag_filter.clause(4 if emb_str is not None and include_bm25 else 3)
             if emb_str is not None and not include_bm25:
                 # Vector-only: no BM25 arm to fuse with, so rank straight off the ANN scan.
                 sql = f"""
@@ -18842,10 +18950,11 @@ class MemoryEngine(MemoryEngineInterface):
                            {_KNOWLEDGE_RRF_NORM} / ({_KNOWLEDGE_RRF_K} + ROW_NUMBER() OVER (ORDER BY mm.embedding <=> $1::vector)) AS score
                     FROM {join}
                     WHERE kp.bank_id = $2 AND kp.kind = 'page' AND mm.embedding IS NOT NULL
+                          {tags_clause.sql}
                     ORDER BY mm.embedding <=> $1::vector
                     LIMIT {limit}
                 """
-                rows = await conn.fetch(sql, emb_str, bank_id)
+                rows = await conn.fetch(sql, emb_str, bank_id, *tags_clause.params)
             else:
                 # Same builder the memory-recall BM25 arm uses, so the two paths cannot
                 # drift apart on query shape again — knowledge search used to bind the
@@ -18883,6 +18992,7 @@ class MemoryEngine(MemoryEngineInterface):
                                    ROW_NUMBER() OVER (ORDER BY mm.embedding <=> $1::vector) AS rnk
                             FROM {join}
                             WHERE kp.bank_id = $2 AND kp.kind = 'page' AND mm.embedding IS NOT NULL
+                                  {tags_clause.sql}
                             ORDER BY mm.embedding <=> $1::vector
                             LIMIT {fetch}
                         ),
@@ -18892,6 +19002,7 @@ class MemoryEngine(MemoryEngineInterface):
                             FROM {join}
                             WHERE kp.bank_id = $2 AND kp.kind = 'page'
                                   {bm25.match_filter}
+                                  {tags_clause.sql}
                             ORDER BY {bm25.order_by}
                             LIMIT {fetch}
                         ),
@@ -18909,7 +19020,7 @@ class MemoryEngine(MemoryEngineInterface):
                         ORDER BY f.score DESC
                         LIMIT {limit}
                     """
-                    rows = await conn.fetch(sql, emb_str, bank_id, bm25_text)
+                    rows = await conn.fetch(sql, emb_str, bank_id, bm25_text, *tags_clause.params)
                 else:
                     # Embedding unavailable → BM25-only fallback (still useful).
                     bm25 = knowledge_bm25_arm(
@@ -18931,10 +19042,11 @@ class MemoryEngine(MemoryEngineInterface):
                         FROM {join}
                         WHERE kp.bank_id = $1 AND kp.kind = 'page'
                               {bm25.match_filter}
+                              {tags_clause.sql}
                         ORDER BY {bm25.order_by}
                         LIMIT {limit}
                     """
-                    rows = await conn.fetch(sql, bank_id, bm25_text)
+                    rows = await conn.fetch(sql, bank_id, bm25_text, *tags_clause.params)
 
         return [
             {
