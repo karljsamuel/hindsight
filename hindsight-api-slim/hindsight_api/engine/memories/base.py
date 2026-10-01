@@ -50,7 +50,7 @@ from ...extensions.base import Extension
 # rather than `str` so a store implementing this seam is checked against the modes that
 # actually exist -- the SQL builders below take this exact type, and a bare `str` made
 # every hop between them unverifiable.
-from ..search.tags import TagsMatch, tag_filter_active
+from ..search.tags import TagGroup, TagsMatch, tag_filter_active
 from ..search.types import RetrievalResult
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -1415,6 +1415,7 @@ class MemoriesExtension(Extension, ABC):
         search_query: "str | None" = None,
         tags: "list[str] | None" = None,
         tags_match: TagsMatch = "any_strict",
+        tag_groups: "list[TagGroup] | None" = None,
         time_field: str | None = None,
         start_date: "datetime | None" = None,
         end_date: "datetime | None" = None,
@@ -1819,8 +1820,11 @@ class MemoriesExtension(Extension, ABC):
         pattern: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        tag_groups: "list[TagGroup] | None" = None,
     ) -> dict[str, Any]:
         """One page of a bank's tag histogram, filtered/sorted/paged by the store.
+
+        ``tag_groups`` (a caller's forced tag scope) limits the histogram to the memories it admits.
 
         Returns ``{"items": [{"tag", "count"}], "total", "limit", "offset"}``.
         ``pattern`` is a case-insensitive wildcard (``*``); ordering is count
@@ -2112,7 +2116,15 @@ class MemoriesExtension(Extension, ABC):
         raise NotImplementedError
 
     async def memories_timeseries(
-        self, *, conn, fq_table, bank_id: str, time_field: str, trunc: str, since: datetime
+        self,
+        *,
+        conn,
+        fq_table,
+        bank_id: str,
+        time_field: str,
+        trunc: str,
+        since: datetime,
+        tag_groups: "list[TagGroup] | None" = None,
     ) -> list[dict[str, Any]]:
         """``[{"bucket": datetime, "fact_type": str, "count": int}]`` since ``since``.
 
@@ -2124,7 +2136,14 @@ class MemoriesExtension(Extension, ABC):
         raise NotImplementedError
 
     async def observation_scope_counts(
-        self, *, conn, fq_table, bank_id: str, limit: int = 100, offset: int = 0
+        self,
+        *,
+        conn,
+        fq_table,
+        bank_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        tag_groups: "list[TagGroup] | None" = None,
     ) -> dict[str, Any]:
         """One page of the observation scope histogram, paged by the store.
 
@@ -2160,6 +2179,7 @@ class MemoriesExtension(Extension, ABC):
         entity_id: str | None = None,
         tags: list[str] | None = None,
         tags_match: TagsMatch = "any",
+        tag_groups: "list[TagGroup] | None" = None,
         created_before: "datetime | None" = None,
         time_field: str | None = None,
         start_date: "datetime | None" = None,
@@ -2171,6 +2191,8 @@ class MemoriesExtension(Extension, ABC):
 
         ``total`` is the count matching the filters, not the page size, because
         the UI pages on it.
+
+        ``tag_groups`` (AND-ed with ``tags``) carries a caller's forced tag scope.
 
         ``time_field`` / ``start_date`` / ``end_date`` are one time window: the
         named axis filters AND orders, and memories with no value on it are left
@@ -2359,6 +2381,7 @@ class MemoriesExtension(Extension, ABC):
         chunk_id: str | None = None,
         tags: list[str] | None = None,
         tags_match: TagsMatch = "all_strict",
+        tag_groups: "list[TagGroup] | None" = None,
         limit: int = 1000,
     ) -> dict[str, Any]:
         """Memory nodes for the graph view, plus the total matching count.
@@ -2388,6 +2411,7 @@ class MemoriesExtension(Extension, ABC):
         chunk_id: str | None = None,
         tags: list[str] | None = None,
         tags_match: TagsMatch = "all_strict",
+        tag_groups: "list[TagGroup] | None" = None,
         limit: int = 1000,
     ) -> dict[str, Any]:
         """Everything one graph render reads, in one pass:
@@ -2417,6 +2441,7 @@ class MemoriesExtension(Extension, ABC):
             chunk_id=chunk_id,
             tags=tags,
             tags_match=tags_match,
+            tag_groups=tag_groups,
             limit=limit,
         )
         units = page["units"]
@@ -2919,6 +2944,7 @@ class MemoriesExtension(Extension, ABC):
         search_query: str | None,
         tags: list[str] | None,
         tags_match: TagsMatch,
+        tag_groups: "list[TagGroup] | None",
         time_field: str | None,
         start_date: datetime | None,
         end_date: datetime | None,
@@ -2934,6 +2960,7 @@ class MemoriesExtension(Extension, ABC):
             search_query=search_query,
             tags=tags,
             tags_match=tags_match,
+            tag_groups=tag_groups,
             time_field=time_field,
             start_date=start_date,
             end_date=end_date,
