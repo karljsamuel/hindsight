@@ -607,7 +607,7 @@ class Hindsight:
         file_data = []
         for file_path in files:
             path = Path(file_path)
-            file_data.append((path.name, path.read_bytes()))
+            file_data.append((path.name, await asyncio.to_thread(path.read_bytes)))
 
         meta = files_metadata or [{"context": context} if context else {} for _ in files]
 
