@@ -7,6 +7,7 @@ easy-to-use interface on top of the auto-generated OpenAPI client.
 
 import asyncio
 import json
+import math
 import random
 import warnings
 from collections.abc import Awaitable, Callable, Iterator
@@ -185,7 +186,8 @@ def _retry_after_seconds(e: "ApiException") -> float | None:
     if raw is None:
         return None
     try:
-        return max(0.0, float(raw))
+        seconds = float(raw)
+        return max(0.0, seconds) if math.isfinite(seconds) else None
     except (TypeError, ValueError):
         # HTTP-date form; the fallback backoff is a better answer than parsing dates.
         return None
