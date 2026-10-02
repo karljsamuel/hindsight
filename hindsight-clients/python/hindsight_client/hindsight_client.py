@@ -2567,7 +2567,11 @@ class Hindsight:
             auth_settings=[],
         )
         response = await self._api_client.call_api(*request, _request_timeout=self._timeout)
-        return bytes(await response.read())
+        archive = await response.read()
+        # Called only for its status check: it raises ApiException on a non-2XX download, which
+        # would otherwise hand the error body back as the archive.
+        self._api_client.response_deserialize(response, response_types_map={"2XX": "bytearray"})
+        return bytes(archive)
 
     # Directives methods
 
