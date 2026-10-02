@@ -1024,7 +1024,7 @@ class Hindsight:
 
         url = f"{self._base_url}/v1/default/banks/{quote(bank_id, safe='')}"
         headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.put(
                 url, json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=self._timeout)
             ) as resp:
@@ -2808,7 +2808,7 @@ class Hindsight:
     async def _aget_bank_config(self, bank_id: str) -> dict[str, Any]:
         url = f"{self._base_url}/v1/default/banks/{quote(bank_id, safe='')}/config"
         headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=self._timeout)) as resp:
                 resp.raise_for_status()
                 return await resp.json()
@@ -3147,7 +3147,7 @@ class Hindsight:
     async def _aupdate_bank_config(self, bank_id: str, updates: dict[str, Any]) -> dict[str, Any]:
         url = f"{self._base_url}/v1/default/banks/{quote(bank_id, safe='')}/config"
         headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.patch(
                 url, json={"updates": updates}, headers=headers, timeout=aiohttp.ClientTimeout(total=self._timeout)
             ) as resp:
@@ -3179,7 +3179,7 @@ class Hindsight:
     async def _areset_bank_config(self, bank_id: str) -> dict[str, Any]:
         url = f"{self._base_url}/v1/default/banks/{quote(bank_id, safe='')}/config"
         headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.delete(url, headers=headers, timeout=aiohttp.ClientTimeout(total=self._timeout)) as resp:
                 resp.raise_for_status()
                 return await resp.json()
