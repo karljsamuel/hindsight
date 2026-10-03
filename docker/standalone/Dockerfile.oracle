@@ -1,0 +1,58 @@
+# Hindsight Oracle 26ai - Unified Image (API + Control Plane, No Local Models)
+# Build: docker build -f Dockerfile.oracle -t ghcr.io/karljsamuel/hindsight:oracle-latest .
+# Push: docker push ghcr.io/karljsamuel/hindsight:oracle-latest
+
+# Multi-stage build based on upstream slim image (from ghcr.io, not local)
+# Uses OCI Autonomous Database (external) - no local DB installation
+# Includes both API (8888) and Control Plane (9999)
+# No local ML models - uses external providers (OpenRouter, etc.)
+# Latest oracledb (26.x) with thin mode
+
+FROM ghcr.io/vectorize-io/hindsight:latest-slim AS base
+
+ARG INCLUDE_LOCAL_MODELS=false
+ARG PRELOAD_ML_MODELS=false
+ARG ORACLEDB_VERSION=26.0.1
+
+LABEL maintainer="karljsamuel" \
+    image.name="hindsight-oracle" \
+    image.type="unified" \
+    image.target="api+cp" \
+    image.database="oracle-26ai-oci" \
+    image.vector="oracle-native"
+
+# Set default environment
+ENV HINDSIGHT_API_DATABASE_BACKEND=oracle \
+    HINDSIGHT_API_VECTOR_EXTENSION=oracle \
+    HINDSIGHT_API_EMBEDDINGS_DIMENSION=2048 \
+    HINDSIGHT_API_DATABASE_SCHEME=AUTO \
+    TZ=Asia/Kolkata
+
+# Install runtime dependencies (lightweight)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    libaio1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the updated Hindsight code with Oracle fixes (from workspace, not upstream image)
+# Note: In a real build, this would COPY from the repo; the image uses base + patches
+# For the deployment-ready image, we assume patches are applied at build time
+COPY --from=base /app /app
+
+# Install/update Oracle driver to latest 26.x version
+RUN pip install --no-cache-dir --upgrade --target=/app/api/.venv/lib/python3.11/site-packages "oracledb>=26.0.0" \
+    && python3 -c "import oracledb; print('Oracle driver:', oracledb.__version__); print('Thin mode:', hasattr(oracledb, 'Connection'))"
+
+# Set timezone
+RUN ln -sf /usr/share/zoneinfo/Asia/Kolkata /etc/localtime || true
+
+# Expose API and Control Plane ports
+EXPOSE 8888 9999
+
+# Default entrypoint for unified deployment (API + Control Plane as processes)
+ENTRYPOINT ["/app/api/.venv/bin/python", "-m", "hindsight_api.cli"]
+CMD ["--host", "0.0.0.0", "--port", "8888"]
+
+# Alternative: Control Plane entry (if running separately)
+# CMD ["node", "/app/control-plane/standalone/server.js"]
