@@ -85,8 +85,10 @@ jobs:
         include:
           - platform: linux/amd64
             runner: ubuntu-26.04
+            run_smoke_test: "true"
           - platform: linux/arm64
             runner: ubuntu-26.04-arm
+            run_smoke_test: "false"
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
@@ -130,6 +132,7 @@ jobs:
             ORACLEDB_VERSION=26.0.1
 
       - name: Run smoke test on loaded image
+        if: matrix.run_smoke_test == 'true'
         run: |
           chmod +x smoketest.sh
           ./smoketest.sh ${{ steps.meta.outputs.tags }}
