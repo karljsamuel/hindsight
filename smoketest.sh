@@ -12,8 +12,10 @@ ORACLE_PASSWORD="testpassword123"
 HINDSIGHT_PORT=8888
 CONTAINER_NAME="hindsight-smoke-test-$$"
 ORACLE_CONTAINER_NAME="oracle-smoke-test-$$"
+NETWORK_NAME="smoke-test-net-$$"
 
-ORACLE_DSN="(description=(address=(protocol=tcp)(host=localhost)(port=${ORACLE_PORT}))(connect_data=(service_name=${ORACLE_PDB})))"
+# Use Docker network for inter-container communication
+ORACLE_DSN="(description=(address=(protocol=tcp)(host=${ORACLE_CONTAINER_NAME})(port=${ORACLE_PORT}))(connect_data=(service_name=${ORACLE_PDB})))"
 DATABASE_URL="oracle+oracledb://ADMIN:${ORACLE_PASSWORD}@/?dsn=${ORACLE_DSN}"
 
 echo "=== Smoke Test Starting ==="
@@ -26,12 +28,18 @@ cleanup() {
     docker rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
     docker stop "$ORACLE_CONTAINER_NAME" >/dev/null 2>&1 || true
     docker rm "$ORACLE_CONTAINER_NAME" >/dev/null 2>&1 || true
+    docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
+
+# Create Docker network for inter-container communication
+echo "Creating Docker network..."
+docker network create "$NETWORK_NAME" >/dev/null
 
 # Start Oracle Database Free container
 echo "Starting Oracle Database Free container..."
 docker run -d --name "$ORACLE_CONTAINER_NAME" \
+    --network "$NETWORK_NAME" \
     -e ORACLE_PASSWORD="${ORACLE_PASSWORD}" \
     -p "${ORACLE_PORT}:1521" \
     container-registry.oracle.com/database/free:23.4.0.0 >/dev/null
@@ -65,13 +73,14 @@ EOF
 
 echo "✅ HINDSIGHT user created"
 
-# Update DSN to use the correct service name
-ORACLE_DSN="(description=(address=(protocol=tcp)(host=localhost)(port=${ORACLE_PORT}))(connect_data=(service_name=${ORACLE_PDB})))"
+# Update DSN to use the container name (resolves via Docker network)
+ORACLE_DSN="(description=(address=(protocol=tcp)(host=${ORACLE_CONTAINER_NAME})(port=${ORACLE_PORT}))(connect_data=(service_name=${ORACLE_PDB})))"
 DATABASE_URL="oracle+oracledb://HINDSIGHT:${ORACLE_PASSWORD}@/?dsn=${ORACLE_DSN}"
 
-# Start Hindsight container - NO MODEL/LLM ENV VARS
+# Start Hindsight container on the same network
 echo "Starting Hindsight container (database-only mode)..."
 docker run -d --name "$CONTAINER_NAME" \
+    --network "$NETWORK_NAME" \
     -e HINDSIGHT_API_DATABASE_BACKEND=oracle \
     -e HINDSIGHT_API_VECTOR_EXTENSION=oracle \
     -e HINDSIGHT_API_EMBEDDINGS_DIMENSION=2048 \
@@ -136,16 +145,18 @@ assert index_type_keyword('oracle') == 'hnsw'
 print('✅ Oracle vector index config correct')
 "
 
-# Test migration functions
+# Test migration functions - use the actual container name
+DB_URL="oracle+oracledb://HINDSIGHT:${ORACLE_PASSWORD}@/?dsn=(description=(address=(protocol=tcp)(host=${ORACLE_CONTAINER_NAME})(port=${ORACLE_PORT}))(connect_data=(service_name=${ORACLE_PDB})))"
 echo "Testing migration functions..."
 docker exec "$CONTAINER_NAME" python3 -c "
 from hindsight_api.migrations import _detect_vector_extension
 from sqlalchemy import create_engine
 from sqlalchemy.pool import NullPool
 
-db_url = 'oracle+oracledb://HINDSIGHT:testpassword123@/?dsn=(description=(address=(protocol=tcp)(host=localhost)(port=1521))(connect_data=(service_name=FREEPDB1)))'
+db_url = '${DATABASE_URL}'
 engine = create_engine(db_url, poolclass=NullPool)
 with engine.connect() as conn:
+    from hindsight_api.migrations import _detect_vector_extension
     ext = _detect_vector_extension(conn, 'oracle')
     assert ext == 'oracle'
     print('✅ Migration functions work with Oracle')
@@ -161,7 +172,7 @@ docker exec "$CONTAINER_NAME" python3 -c "
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.pool import NullPool
 
-db_url = 'oracle+oracledb://HINDSIGHT:testpassword123@/?dsn=(description=(address=(protocol=tcp)(host=localhost)(port=1521))(connect_data=(service_name=FREEPDB1)))'
+db_url = '${DATABASE_URL}'
 engine = create_engine(db_url, poolclass=NullPool)
 inspector = inspect(engine)
 tables = inspector.get_table_names()
