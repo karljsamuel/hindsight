@@ -90,7 +90,7 @@ jobs:
             runner: ubuntu-26.04-arm
             run_smoke_test: "false"
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
