@@ -42,12 +42,7 @@ ENV HINDSIGHT_API_DATABASE_BACKEND=oracle \
     HINDSIGHT_API_DATABASE_SCHEME=AUTO \
     TZ=Asia/Kolkata
 
-# Install runtime dependencies (lightweight - no Oracle client needed for thin mode)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
+# Base image already has curl and ca-certificates - no apt needed
 # Install/update Oracle driver to latest 26.x version (thin mode - pure Python)
 RUN pip install --no-cache-dir --upgrade --target=/app/api/.venv/lib/python3.11/site-packages "oracledb>=26.0.0" \
     && python3 -c "import oracledb; print('Oracle driver:', oracledb.__version__); print('Thin mode:', hasattr(oracledb, 'Connection'))"
