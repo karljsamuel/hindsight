@@ -56,3 +56,10 @@ CMD ["--host", "0.0.0.0", "--port", "8888"]
 
 # Alternative: Control Plane entry (if running separately)
 # CMD ["node", "/app/control-plane/standalone/server.js"]
+
+# Oracle-full stage - extends base with Oracle-specific configuration
+# This is the target stage for the build
+FROM base AS oracle-full
+
+# The oracle-full stage inherits from base and is the build target
+# No additional layers needed since base already has everything
