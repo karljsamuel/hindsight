@@ -793,15 +793,25 @@ def ensure_embedding_dimension(
     engine = create_engine(to_libpq_url(database_url), poolclass=NullPool)
     with engine.connect() as conn:
         # Check if memory_units table exists (proxy for schema being initialized)
-        table_exists = conn.execute(
-            text("""
-                SELECT EXISTS (
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = :schema AND table_name = 'memory_units'
-                )
-            """),
-            {"schema": schema_name},
-        ).scalar()
+        # Oracle uses all_tables, PostgreSQL uses information_schema.tables
+        if "oracle" in database_url.lower():
+            table_exists = conn.execute(
+                text("""
+                    SELECT 1 FROM all_tables
+                    WHERE owner = :schema AND table_name = 'MEMORY_UNITS'
+                """),
+                {"schema": schema_name.upper()},
+            ).scalar() is not None
+        else:
+            table_exists = conn.execute(
+                text("""
+                    SELECT EXISTS (
+                        SELECT 1 FROM information_schema.tables
+                        WHERE table_schema = :schema AND table_name = 'memory_units'
+                    )
+                """),
+                {"schema": schema_name},
+            ).scalar()
 
         if not table_exists:
             logger.debug(f"memory_units table does not exist in schema '{schema_name}', skipping dimension check")
@@ -882,16 +892,25 @@ def ensure_vector_extension(
         tables_with_data = []
 
         for table_name, index_name in tables_to_check:
-            # Check if table exists
-            table_exists = conn.execute(
-                text("""
-                    SELECT EXISTS (
-                        SELECT 1 FROM information_schema.tables
-                        WHERE table_schema = :schema AND table_name = :table_name
-                    )
-                """),
-                {"schema": schema_name, "table_name": table_name},
-            ).scalar()
+            # Check if table exists (Oracle-compatible)
+            if "oracle" in database_url.lower():
+                table_exists = conn.execute(
+                    text("""
+                        SELECT 1 FROM all_tables
+                        WHERE owner = :schema AND table_name = :table_name
+                    """),
+                    {"schema": schema_name.upper(), "table_name": table_name.upper()},
+                ).scalar() is not None
+            else:
+                table_exists = conn.execute(
+                    text("""
+                        SELECT EXISTS (
+                            SELECT 1 FROM information_schema.tables
+                            WHERE table_schema = :schema AND table_name = :table_name
+                        )
+                    """),
+                    {"schema": schema_name, "table_name": table_name},
+                ).scalar()
 
             if not table_exists:
                 logger.debug(f"Table {table_name} does not exist in schema '{schema_name}', skipping")
@@ -901,17 +920,29 @@ def ensure_vector_extension(
                 text(f"SELECT COUNT(*) FROM {schema_name}.{table_name} WHERE embedding IS NOT NULL")
             ).scalar()
 
-            # Check current index type by querying pg_indexes
-            current_index_rows = conn.execute(
-                text("""
-                    SELECT indexdef, indexname
-                    FROM pg_indexes
-                    WHERE schemaname = :schema
-                      AND tablename = :table_name
-                      AND indexname LIKE :index_pattern
-                """),
-                {"schema": schema_name, "table_name": table_name, "index_pattern": "%embedding%"},
-            ).fetchall()
+            # Check current index type (Oracle-compatible)
+            if "oracle" in database_url.lower():
+                current_index_rows = conn.execute(
+                    text("""
+                        SELECT index_name, parameters, index_type
+                        FROM all_indexes
+                        WHERE table_owner = :schema
+                          AND table_name = :table_name
+                          AND index_name LIKE :index_pattern
+                    """),
+                    {"schema": schema_name.upper(), "table_name": table_name.upper(), "index_pattern": "%EMBEDDING%"},
+                ).fetchall()
+            else:
+                current_index_rows = conn.execute(
+                    text("""
+                        SELECT indexdef, indexname
+                        FROM pg_indexes
+                        WHERE schemaname = :schema
+                          AND tablename = :table_name
+                          AND indexname LIKE :index_pattern
+                    """),
+                    {"schema": schema_name, "table_name": table_name, "index_pattern": "%embedding%"},
+                ).fetchall()
 
             if table_name == "memory_units" and uses_per_bank_vector_indexes(target_ext):
                 # Per-bank backends never use a GLOBAL memory_units vector index.
@@ -955,18 +986,35 @@ def ensure_vector_extension(
                 mismatched_tables.append((table_name, index_name, None, row_count))
                 continue
 
-            indexdef = current_index_info[0].lower()
-            if "scann" in indexdef:
-                current_index_type = "scann"
-            elif "diskann" in indexdef:
-                current_index_type = "diskann"
-            elif "vchordrq" in indexdef:
-                current_index_type = "vchordrq"
-            elif "hnsw" in indexdef:
-                current_index_type = "hnsw"
+            # Parse index type (Oracle-compatible)
+            if "oracle" in database_url.lower():
+                # Oracle: index_type is in column 2, parameters in column 1
+                index_params = current_index_info[1].lower() if current_index_info[1] else ""
+                index_type_col = current_index_info[2].lower() if current_index_info[2] else ""
+                # Oracle vector index types: check parameters and index_type
+                if "diskann" in index_params or "diskann" in index_type_col:
+                    current_index_type = "diskann"
+                elif "hnsw" in index_params or "hnsw" in index_type_col:
+                    current_index_type = "hnsw"
+                elif "scann" in index_params or "scann" in index_type_col:
+                    current_index_type = "scann"
+                elif "vchord" in index_params or "vchord" in index_type_col:
+                    current_index_type = "vchordrq"
+                else:
+                    current_index_type = "hnsw"  # default assumption for Oracle
             else:
-                logger.warning(f"Unknown index type for {table_name}: {indexdef}")
-                continue
+                indexdef = current_index_info[0].lower()
+                if "scann" in indexdef:
+                    current_index_type = "scann"
+                elif "diskann" in indexdef:
+                    current_index_type = "diskann"
+                elif "vchordrq" in indexdef:
+                    current_index_type = "vchordrq"
+                elif "hnsw" in indexdef:
+                    current_index_type = "hnsw"
+                else:
+                    logger.warning(f"Unknown index type for {table_name}: {indexdef}")
+                    continue
 
             # Check if index type matches target
             if current_index_type != target_index_type:
@@ -1266,32 +1314,53 @@ def ensure_text_search_extension(
         missing_index_tables = []
 
         for table_name in tables_to_check:
-            # Check if table exists
-            table_exists = conn.execute(
-                text("""
-                    SELECT EXISTS (
-                        SELECT 1 FROM information_schema.tables
-                        WHERE table_schema = :schema AND table_name = :table_name
-                    )
-                """),
-                {"schema": schema_name, "table_name": table_name},
-            ).scalar()
+            # Check if table exists (Oracle-compatible)
+            if "oracle" in database_url.lower():
+                table_exists = conn.execute(
+                    text("""
+                        SELECT 1 FROM all_tables
+                        WHERE owner = :schema AND table_name = :table_name
+                    """),
+                    {"schema": schema_name.upper(), "table_name": table_name.upper()},
+                ).scalar() is not None
+            else:
+                table_exists = conn.execute(
+                    text("""
+                        SELECT EXISTS (
+                            SELECT 1 FROM information_schema.tables
+                            WHERE table_schema = :schema AND table_name = :table_name
+                        )
+                    """),
+                    {"schema": schema_name, "table_name": table_name},
+                ).scalar()
 
             if not table_exists:
                 logger.debug(f"Table {table_name} does not exist in schema '{schema_name}', skipping")
                 continue
 
-            # Get current column type from information_schema
-            current_column_info = conn.execute(
-                text("""
-                    SELECT data_type, udt_name
-                    FROM information_schema.columns
-                    WHERE table_schema = :schema
-                      AND table_name = :table_name
-                      AND column_name = 'search_vector'
-                """),
-                {"schema": schema_name, "table_name": table_name},
-            ).fetchone()
+            # Get current column type (Oracle-compatible)
+            if "oracle" in database_url.lower():
+                current_column_info = conn.execute(
+                    text("""
+                        SELECT data_type, data_type_mod
+                        FROM all_tab_columns
+                        WHERE owner = :schema
+                          AND table_name = :table_name
+                          AND column_name = 'SEARCH_VECTOR'
+                    """),
+                    {"schema": schema_name.upper(), "table_name": table_name.upper()},
+                ).fetchone()
+            else:
+                current_column_info = conn.execute(
+                    text("""
+                        SELECT data_type, udt_name
+                        FROM information_schema.columns
+                        WHERE table_schema = :schema
+                          AND table_name = :table_name
+                          AND column_name = 'search_vector'
+                    """),
+                    {"schema": schema_name, "table_name": table_name},
+                ).fetchone()
 
             if not current_column_info:
                 logger.warning(f"No search_vector column found for {table_name}, will create it")
@@ -1304,24 +1373,41 @@ def ensure_text_search_extension(
             # Get current index type and definition. The definition lets us
             # disambiguate pg_textsearch vs pg_search (both register a `bm25`
             # access method but only pg_search uses the `key_field` reloption).
-            current_index_info = conn.execute(
-                text("""
-                    SELECT am.amname, pi.indexdef
-                    FROM pg_indexes pi
-                    JOIN pg_class c
-                      ON c.relname = pi.indexname
-                     AND c.relnamespace = to_regnamespace(pi.schemaname)
-                    JOIN pg_am am ON am.oid = c.relam
-                    WHERE pi.schemaname = :schema
-                      AND pi.tablename = :table_name
-                      AND pi.indexname = :index_name
-                """),
-                {
-                    "schema": schema_name,
-                    "table_name": table_name,
-                    "index_name": f"idx_{table_name.replace('.', '_')}_text_search",
-                },
-            ).fetchone()
+            if "oracle" in database_url.lower():
+                # Oracle: query all_indexes and all_ind_columns
+                current_index_info = conn.execute(
+                    text("""
+                        SELECT i.index_type, i.parameters
+                        FROM all_indexes i
+                        WHERE i.table_owner = :schema
+                          AND i.table_name = :table_name
+                          AND i.index_name = :index_name
+                    """),
+                    {
+                        "schema": schema_name.upper(),
+                        "table_name": table_name.upper(),
+                        "index_name": f"IDX_{table_name.upper().replace('.', '_')}_TEXT_SEARCH".upper(),
+                    },
+                ).fetchone()
+            else:
+                current_index_info = conn.execute(
+                    text("""
+                        SELECT am.amname, pi.indexdef
+                        FROM pg_indexes pi
+                        JOIN pg_class c
+                          ON c.relname = pi.indexname
+                         AND c.relnamespace = to_regnamespace(pi.schemaname)
+                        JOIN pg_am am ON am.oid = c.relam
+                        WHERE pi.schemaname = :schema
+                          AND pi.tablename = :table_name
+                          AND pi.indexname = :index_name
+                    """),
+                    {
+                        "schema": schema_name,
+                        "table_name": table_name,
+                        "index_name": f"idx_{table_name.replace('.', '_')}_text_search",
+                    },
+                ).fetchone()
 
             current_index_type = current_index_info[0] if current_index_info else None
             current_index_def = current_index_info[1] if current_index_info else None
