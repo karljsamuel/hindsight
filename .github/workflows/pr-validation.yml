@@ -1,6 +1,5 @@
 # PR Validation Workflow - Runs on PRs to main and kjs-edits
-# 3 sequential validations: Repository Check → Build Image → Smoke Test
-# Only kjsagent can trigger/manage PRs; karljsamuel reviews/approves
+# 3 sequential validations: Repository Check → Build Image + Smoke Test → Validation Summary
 
 name: PR Validation
 
@@ -78,10 +77,11 @@ jobs:
           fi
           echo "✅ smoketest.sh ready"
 
-  build-image:
-    name: 2️⃣ Build Image
+  build-and-smoke-test:
+    name: 2️⃣ Build & Smoke Test
     needs: validate-repository
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         platform: [linux/amd64, linux/arm64]
@@ -125,56 +125,25 @@ jobs:
             PRELOAD_ML_MODELS=false
             ORACLEDB_VERSION=26.0.1
 
-      - name: Save image for smoke test
-        run: |
-          docker save ${{ steps.meta.outputs.tags }} | gzip > image-${{ matrix.platform }}.tar.gz
-
-      - name: Upload image artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: oracle-image-${{ matrix.platform }}
-          path: image-${{ matrix.platform }}.tar.gz
-          retention-days: 1
-
-  smoke-test:
-    name: 3️⃣ Smoke Test
-    needs: [validate-repository, build-image]
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        platform: [linux/amd64, linux/arm64]
-    steps:
-      - name: Download image artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: oracle-image-${{ matrix.platform }}
-          path: .
-
-      - name: Load image
-        run: |
-          gunzip -c image-${{ matrix.platform }}.tar.gz | docker load
-
-      - name: Run smoke test
+      - name: Run smoke test on loaded image
         run: |
           chmod +x smoketest.sh
-          ./smoketest.sh hindsight-oracle-test:latest
+          ./smoketest.sh ${{ steps.meta.outputs.tags }}
 
   validation-summary:
     name: ✅ Validation Summary
-    needs: [validate-repository, build-image, smoke-test]
+    needs: [validate-repository, build-and-smoke-test]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Check all validations passed
         run: |
           if [[ "${{ needs.validate-repository.result }}" == "success" && \
-                "${{ needs.build-image.result }}" == "success" && \
-                "${{ needs.smoke-test.result }}" == "success" ]]; then
+                "${{ needs.build-and-smoke-test.result }}" == "success" ]]; then
             echo "✅ All validations passed"
           else
             echo "❌ Some validations failed"
             echo "Repository: ${{ needs.validate-repository.result }}"
-            echo "Build: ${{ needs.build-image.result }}"
-            echo "Smoke Test: ${{ needs.smoke-test.result }}"
+            echo "Build & Smoke Test: ${{ needs.build-and-smoke-test.result }}"
             exit 1
           fi
