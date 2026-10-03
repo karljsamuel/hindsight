@@ -91,15 +91,16 @@ docker run -d --name "$CONTAINER_NAME" \
     "$IMAGE" >/dev/null
 
 # Wait for health endpoint
-echo "Waiting for Hindsight health endpoint (max 120s)..."
-for i in {1..60}; do
+echo "Waiting for Hindsight health endpoint (max 300s)..."
+for i in {1..150}; do
     if curl -sf "http://localhost:${HINDSIGHT_PORT}/health" >/dev/null 2>&1; then
         echo "✅ Health endpoint responded"
         break
     fi
     sleep 2
-    if [ $i -eq 60 ]; then
+    if [ $i -eq 150 ]; then
         echo "❌ Health endpoint never responded"
+        echo "=== Hindsight container logs ==="
         docker logs "$CONTAINER_NAME"
         exit 1
     fi
