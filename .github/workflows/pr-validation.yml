@@ -1,7 +1,7 @@
 # PR Validation Workflow - Runs on PRs to main and kjs-edits
 # 3 sequential validations: Repository Check → Build Image + Smoke Test → Validation Summary
 
-name: PR Validation
+name: KJS-PR Validation
 
 on:
   pull_request:
@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   validate-repository:
-    name: 1️⃣ Repository Check
+    name: KJS-PR Repository Check
     runs-on: ubuntu-26.04
     steps:
       - name: Checkout
@@ -33,9 +33,9 @@ jobs:
           echo "Checking for merge conflicts with base branch..."
           git fetch origin ${{ github.base_ref }}
           if ! git merge-tree $(git merge-base HEAD origin/${{ github.base_ref }}) HEAD origin/${{ github.base_ref }} | grep -q '<<<<<<<'; then
-            echo "✅ No merge conflicts detected"
+            echo "No merge conflicts detected"
           else
-            echo "❌ Merge conflicts detected"
+            echo "Merge conflicts detected"
             exit 1
           fi
 
@@ -63,11 +63,11 @@ jobs:
               fi
             done
             if [ "$ALLOWED" = false ]; then
-              echo "❌ Disallowed file changed: $file"
+              echo "Disallowed file changed: $file"
               exit 1
             fi
           done
-          echo "✅ All changed files are allowed"
+          echo "All changed files are allowed"
 
       - name: Verify smoketest.sh is executable
         run: |
@@ -75,10 +75,10 @@ jobs:
             echo "Making smoketest.sh executable"
             chmod +x smoketest.sh
           fi
-          echo "✅ smoketest.sh ready"
+          echo "smoketest.sh ready"
 
   build-and-smoke-test:
-    name: 2️⃣ Build & Smoke Test
+    name: KJS-PR Build & Smoke Test
     needs: validate-repository
     strategy:
       matrix:
@@ -135,7 +135,7 @@ jobs:
           ./smoketest.sh ${{ steps.meta.outputs.tags }}
 
   validation-summary:
-    name: ✅ Validation Summary
+    name: KJS-PR Validation Summary
     needs: [validate-repository, build-and-smoke-test]
     if: always()
     runs-on: ubuntu-26.04
@@ -144,9 +144,9 @@ jobs:
         run: |
           if [[ "${{ needs.validate-repository.result }}" == "success" && \
                 "${{ needs.build-and-smoke-test.result }}" == "success" ]]; then
-            echo "✅ All validations passed"
+            echo "All validations passed"
           else
-            echo "❌ Some validations failed"
+            echo "Some validations failed"
             echo "Repository: ${{ needs.validate-repository.result }}"
             echo "Build & Smoke Test: ${{ needs.build-and-smoke-test.result }}"
             exit 1

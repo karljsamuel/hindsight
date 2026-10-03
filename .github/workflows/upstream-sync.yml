@@ -1,7 +1,7 @@
-# Upstream Sync Workflow - Scheduled PR Creation
-# 
+# KJS Upstream Sync Workflow - Scheduled PR Creation
+#
 # SCHEDULE: Weekly (configurable day)
-# ACTION: 
+# ACTION:
 #   1. Fetch upstream/main
 #   2. Create new branch: upstream-sync/YYYY-MM-DD
 #   3. Combine: upstream/main + kjs-edits changes
@@ -13,7 +13,7 @@
 # kjsagent (via GH_KJSAGENT_PAT) can only OPEN PRs
 # karljsamuel reviews and approves
 
-name: Upstream Sync → PR
+name: KJS Upstream Sync
 
 on:
   schedule:
@@ -32,8 +32,8 @@ permissions:
 
 jobs:
   create-sync-pr:
-    name: Create Upstream Sync PR
-    runs-on: ubuntu-latest
+    name: KJS Create Upstream Sync PR
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
       pull-requests: write
@@ -69,7 +69,7 @@ jobs:
         run: |
           # Start from upstream/main
           git checkout -b ${{ steps.date.outputs.branch_name }} upstream/main
-          
+
           # Apply kjs-edits changes on top
           # This creates a merge commit combining upstream + our edits
           if git merge --no-ff origin/kjs-edits -m "chore: merge kjs-edits into upstream-sync/${{ steps.date.outputs.sync_date }}"; then
@@ -91,36 +91,36 @@ jobs:
           base: main
           title: "upstream-sync/${{ steps.date.outputs.sync_date }}"
           body: |
-            **Automated upstream sync PR** — `upstream/main` + `kjs-edits` combined for ${{ steps.date.outputs.sync_date }}.
-            
+            **Automated upstream sync PR** - `upstream/main` + `kjs-edits` combined for ${{ steps.date.outputs.sync_date }}.
+
             **Source:**
             - Base: `upstream/main` (latest upstream)
             - Merged: `origin/kjs-edits` (our Oracle fixes)
-            
-            **Merge status:** ${{ steps.merge_status.outputs.merge_status == 'clean' && '✅ Clean merge' || '⚠️ Conflicts detected' }}
-            
+
+            **Merge status:** ${{ steps.merge_status.outputs.merge_status == 'clean' && 'Clean merge' || 'Conflicts detected' }}
+
             **What changed from upstream:**
             Run `git log --oneline main..${{ steps.date.outputs.branch_name }}` to see upstream commits being integrated.
-            
+
             **Our edits preserved (kjs-edits):**
             - Oracle 26ai support (VECTOR(2048), native VECTOR_DISTANCE)
             - Oracle dialect fixes (migrations, vector binding, JSON handling)
             - Unified image (API + Control Plane, no local models)
             - Configurable 2048-dim embeddings
-            
+
             **Validation:**
-            This PR will run the **PR Validation** workflow automatically:
+            This PR will run the **KJS-PR Validation** workflow automatically:
             1. Repository Check (conflicts, allowed files)
             2. Multi-arch Build Test (amd64 + arm64)
             3. Smoke Test (health endpoint, imports, config)
-            
+
             **Review checklist for karljsamuel:**
-            - [ ] PR Validation passes (all 3 checks green)
+            - [ ] KJS-PR Validation passes (all checks green)
             - [ ] No unexpected upstream changes break Oracle compatibility
             - [ ] Schema migrations still apply cleanly
             - [ ] Image builds and smoke test passes
-            
-            **After approval:** Merge this PR → triggers **Publish GHCR Image** workflow → image tagged `latest` + `DDMMYYYY`
+
+            **After approval:** Merge this PR - triggers **KJS Publish GHCR Image** workflow - image tagged `latest` + `DDMMYYYY`
           labels: "upstream-sync,automated"
           draft: false
           assignees: "karljsamuel"

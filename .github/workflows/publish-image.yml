@@ -1,8 +1,8 @@
-# Publish GHCR Image Workflow - Runs ONLY on commits to main
+# KJS Publish GHCR Image Workflow - Runs ONLY on commits to main
 # NOT manually triggerable - only triggered by push to main
 # Publishes multi-arch image with tags: latest, DDMMYYYY
 
-name: Publish GHCR Image
+name: KJS Publish GHCR Image
 
 on:
   push:
@@ -21,16 +21,15 @@ permissions:
 
 jobs:
   publish-image:
-    name: Publish Multi-arch Image
-    runs-on: ubuntu-latest
+    name: KJS Publish Multi-arch Image
     strategy:
       matrix:
-        platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
-            runner: ubuntu-latest
+            runner: ubuntu-26.04
           - platform: linux/arm64
-            runner: ubuntu-latest
+            runner: ubuntu-26.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

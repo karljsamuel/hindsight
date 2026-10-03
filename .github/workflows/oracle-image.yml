@@ -1,8 +1,8 @@
-# Oracle Unified Image - Protected Main Branch Workflow
+# KJS Oracle Unified Image - Protected Main Branch Workflow
 #
 # BRANCH PROTECTION REQUIRED on main:
 #   - Require PR before merge
-#   - Required status checks: "build-and-test (linux/amd64)", "build-and-test (linux/arm64)"
+#   - Required status checks: "KJS Build & Smoke Test (linux/amd64)", "KJS Build & Smoke Test (linux/arm64)"
 #   - Required 1 approving review
 #   - No force pushes, no direct pushes
 #
@@ -12,11 +12,11 @@
 #
 # REVIEW FLOW:
 #   1. Weekly job opens PR "upstream-sync/YYYY-MM-DD" with rebased kjs-edits
-#   2. PR runs build-and-test (required check)
+#   2. PR runs KJS Build & Smoke Test (required check)
 #   3. karljsamuel reviews via `gh pr view` → `gh pr review --approve`
 #   4. Merge triggers image push to GHCR
 
-name: Oracle Unified Image
+name: KJS Oracle Unified Image
 
 on:
   pull_request:
@@ -44,16 +44,15 @@ permissions:
 
 jobs:
   build-and-test:
-    name: Build & Smoke Test
-    runs-on: ubuntu-latest
+    name: KJS Build & Smoke Test
     strategy:
       matrix:
-        platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
-            runner: ubuntu-latest
+            runner: ubuntu-26.04
           - platform: linux/arm64
-            runner: ubuntu-latest
+            runner: ubuntu-26.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -105,25 +104,25 @@ jobs:
             -e HINDSIGHT_API_DATABASE_URL="oracle+oracledb://test:test@/?dsn=(description=(address=(protocol=tcps)(host=invalid)(port=1521))(connect_data=(service_name=test)))" \
             -p 8888:8888 \
             ${{ steps.meta.outputs.tags }}
-          
+
           # Wait for startup (max 60s)
           for i in {1..30}; do
             if curl -sf http://localhost:8888/health >/dev/null 2>&1; then
-              echo "✅ Health endpoint responded"
+              echo "Health endpoint responded"
               break
             fi
             sleep 2
           done
-          
+
           # Check process is running
           if ! docker ps | grep -q hindsight-test; then
-            echo "❌ Container died"
+            echo "Container died"
             docker logs hindsight-test
             exit 1
           fi
-          
-          echo "✅ Smoke test passed - container running and healthy"
-          
+
+          echo "Smoke test passed - container running and healthy"
+
           # Cleanup
           docker stop hindsight-test && docker rm hindsight-test
 
@@ -144,8 +143,8 @@ jobs:
             ORACLEDB_VERSION=26.0.1
 
   upstream-sync:
-    name: Upstream Sync → PR
-    runs-on: ubuntu-latest
+    name: KJS Upstream Sync
+    runs-on: ubuntu-26.04
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
@@ -175,7 +174,7 @@ jobs:
             echo "main_synced=true" >> $GITHUB_OUTPUT
           else
             echo "main_synced=false" >> $GITHUB_OUTPUT
-            echo "⚠️ main cannot fast-forward to upstream/main — manual intervention needed"
+            echo "main cannot fast-forward to upstream/main - manual intervention needed"
           fi
         id: sync_main
 
@@ -201,14 +200,14 @@ jobs:
           base: main
           title: "upstream-sync/${{ github.run_id }}-${{ github.run_number }}"
           body: |
-            **Automated upstream sync** — `kjs-edits` rebased onto latest `upstream/main`.
-            
-            ${{ steps.check_rebase.outputs.rebase_ok == 'false' && '⚠️ **Conflicts detected** — manual resolution required.' || '✅ Clean rebase — ready for review.' }}
-            
+            **Automated upstream sync** - `kjs-edits` rebased onto latest `upstream/main`.
+
+            ${{ steps.check_rebase.outputs.rebase_ok == 'false' && '**Conflicts detected** - manual resolution required.' || 'Clean rebase - ready for review.' }}
+
             **Changes from upstream:**
             - `upstream/main` merged to `main` (fast-forward)
             - `kjs-edits` rebased onto new `main`
-            
+
             **Conflict resolution (if needed):**
             ```bash
             git fetch upstream
@@ -223,12 +222,12 @@ jobs:
             git rebase --continue
             git push origin kjs-edits --force-with-lease
             ```
-            
+
             **Review checklist:**
-            - [ ] Build & smoke test pass (required check)
+            - [ ] KJS Build & Smoke Test pass (required check)
             - [ ] No unexpected upstream changes break Oracle compatibility
             - [ ] Schema migrations still apply cleanly
-            
+
             Once approved and checks pass, merge to trigger GHCR image push.
           labels: "upstream-sync,automated"
           draft: false
