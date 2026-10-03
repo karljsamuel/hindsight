@@ -103,7 +103,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: hindsight-oracle-test
+          images: localhost/hindsight-oracle-test
           tags: |
             type=raw,value=latest
             type=sha,prefix=sha-
