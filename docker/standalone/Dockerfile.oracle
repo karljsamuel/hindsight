@@ -6,7 +6,7 @@
 # Uses OCI Autonomous Database (external) - no local DB installation
 # Includes both API (8888) and Control Plane (9999)
 # No local ML models - uses external providers (OpenRouter, etc.)
-# Latest oracledb (26.x) with thin mode
+# Latest oracledb (26.x) with thin mode (pure Python, no Oracle client needed)
 
 # Base stage - upstream slim image
 FROM ghcr.io/vectorize-io/hindsight:latest-slim AS base
@@ -42,14 +42,13 @@ ENV HINDSIGHT_API_DATABASE_BACKEND=oracle \
     HINDSIGHT_API_DATABASE_SCHEME=AUTO \
     TZ=Asia/Kolkata
 
-# Install runtime dependencies (lightweight)
+# Install runtime dependencies (lightweight - no Oracle client needed for thin mode)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
-    libaio1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install/update Oracle driver to latest 26.x version
+# Install/update Oracle driver to latest 26.x version (thin mode - pure Python)
 RUN pip install --no-cache-dir --upgrade --target=/app/api/.venv/lib/python3.11/site-packages "oracledb>=26.0.0" \
     && python3 -c "import oracledb; print('Oracle driver:', oracledb.__version__); print('Thin mode:', hasattr(oracledb, 'Connection'))"
 
