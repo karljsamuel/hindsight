@@ -12,7 +12,7 @@ from ._pg_extensions import create_extension
 logger = logging.getLogger(__name__)
 
 # Extensions a user can set via HINDSIGHT_API_VECTOR_EXTENSION.
-CONFIGURABLE_EXTENSIONS = ("pgvector", "pgvectorscale", "vchord", "scann")
+CONFIGURABLE_EXTENSIONS = ("pgvector", "pgvectorscale", "vchord", "scann", "oracle")
 
 # Extensions detect_vector_extension() can return. pg_diskann is a runtime-only
 # resolution from a configured "pgvectorscale" backend on Azure (uses a different
@@ -30,6 +30,7 @@ _EXTENSION_NAMES = {
     "pgvectorscale": "vectorscale",
     "vchord": "vchord",
     "scann": "alloydb_scann",
+    "oracle": "",  # Oracle uses native VECTOR type, no extension needed
 }
 
 _INDEX_USING_CLAUSES = {
@@ -38,6 +39,7 @@ _INDEX_USING_CLAUSES = {
     "pg_diskann": "USING diskann (embedding vector_cosine_ops) WITH (max_neighbors = 50)",
     "vchord": "USING vchordrq (embedding vector_cosine_ops)",
     "scann": "USING scann (embedding cosine) WITH (mode = 'AUTO')",
+    "oracle": "",  # Oracle native HNSW index syntax handled in migration
 }
 
 _INDEX_TYPE_KEYWORDS = {
@@ -46,6 +48,7 @@ _INDEX_TYPE_KEYWORDS = {
     "pg_diskann": "diskann",
     "vchord": "vchordrq",
     "scann": "scann",
+    "oracle": "hnsw",  # Oracle uses HNSW index type
 }
 
 # Ceiling on how many tuples one resumed ANN scan may visit (hnsw.max_scan_tuples).
@@ -149,6 +152,7 @@ _EXTENSION_INSTALL_PLAN: dict[str, tuple[tuple[str, bool], ...]] = {
     "pgvectorscale": (("vector", False), ("vectorscale", True)),
     "vchord": (("vchord", True),),
     "scann": (("vector", False), ("alloydb_scann", True)),
+    "oracle": (),  # Oracle uses native VECTOR type, no PostgreSQL extension
 }
 
 _INSTALL_HINTS = {
@@ -156,6 +160,7 @@ _INSTALL_HINTS = {
     "pgvectorscale": "CREATE EXTENSION vector; then CREATE EXTENSION vectorscale CASCADE; (or pg_diskann on Azure)",
     "vchord": "CREATE EXTENSION vchord CASCADE;",
     "scann": "CREATE EXTENSION vector; then CREATE EXTENSION alloydb_scann CASCADE;",
+    "oracle": "Oracle native VECTOR type (no PostgreSQL extension needed)",
 }
 
 
@@ -249,7 +254,8 @@ def ann_search_tuning_settings(ext: str, *, kind: str) -> tuple[tuple[str, str],
 
 def uses_per_bank_vector_indexes(ext: str) -> bool:
     """Return whether the backend should create per-bank partial vector indexes."""
-    return _normalize_resolved(ext) != "scann"
+    normalized = _normalize_resolved(ext)
+    return normalized not in ("scann", "oracle")
 
 
 def per_bank_index_min_rows() -> int:
@@ -352,6 +358,11 @@ def bootstrap_extension(conn: Connection, ext: str) -> None:
 def detect_vector_extension(conn: Connection, vector_extension: str = "pgvector") -> str:
     """Validate the configured vector extension exists and return the index backend."""
     configured_ext = validate_extension(vector_extension)
+
+    if configured_ext == "oracle":
+        # Oracle uses native VECTOR type, no PostgreSQL extension needed
+        logger.debug("Using Oracle native VECTOR type")
+        return "oracle"
 
     if configured_ext == "pgvectorscale":
         pgvector_check = conn.execute(text("SELECT 1 FROM pg_extension WHERE extname = 'vector'")).scalar()

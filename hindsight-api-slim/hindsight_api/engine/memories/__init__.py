@@ -53,6 +53,13 @@ def create_memories(context=None) -> MemoriesExtension:
         logger.info("[memories] store=%s (memory rows do not go to postgres)", loaded.name)
         return loaded
 
+    # Check if Oracle backend is configured
+    from ...config import get_config
+    config = get_config()
+    if config.database_backend == "oracle":
+        from .oracle import OracleMemories
+        return OracleMemories({})
+
     from .postgres import PostgresMemories
 
     return PostgresMemories({})
