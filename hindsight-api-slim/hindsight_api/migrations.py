@@ -121,6 +121,10 @@ def _bootstrap_vector_extension_for_migrations(conn: Connection, vector_extensio
     """Bootstrap the configured vector backend before schema migrations run."""
     if vector_extension == "pgvector":
         _ensure_pgvector_extension_in_public(conn)
+    elif vector_extension == "oracle":
+        # Oracle uses native VECTOR type, no PostgreSQL extension needed
+        logger.debug("Oracle native VECTOR type - no extension bootstrap needed")
+        return
     bootstrap_extension(conn, vector_extension)
     # Repair anything an older version installed into a tenant schema, where the
     # runtime (which connects with the default search_path) cannot resolve it — the
@@ -646,8 +650,7 @@ def _migrate_table_embedding_dimension(
     *,
     indexed: bool = True,
 ) -> None:
-    """
-    Migrate the embedding column of a single table to the required dimension.
+    """Migrate the embedding column of a single table to the required dimension.
 
     - If dimensions match: no action needed
     - If dimensions differ and table is empty: ALTER COLUMN to new dimension
@@ -655,19 +658,41 @@ def _migrate_table_embedding_dimension(
 
     ``indexed=False`` keeps the column but with no vector index at all: any existing one is
     dropped and none is created, so the pgvector 2000-dimension index limit does not apply.
+
+    Works for both PostgreSQL and Oracle (detected via connection dialect).
     """
-    current_dim = conn.execute(
-        text("""
-            SELECT atttypmod
-            FROM pg_attribute a
-            JOIN pg_class c ON a.attrelid = c.oid
-            JOIN pg_namespace n ON c.relnamespace = n.oid
-            WHERE n.nspname = :schema
-              AND c.relname = :table
-              AND a.attname = 'embedding'
-        """),
-        {"schema": schema_name, "table": table_name},
-    ).scalar()
+    # Detect dialect
+    drivername = str(conn.engine.url.drivername).lower()
+    is_oracle = "oracle" in drivername
+
+    # Get current dimension
+    if is_oracle:
+        # Oracle: all_tab_columns.DATA_LENGTH / 4 = dimension for VECTOR
+        current_dim = conn.execute(
+            text("""
+                SELECT data_length / 4
+                FROM all_tab_columns
+                WHERE owner = :schema
+                  AND table_name = UPPER(:table)
+                  AND column_name = 'EMBEDDING'
+                  AND data_type = 'VECTOR'
+            """),
+            {"schema": schema_name.upper(), "table": table_name.upper()},
+        ).scalar()
+    else:
+        # PostgreSQL: pg_attribute.atttypmod
+        current_dim = conn.execute(
+            text("""
+                SELECT atttypmod
+                FROM pg_attribute a
+                JOIN pg_class c ON a.attrelid = c.oid
+                JOIN pg_namespace n ON c.relnamespace = n.oid
+                WHERE n.nspname = :schema
+                  AND c.relname = :table
+                  AND a.attname = 'embedding'
+            """),
+            {"schema": schema_name, "table": table_name},
+        ).scalar()
 
     if current_dim is None:
         logger.debug(f"No embedding column found on {table_name}, skipping")
@@ -703,9 +728,19 @@ def _migrate_table_embedding_dimension(
     logger.info(f"Altering {table_name}.embedding column dimension from {current_dim} to {required_dimension}")
 
     _drop_embedding_vector_indexes(conn, schema_name, table_name)
-    conn.execute(
-        text(f"ALTER TABLE {schema_name}.{table_name} ALTER COLUMN embedding TYPE vector({required_dimension})")
-    )
+
+    if is_oracle:
+        # Oracle: ALTER TABLE ... MODIFY (embedding VECTOR(:dim, FLOAT32))
+        conn.execute(
+            text(f"ALTER TABLE {schema_name}.{table_name} MODIFY (embedding VECTOR(:dim, FLOAT32))"),
+            {"dim": required_dimension},
+        )
+    else:
+        # PostgreSQL: ALTER COLUMN TYPE vector(:dim)
+        conn.execute(
+            text(f"ALTER TABLE {schema_name}.{table_name} ALTER COLUMN embedding TYPE vector(:dim)"),
+            {"dim": required_dimension},
+        )
     conn.commit()
 
     if not indexed:
@@ -860,7 +895,7 @@ def ensure_vector_extension(
 
     Args:
         database_url: SQLAlchemy database URL
-        vector_extension: Configured vector extension ("pgvector", "vchord", "pgvectorscale", or "scann")
+        vector_extension: Configured vector extension ("pgvector", "vchord", "pgvectorscale", "scann", or "oracle")
         schema: Target PostgreSQL schema name (None for public)
         store_owned_memories: Leave memory_units untouched because a custom memories store
             keeps the memory rows (and their vectors) outside Postgres. mental_models is not
@@ -870,6 +905,11 @@ def ensure_vector_extension(
         RuntimeError: If extension mismatch with existing data
     """
     schema_name = schema or "public"
+
+    # Oracle uses native VECTOR type with native HNSW indexes - no reconciliation needed
+    if vector_extension == "oracle" or "oracle" in database_url.lower():
+        logger.info("Oracle native VECTOR type detected - skipping vector extension reconciliation")
+        return
 
     engine = create_engine(to_libpq_url(database_url), poolclass=NullPool)
     with engine.connect() as conn:
