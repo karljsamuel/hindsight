@@ -58,18 +58,40 @@ engine = create_engine(database_url, poolclass=NullPool)
 with engine.connect() as conn:
     inspector = inspect(engine)
     tables = inspector.get_table_names()
-    print(f"Found {len(tables)} tables to drop")
+    
+    # Filter out tables that don't actually exist (ORA-00942 when dropping)
+    existing_tables = []
     for table in tables:
         try:
-            conn.execute(text(f"DROP TABLE \"{table}\" CASCADE CONSTRAINTS PURGE"))
-            print(f"  Dropped: {table}")
+            conn.execute(text(f"SELECT 1 FROM \"{table}\" WHERE ROWNUM = 1"))
+            existing_tables.append(table)
         except Exception as e:
-            print(f"  Could not drop {table}: {e}")
-    conn.commit()
-print("✅ Tables cleared")
+            if "ORA-00942" in str(e):
+                print(f"  Skipped (not exist): {table}")
+            else:
+                print(f"  Could not check {table}: {e}")
+    
+    if len(existing_tables) == 0:
+        print("✅ Tables cleared (clean schema)")
+    else:
+        print(f"Found {len(existing_tables)} tables to drop")
+        errors = 0
+        for table in existing_tables:
+            try:
+                conn.execute(text(f"DROP TABLE \"{table}\" CASCADE CONSTRAINTS PURGE"))
+                print(f"  Dropped: {table}")
+            except Exception as e:
+                print(f"  Could not drop {table}: {e}")
+                errors += 1
+        conn.commit()
+        if errors > 0:
+            print(f"❌ Tables cleared with {errors} errors")
+            sys.exit(1)
+        else:
+            print(f"✅ Dropped {len(existing_tables)} tables")
 PYEOF
 python3 /tmp/clear_tables.py
-' 2>&1 | tail -20
+'
 
 # Start Hindsight container
 echo "Starting Hindsight container (database-only mode)..."
@@ -224,7 +246,7 @@ INGEST1=$(docker exec "$CONTAINER_NAME" python3 -c "
 import asyncio
 import sys
 sys.path.insert(0, '/app/api')
-from hindsight_api.main import create_app
+from hindsight_api.models import RequestContext
 
 async def ingest():
     from hindsight_api.engine.memory_engine import MemoryEngine
@@ -234,14 +256,17 @@ async def ingest():
     engine = MemoryEngine(db_url=cfg.database_url,)
     await engine.initialize()
     
-    result = await engine.ingest(
+    rc = RequestContext(internal=True, tenant_id=None, api_key_id=None)
+    
+    result = await engine.retain_async(
         bank_id='$BANK_ID',
         content='Hindsight is an agent memory system that learns from interactions. It uses Oracle 26ai for vector storage and OpenRouter for LLM/embedding providers.',
-        fact_type='observation',
+        context='smoke test observation',
+        fact_type_override='observation',
         document_id='doc-001',
-        metadata={'source': 'smoke-test', 'topic': 'hindsight-overview'}
+        request_context=rc
     )
-    print(f'INGEST_ID:{result.id}')
+    print(f'INGEST_ID:{result[0] if result else \"\"}')
     await engine.close()
 
 asyncio.run(ingest())
@@ -261,6 +286,7 @@ INGEST2=$(docker exec "$CONTAINER_NAME" python3 -c "
 import asyncio
 import sys
 sys.path.insert(0, '/app/api')
+from hindsight_api.models import RequestContext
 
 async def ingest():
     from hindsight_api.engine.memory_engine import MemoryEngine
@@ -270,14 +296,17 @@ async def ingest():
     engine = MemoryEngine(db_url=cfg.database_url,)
     await engine.initialize()
     
-    result = await engine.ingest(
+    rc = RequestContext(internal=True, tenant_id=None, api_key_id=None)
+    
+    result = await engine.retain_async(
         bank_id='$BANK_ID',
         content='Oracle 26ai provides native VECTOR type support with HNSW indexing for efficient similarity search. The VECTOR(2048, FLOAT32) type stores 2048-dimensional embeddings.',
-        fact_type='observation',
+        context='smoke test observation',
+        fact_type_override='observation',
         document_id='doc-002',
-        metadata={'source': 'smoke-test', 'topic': 'oracle-vector'}
+        request_context=rc
     )
-    print(f'INGEST_ID:{result.id}')
+    print(f'INGEST_ID:{result[0] if result else \"\"}')
     await engine.close()
 
 asyncio.run(ingest())
@@ -296,6 +325,7 @@ INGEST3=$(docker exec "$CONTAINER_NAME" python3 -c "
 import asyncio
 import sys
 sys.path.insert(0, '/app/api')
+from hindsight_api.models import RequestContext
 
 async def ingest():
     from hindsight_api.engine.memory_engine import MemoryEngine
@@ -305,14 +335,17 @@ async def ingest():
     engine = MemoryEngine(db_url=cfg.database_url,)
     await engine.initialize()
     
-    result = await engine.ingest(
+    rc = RequestContext(internal=True, tenant_id=None, api_key_id=None)
+    
+    result = await engine.retain_async(
         bank_id='$BANK_ID',
         content='OpenRouter provides access to multiple LLM providers including Nemotron models. The nemotron-3-super-120b-a12b:free model offers strong reasoning capabilities.',
-        fact_type='observation',
+        context='smoke test observation',
+        fact_type_override='observation',
         document_id='doc-003',
-        metadata={'source': 'smoke-test', 'topic': 'openrouter-nemotron'}
+        request_context=rc
     )
-    print(f'INGEST_ID:{result.id}')
+    print(f'INGEST_ID:{result[0] if result else \"\"}')
     await engine.close()
 
 asyncio.run(ingest())
@@ -331,6 +364,7 @@ RECALL_RESULT=$(docker exec "$CONTAINER_NAME" python3 -c "
 import asyncio
 import sys
 sys.path.insert(0, '/app/api')
+from hindsight_api.models import RequestContext
 
 async def recall():
     from hindsight_api.engine.memory_engine import MemoryEngine
@@ -340,12 +374,15 @@ async def recall():
     engine = MemoryEngine(db_url=cfg.database_url,)
     await engine.initialize()
     
+    rc = RequestContext(internal=True, tenant_id=None, api_key_id=None)
+    
     # Search for Oracle-related content
     results = await engine.recall(
         bank_id='$BANK_ID',
         query='Oracle VECTOR type HNSW indexing',
         limit=5,
-        fact_types=['observation']
+        fact_types=['observation'],
+        request_context=rc
     )
     
     print(f'RECALL_COUNT:{len(results)}')
@@ -357,7 +394,8 @@ async def recall():
         bank_id='$BANK_ID',
         query='Nemotron model OpenRouter provider',
         limit=5,
-        fact_types=['observation']
+        fact_types=['observation'],
+        request_context=rc
     )
     
     print(f'RECALL_COUNT2:{len(results2)}')
@@ -385,6 +423,7 @@ CONSOLIDATE_RESULT=$(docker exec "$CONTAINER_NAME" python3 -c "
 import asyncio
 import sys
 sys.path.insert(0, '/app/api')
+from hindsight_api.models import RequestContext
 
 async def consolidate():
     from hindsight_api.engine.memory_engine import MemoryEngine
@@ -394,11 +433,14 @@ async def consolidate():
     engine = MemoryEngine(db_url=cfg.database_url,)
     await engine.initialize()
     
+    rc = RequestContext(internal=True, tenant_id=None, api_key_id=None)
+    
     # Run consolidation for the test bank
     result = await engine.consolidate(
         bank_id='$BANK_ID',
         fact_types=['observation'],
-        max_iterations=2
+        max_iterations=2,
+        request_context=rc
     )
     
     print(f'CONSOLIDATED:{result.consolidated_count}')
@@ -427,6 +469,7 @@ RECALL_AFTER=$(docker exec "$CONTAINER_NAME" python3 -c "
 import asyncio
 import sys
 sys.path.insert(0, '/app/api')
+from hindsight_api.models import RequestContext
 
 async def recall():
     from hindsight_api.engine.memory_engine import MemoryEngine
@@ -436,11 +479,14 @@ async def recall():
     engine = MemoryEngine(db_url=cfg.database_url,)
     await engine.initialize()
     
+    rc = RequestContext(internal=True, tenant_id=None, api_key_id=None)
+    
     results = await engine.recall(
         bank_id='$BANK_ID',
         query='Oracle VECTOR type',
         limit=5,
-        fact_types=['observation']
+        fact_types=['observation'],
+        request_context=rc
     )
     
     print(f'RECALL_COUNT:{len(results)}')
