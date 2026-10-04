@@ -263,7 +263,7 @@ async def ingest():
             bank_id='$BANK_ID',
             content='Hindsight is an agent memory system that learns from interactions. It uses Oracle 26ai for vector storage and OpenRouter for LLM/embedding providers.',
             context='smoke test observation',
-            fact_type_override='observation',
+            fact_type_override='world',
             document_id='doc-001',
             request_context=rc
         )
@@ -309,7 +309,7 @@ async def ingest():
         bank_id='$BANK_ID',
         content='Oracle 26ai provides native VECTOR type support with HNSW indexing for efficient similarity search. The VECTOR(2048, FLOAT32) type stores 2048-dimensional embeddings.',
         context='smoke test observation',
-        fact_type_override='observation',
+        fact_type_override='world',
         document_id='doc-002',
         request_context=rc
     )
@@ -348,7 +348,7 @@ async def ingest():
         bank_id='$BANK_ID',
         content='OpenRouter provides access to multiple LLM providers including Nemotron models. The nemotron-3-super-120b-a12b:free model offers strong reasoning capabilities.',
         context='smoke test observation',
-        fact_type_override='observation',
+        fact_type_override='world',
         document_id='doc-003',
         request_context=rc
     )
@@ -390,7 +390,7 @@ async def recall():
         query='Oracle VECTOR type HNSW indexing',
         budget=Budget.MID,
         max_tokens=4096,
-        fact_type=['observation'],
+        fact_type=['world'],
         request_context=rc
     )
     
@@ -404,7 +404,7 @@ async def recall():
         query='Nemotron model OpenRouter provider',
         budget=Budget.MID,
         max_tokens=4096,
-        fact_type=['observation'],
+        fact_type=['world'],
         request_context=rc
     )
     
@@ -497,7 +497,7 @@ async def recall():
         query='Oracle VECTOR type',
         budget=Budget.MID,
         max_tokens=4096,
-        fact_type=['observation'],
+        fact_type=['world'],
         request_context=rc
     )
     
