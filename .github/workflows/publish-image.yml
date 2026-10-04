@@ -1,0 +1,86 @@
+# KJS Publish GHCR Image Workflow - Runs ONLY on commits to main
+# NOT manually triggerable - only triggered by push to main
+# Publishes multi-arch image with tags: latest, DDMMYYYY
+
+name: KJS Publish GHCR Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docker/standalone/Dockerfile.oracle'
+      - 'hindsight-api-slim/hindsight_api/**'
+      - 'hindsight-control-plane/**'
+      - 'smoketest.sh'
+      - '.github/workflows/publish-image.yml'
+  # NOT on: workflow_dispatch, schedule, pull_request
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish-image:
+    name: KJS Publish Multi-arch Image
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-26.04
+          - platform: linux/arm64
+            runner: ubuntu-26.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate tags (latest + DDMMYYYY)
+        id: tags
+        run: |
+          DATE_TAG=$(date -u +'%d%m%Y')
+          echo "tags=ghcr.io/karljsamuel/hindsight:oracle-latest,ghcr.io/karljsamuel/hindsight:oracle-${DATE_TAG}" >> $GITHUB_OUTPUT
+          echo "date_tag=${DATE_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/karljsamuel/hindsight
+          tags: |
+            type=raw,value=oracle-latest
+            type=raw,value=oracle-${{ steps.tags.outputs.date_tag }}
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/standalone/Dockerfile.oracle
+          target: oracle-full
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            INCLUDE_LOCAL_MODELS=false
+            PRELOAD_ML_MODELS=false
+            ORACLEDB_VERSION=26.0.1
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Output published tags
+        if: matrix.platform == 'linux/amd64'
+        run: |
+          echo "=== Published Image Tags ==="
+          echo "ghcr.io/karljsamuel/hindsight:oracle-latest"
+          echo "ghcr.io/karljsamuel/hindsight:oracle-${{ steps.tags.outputs.date_tag }}"
+          echo "Platforms: linux/amd64, linux/arm64"

@@ -19,6 +19,7 @@ import json
 import logging
 import re
 import uuid as _uuid_mod
+import array
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, NamedTuple, cast
@@ -139,6 +140,42 @@ def _needs_clob_bind(val: Any) -> bool:
     if not isinstance(val, str) or not val:
         return False
     return val[0] in ("{", "[") or (len(val) > 1000 and len(val.encode()) > 4000)
+
+
+def _convert_vector_bind_params(
+    query: str,
+    params: dict[str, Any] | None,
+) -> None:
+    """Convert VECTOR bind parameters to float32 array.array values.
+
+    python-oracledb expects FLOAT32 VECTOR binds as array.array("f").
+    Hindsight's PostgreSQL-oriented code supplies embeddings as Python lists,
+    while _convert_arg() normally serializes lists to JSON. For SQL using
+    VECTOR_DISTANCE(), restore numeric vector parameters as float32 arrays.
+    """
+    if not params:
+        return
+
+    vector_keys = re.findall(
+        r"VECTOR_DISTANCE\s*\([^,]+,\s*:(\w+)\s*,",
+        query,
+        flags=re.IGNORECASE,
+    )
+
+    for key in set(vector_keys):
+        value = params.get(key)
+
+        if value is None:
+            continue
+
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        if isinstance(value, (list, tuple)):
+            params[key] = array.array("f", (float(x) for x in value))
 
 
 def _convert_args_list(args_list: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
@@ -683,7 +720,7 @@ def _oracle_connect_params(dsn: str) -> dict[str, Any]:
     }
     descriptor = parse_qs(parsed.query).get("dsn")
     if descriptor and descriptor[0]:
-        params["dsn"] = descriptor[0]
+        params["dsn"] = unquote(descriptor[0])
     else:
         host = parsed.hostname or "localhost"
         port = parsed.port or 1521
@@ -1058,6 +1095,9 @@ class OracleConnection(DatabaseConnection):
         try:
             params = self._make_bind_params(cursor, args, ret_cols)
             query, params = self._expand_any_lists(query, params)
+
+            _convert_vector_bind_params(query, params)
+
             self._apply_clob_input_sizes(cursor, query, params)
             if ignore_dup:
                 try:
@@ -1160,6 +1200,9 @@ class OracleConnection(DatabaseConnection):
         try:
             params = self._make_bind_params(cursor, args, ret_cols)
             query, params = self._expand_any_lists(query, params)
+
+            _convert_vector_bind_params(query, params)
+
             self._apply_clob_input_sizes(cursor, query, params)
             if ignore_dup:
                 try:
@@ -1201,6 +1244,9 @@ class OracleConnection(DatabaseConnection):
         try:
             params = self._make_bind_params(cursor, args, ret_cols)
             query, params = self._expand_any_lists(query, params)
+
+            _convert_vector_bind_params(query, params)
+
             self._apply_clob_input_sizes(cursor, query, params)
             if ignore_dup:
                 try:

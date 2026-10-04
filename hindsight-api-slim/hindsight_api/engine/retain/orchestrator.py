@@ -3453,27 +3453,52 @@ async def _streaming_retain_batch(
                     # Append effective_doc_id to the committed document set if not
                     # already present, so multi-doc batches track each document
                     # independently for crash recovery.
-                    await conn.execute(
-                        f"""
-                        UPDATE {fq_table("async_operations")}
-                        SET result_metadata = jsonb_set(
-                            result_metadata || $1::jsonb,
-                            '{{facts_committed_document_ids}}',
-                            CASE
-                                WHEN COALESCE(result_metadata->'facts_committed_document_ids', '[]'::jsonb) @> $2::jsonb
-                                    THEN result_metadata->'facts_committed_document_ids'
-                                ELSE COALESCE(result_metadata->'facts_committed_document_ids', '[]'::jsonb) || $2::jsonb
-                            END,
-                            true
-                        ),
-                        updated_at = now()
-                        WHERE operation_id = $3
-                        """,
-                        json.dumps({"facts_committed": True, "unit_ids_count": len(all_unit_ids)}),
-                        json.dumps([effective_doc_id]),
-                        uuid.UUID(operation_id),
-                    )
-                log_buffer.append(f"[streaming] Checkpoint: {len(all_unit_ids)} facts committed, ANN pass next")
+                    if conn.backend_type == "oracle":
+                        # Oracle: lock and merge JSON in Python within transaction
+                        async with conn.transaction():
+                            row = await conn.fetchrow(
+                                f"SELECT result_metadata FROM {fq_table('async_operations')} WHERE operation_id = $1 FOR UPDATE",
+                                uuid.UUID(operation_id),
+                            )
+                            metadata = conn.parse_json(row["result_metadata"]) if row else {}
+                            if not isinstance(metadata, dict):
+                                metadata = {}
+                            # Merge the base update
+                            metadata.update({"facts_committed": True, "unit_ids_count": len(all_unit_ids)})
+                            # Append to facts_committed_document_ids array
+                            doc_ids = metadata.get("facts_committed_document_ids")
+                            if not isinstance(doc_ids, list):
+                                doc_ids = []
+                            if effective_doc_id not in doc_ids:
+                                doc_ids.append(effective_doc_id)
+                            metadata["facts_committed_document_ids"] = doc_ids
+                            await conn.execute(
+                                f"UPDATE {fq_table('async_operations')} SET result_metadata = $1, updated_at = CURRENT_TIMESTAMP WHERE operation_id = $2",
+                                json.dumps(metadata),
+                                uuid.UUID(operation_id),
+                            )
+                    else:
+                        await conn.execute(
+                            f"""
+                            UPDATE {fq_table("async_operations")}
+                            SET result_metadata = jsonb_set(
+                                result_metadata || $1::jsonb,
+                                '{{facts_committed_document_ids}}',
+                                CASE
+                                    WHEN COALESCE(result_metadata->'facts_committed_document_ids', '[]'::jsonb) @> $2::jsonb
+                                        THEN result_metadata->'facts_committed_document_ids'
+                                    ELSE COALESCE(result_metadata->'facts_committed_document_ids', '[]'::jsonb) || $2::jsonb
+                                END,
+                                true
+                            ),
+                            updated_at = now()
+                            WHERE operation_id = $3
+                            """,
+                            json.dumps({"facts_committed": True, "unit_ids_count": len(all_unit_ids)}),
+                            json.dumps([effective_doc_id]),
+                            uuid.UUID(operation_id),
+                        )
+                    log_buffer.append(f"[streaming] Checkpoint: {len(all_unit_ids)} facts committed, ANN pass next")
             except Exception:
                 logger.warning("Failed to save facts_committed checkpoint", exc_info=True)
     else:

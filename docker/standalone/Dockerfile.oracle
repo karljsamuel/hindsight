@@ -1,0 +1,69 @@
+# Hindsight Oracle 26ai - Unified Image (API + Control Plane, No Local Models)
+# Build: docker build -f Dockerfile.oracle -t ghcr.io/karljsamuel/hindsight:oracle-latest .
+# Push: docker push ghcr.io/karljsamuel/hindsight:oracle-latest
+
+# Multi-stage build based on upstream slim image (from ghcr.io, not local)
+# Uses OCI Autonomous Database (external) - no local DB installation
+# Includes both API (8888) and Control Plane (9999)
+# No local ML models - uses external providers (OpenRouter, etc.)
+# Latest oracledb (26.x) with thin mode (pure Python, no Oracle client needed)
+
+# Base stage - upstream slim image
+FROM ghcr.io/vectorize-io/hindsight:latest-slim AS base
+
+ARG INCLUDE_LOCAL_MODELS=false
+ARG PRELOAD_ML_MODELS=false
+ARG ORACLEDB_VERSION=26.0.1
+
+LABEL maintainer="karljsamuel" \
+    image.name="hindsight-oracle" \
+    image.type="unified" \
+    image.target="api+cp" \
+    image.database="oracle-26ai-oci" \
+    image.vector="oracle-native"
+
+# Oracle-full stage - extends base with Oracle-specific configuration
+# This is the target stage for the build
+FROM base AS oracle-full
+
+ARG ORACLEDB_VERSION=26.0.1
+
+LABEL maintainer="karljsamuel" \
+    image.name="hindsight-oracle" \
+    image.type="unified" \
+    image.target="api+cp" \
+    image.database="oracle-26ai-oci" \
+    image.vector="oracle-native"
+
+# Set default environment
+ENV HINDSIGHT_API_DATABASE_BACKEND=oracle \
+    HINDSIGHT_API_VECTOR_EXTENSION=oracle \
+    HINDSIGHT_API_EMBEDDINGS_DIMENSION=2048 \
+    HINDSIGHT_API_DATABASE_SCHEME=AUTO \
+    TZ=Asia/Kolkata
+
+# Base image already has curl and ca-certificates - no apt needed
+# Install/update Oracle driver to latest 26.x version (thin mode - pure Python)
+RUN pip install --no-cache-dir --upgrade --target=/app/api/.venv/lib/python3.11/site-packages "oracledb>=26.0.0" \
+    && python3 -c "import oracledb; print('Oracle driver:', oracledb.__version__); print('Thin mode:', hasattr(oracledb, 'Connection'))"
+
+# Set timezone
+RUN ln -sf /usr/share/zoneinfo/Asia/Kolkata /etc/localtime || true
+
+# Expose API and Control Plane ports
+EXPOSE 8888 9999
+
+# Copy Oracle-enabled hindsight-api code from local source
+# This replaces the upstream hindsight-api with Oracle-enabled version
+COPY hindsight-api-slim/hindsight_api /app/api/hindsight_api
+
+# Use upstream entrypoint (start-all.sh) which runs API + Control Plane
+# Override with env vars to disable CP and embedded pg0
+# Health endpoint wait is handled by start-all.sh (HINDSIGHT_API_STARTUP_WAIT_SECONDS)
+# For smoke test, we can override to run just the API
+
+# Use upstream entrypoint - it handles API + CP startup with health checks
+ENTRYPOINT ["/app/start-all.sh"]
+
+# Default to API-only mode for smoke test (CP can be enabled with HINDSIGHT_ENABLE_CP=true)
+CMD ["hindsight-api"]

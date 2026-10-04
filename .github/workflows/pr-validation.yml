@@ -1,0 +1,206 @@
+# PR Validation Workflow - Runs on PRs to main and kjs-edits
+# Sequential: Repository Check → Build amd64 + Smoke Test → Build arm64 + Smoke Test → Validation Summary
+
+name: KJS-PR Validation
+
+on:
+  pull_request:
+    branches: [main, kjs-edits]
+    paths:
+      - 'docker/standalone/Dockerfile.oracle'
+      - 'hindsight-api-slim/hindsight_api/**'
+      - 'hindsight-control-plane/**'
+      - 'smoketest.sh'
+      - '.github/workflows/pr-validation.yml'
+
+concurrency:
+  group: kjs-oracle-smoke-test
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: read
+  pull-requests: read
+
+jobs:
+  validate-repository:
+    name: KJS-PR Repository Check
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for merge conflicts
+        run: |
+          echo "Checking for merge conflicts with base branch..."
+          git fetch origin ${{ github.base_ref }}
+          if ! git merge-tree $(git merge-base HEAD origin/${{ github.base_ref }}) HEAD origin/${{ github.base_ref }} | grep -q '<<<<<<<'; then
+            echo "No merge conflicts detected"
+          else
+            echo "Merge conflicts detected"
+            exit 1
+          fi
+
+      - name: Validate changed files
+        run: |
+          echo "Validating changed files..."
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          echo "Changed files:"
+          echo "$CHANGED"
+          
+          ALLOWED_PREFIXES=(
+            "docker/standalone/Dockerfile.oracle"
+            "hindsight-api-slim/hindsight_api/"
+            "hindsight-control-plane/"
+            "smoketest.sh"
+            ".github/workflows/"
+          )
+          
+          for file in $CHANGED; do
+            ALLOWED=false
+            for prefix in "${ALLOWED_PREFIXES[@]}"; do
+              if [[ "$file" == "$prefix"* ]]; then
+                ALLOWED=true
+                break
+              fi
+            done
+            if [ "$ALLOWED" = false ]; then
+              echo "Disallowed file changed: $file"
+              exit 1
+            fi
+          done
+          echo "All changed files are allowed"
+
+      - name: Verify smoketest.sh is executable
+        run: |
+          if [ -f smoketest.sh ] && [ ! -x smoketest.sh ]; then
+            echo "Making smoketest.sh executable"
+            chmod +x smoketest.sh
+          fi
+          echo "smoketest.sh ready"
+
+  build-amd64:
+    name: KJS-PR Build amd64 + Smoke Test
+    needs: validate-repository
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    env:
+      KJS_TEST_ODB_PASSWORD: ${{ secrets.KJS_TEST_ODB_PASSWORD }}
+      KJS_TEST_LLM_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: localhost/hindsight-oracle-test
+          tags: |
+            type=raw,value=latest
+
+      - name: Build Oracle unified image (load for testing)
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/standalone/Dockerfile.oracle
+          target: oracle-full
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: localhost/hindsight-oracle-test:latest
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            INCLUDE_LOCAL_MODELS=false
+            PRELOAD_ML_MODELS=false
+            ORACLEDB_VERSION=26.0.1
+
+      - name: Run smoke test on loaded image
+        run: |
+          chmod +x smoketest.sh
+          ./smoketest.sh localhost/hindsight-oracle-test:latest
+
+  build-arm64:
+    name: KJS-PR Build arm64 + Smoke Test
+    needs: build-amd64
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 120
+    env:
+      KJS_TEST_ODB_PASSWORD: ${{ secrets.KJS_TEST_ODB_PASSWORD }}
+      KJS_TEST_LLM_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: localhost/hindsight-oracle-test
+          tags: |
+            type=raw,value=latest
+
+      - name: Build Oracle unified image (load for testing)
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/standalone/Dockerfile.oracle
+          target: oracle-full
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: localhost/hindsight-oracle-test:latest
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            INCLUDE_LOCAL_MODELS=false
+            PRELOAD_ML_MODELS=false
+            ORACLEDB_VERSION=26.0.1
+
+      - name: Run smoke test on loaded image
+        run: |
+          chmod +x smoketest.sh
+          ./smoketest.sh localhost/hindsight-oracle-test:latest
+
+  validation-summary:
+    name: KJS-PR Validation Summary
+    needs: [validate-repository, build-amd64, build-arm64]
+    if: always()
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Check all validations passed
+        run: |
+          if [[ "${{ needs.validate-repository.result }}" == "success" && \
+                "${{ needs.build-amd64.result }}" == "success" && \
+                "${{ needs.build-arm64.result }}" == "success" ]]; then
+            echo "All validations passed"
+          else
+            echo "Some validations failed"
+            echo "Repository: ${{ needs.validate-repository.result }}"
+            echo "Build amd64: ${{ needs.build-amd64.result }}"
+            echo "Build arm64: ${{ needs.build-arm64.result }}"
+            exit 1
+          fi
