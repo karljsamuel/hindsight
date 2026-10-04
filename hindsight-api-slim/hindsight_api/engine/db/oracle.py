@@ -720,7 +720,7 @@ def _oracle_connect_params(dsn: str) -> dict[str, Any]:
     }
     descriptor = parse_qs(parsed.query).get("dsn")
     if descriptor and descriptor[0]:
-        params["dsn"] = descriptor[0]
+        params["dsn"] = unquote(descriptor[0])
     else:
         host = parsed.hostname or "localhost"
         port = parsed.port or 1521

@@ -59,10 +59,11 @@ with engine.connect() as conn:
     inspector = inspect(engine)
     tables = inspector.get_table_names()
     
-    # Filter out tables that don not actually exist (ORA-00942 when dropping)
+    # Oracle stores table names in UPPERCASE. Use the names as returned by inspector.
     existing_tables = []
     for table in tables:
         try:
+            # Use the table name as-is (Oracle returns uppercase)
             conn.execute(text("SELECT 1 FROM \"" + table + "\" WHERE ROWNUM = 1"))
             existing_tables.append(table)
         except Exception as e:
