@@ -15,6 +15,26 @@ if [[ -z "$DATABASE_URL" ]]; then
     exit 1
 fi
 
+# URL-decode the DSN part (oracledb expects decoded connect string)
+# The secret has URL-encoded DSN (%28=( %29=) %3D==)
+DECODED_DATABASE_URL=$(python3 -c "
+import urllib.parse, sys
+url = sys.argv[1]
+# Parse the URL
+parsed = urllib.parse.urlparse(url)
+# Decode the dsn query parameter
+query = urllib.parse.parse_qs(parsed.query)
+if 'dsn' in query:
+    query['dsn'] = [urllib.parse.unquote(query['dsn'][0])]
+# Rebuild query string
+new_query = urllib.parse.urlencode(query, doseq=True)
+# Rebuild URL
+decoded = urllib.parse.urlunparse((
+    parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment
+))
+print(decoded)
+" "$DATABASE_URL")
+
 echo "=== Smoke Test Starting ==="
 echo "Image: $IMAGE"
 echo "Using OCI Oracle database via connection string"
@@ -29,7 +49,7 @@ trap cleanup EXIT
 # Clear all tables in the test database before starting
 echo "Clearing existing tables in test database..."
 docker run --rm \
-    -e DATABASE_URL="$DATABASE_URL" \
+    -e DATABASE_URL="$DECODED_DATABASE_URL" \
     python:3.11-slim bash -c '
 pip install -q sqlalchemy oracledb 2>/dev/null
 cat > /tmp/clear_tables.py << "PYEOF"
@@ -62,7 +82,7 @@ docker run -d --name "$CONTAINER_NAME" \
     -e HINDSIGHT_API_DATABASE_BACKEND=oracle \
     -e HINDSIGHT_API_VECTOR_EXTENSION=oracle \
     -e HINDSIGHT_API_EMBEDDINGS_DIMENSION=2048 \
-    -e HINDSIGHT_API_DATABASE_URL="$DATABASE_URL" \
+    -e HINDSIGHT_API_DATABASE_URL="$DECODED_DATABASE_URL" \
     -e HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP=false \
     -e HINDSIGHT_API_WORKER_ENABLED=false \
     -p "${HINDSIGHT_PORT}:8888" \
@@ -131,7 +151,7 @@ from hindsight_api.migrations import _detect_vector_extension
 from sqlalchemy import create_engine
 from sqlalchemy.pool import NullPool
 
-db_url = '$DATABASE_URL'
+db_url = '$DECODED_DATABASE_URL'
 engine = create_engine(db_url, poolclass=NullPool)
 with engine.connect() as conn:
     from hindsight_api.migrations import _detect_vector_extension
@@ -152,7 +172,7 @@ docker exec "$CONTAINER_NAME" python3 -c "
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.pool import NullPool
 
-db_url = '$DATABASE_URL'
+db_url = '$DECODED_DATABASE_URL'
 engine = create_engine(db_url, poolclass=NullPool)
 inspector = inspect(engine)
 tables = inspector.get_table_names()
