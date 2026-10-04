@@ -1401,7 +1401,7 @@ DEFAULT_EMBEDDINGS_COHERE_MODEL = "embed-english-v3.0"
 DEFAULT_RERANKER_COHERE_MODEL = "rerank-english-v3.0"
 
 # OpenRouter defaults
-DEFAULT_EMBEDDINGS_OPENROUTER_MODEL = "perplexity/pplx-embed-v1-0.6b"
+DEFAULT_EMBEDDINGS_OPENROUTER_MODEL = "nvidia/llama-nemotron-embed-vl-1b-v2:free"
 DEFAULT_RERANKER_OPENROUTER_MODEL = "cohere/rerank-v3.5"
 DEFAULT_RERANKER_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/rerank"
 
