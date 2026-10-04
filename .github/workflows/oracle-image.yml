@@ -1,151 +1,92 @@
-# KJS Oracle Unified Image - Protected Main Branch Workflow
-#
-# BRANCH PROTECTION REQUIRED on main:
-#   - Require PR before merge
-#   - Required status checks: "KJS Build & Smoke Test (linux/amd64)", "KJS Build & Smoke Test (linux/arm64)"
-#   - Required 1 approving review
-#   - No force pushes, no direct pushes
-#
-# COLLABORATORS:
-#   - karljsamuel (admin)
-#   - github-actions[bot] (write) - for auto-merge after approval
-#
-# REVIEW FLOW:
-#   1. Weekly job opens PR "upstream-sync/YYYY-MM-DD" with rebased kjs-edits
-#   2. PR runs KJS Build & Smoke Test (required check)
-#   3. karljsamuel reviews via `gh pr view` → `gh pr review --approve`
-#   4. Merge triggers image push to GHCR
-
 name: KJS Oracle Unified Image
-
-on:
+'on':
   push:
-    branches: [main]
+    branches:
+    - main
     paths:
-      - 'docker/standalone/Dockerfile.oracle'
-      - 'hindsight-api-slim/hindsight_api/**'
-      - 'hindsight-control-plane/**'
-      - '.github/workflows/oracle-image.yml'
-  workflow_dispatch:
+    - docker/standalone/Dockerfile.oracle
+    - hindsight-api-slim/hindsight_api/**
+    - hindsight-control-plane/**
+    - .github/workflows/oracle-image.yml
+  workflow_dispatch: {}
   schedule:
-    - cron: '0 2 * * 0'  # Weekly: Sunday 02:00 UTC
-
+  - cron: 0 2 * * 0
 concurrency:
   group: kjs-oracle-smoke-test
   cancel-in-progress: false
-
 permissions:
   contents: read
   packages: write
   pull-requests: write
-
 jobs:
   build-and-test:
     name: KJS Build & Smoke Test
     strategy:
       matrix:
         include:
-          - platform: linux/amd64
-            runner: ubuntu-26.04
-          - platform: linux/arm64
-            runner: ubuntu-26.04-arm
+        - platform: linux/amd64
+          runner: ubuntu-26.04
+        - platform: linux/arm64
+          runner: ubuntu-26.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - name: Login to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ghcr.io/karljsamuel/hindsight
+        tags:
+        - type=raw,value=oracle-latest
+        - type=sha,prefix=oracle-
+        - type=ref,event=branch,suffix=-oracle
+    - name: Build Oracle unified image (load for testing)
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: docker/standalone/Dockerfile.oracle
+        target: oracle-full
+        platforms: ${{ matrix.platform }}
+        push: false
+        load: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        build-args: 'INCLUDE_LOCAL_MODELS=false
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+          PRELOAD_ML_MODELS=false
 
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          ORACLEDB_VERSION=26.0.1'
+    - name: Smoke test - API health check
+      env:
+        KJS_TEST_ODB_PASSWORD: ${{ secrets.KJS_TEST_ODB_PASSWORD }}
+      run: "# Build the database URL with decoded DSN (oracledb thin mode compatible)\ncat > /tmp/build_dsn.py << 'PYEOF'\nimport urllib.parse\ndsn = '(description=(retry_count=20)(retry_delay=3)(address=(protocol=tcps)(port=1522)(host=adb.ap-hyderabad-1.oraclecloud.com))(connect_data=(service_name=g4a90f2577f59fb_hindsightdb_high.adb.oraclecloud.com))(security=(ssl_server_dn_match=yes)))'\nprint(urllib.parse.quote(dsn))\nPYEOF\nDSN_QUOTED=$(python3 /tmp/build_dsn.py)\nDATABASE_URL=\"oracle+oracledb://HINDSIGHT_TEST:${KJS_TEST_ODB_PASSWORD}@/?dsn=${DSN_QUOTED}\"\n\n# Start container with real test database for health check\ndocker run -d --name hindsight-test \\\n  -e HINDSIGHT_API_DATABASE_BACKEND=oracle \\\n  -e HINDSIGHT_API_VECTOR_EXTENSION=oracle \\\n  -e HINDSIGHT_API_EMBEDDINGS_DIMENSION=2048 \\\n  -e HINDSIGHT_API_DATABASE_URL=\"$DATABASE_URL\" \\\n  -e HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP=false \\\n  -e HINDSIGHT_API_WORKER_ENABLED=false \\\n  -p 8888:8888 \\\n  ${{ steps.meta.outputs.tags\
+        \ }}\n\n# Wait for startup (max 60s)\nfor i in {1..30}; do\n  if curl -sf http://localhost:8888/health >/dev/null 2>&1; then\n    echo \"Health endpoint responded\"\n    break\n  fi\n  sleep 2\ndone\n\n# Check process is running\nif ! docker ps | grep -q hindsight-test; then\n  echo \"Container died\"\n  docker logs hindsight-test\n  exit 1\nfi\n\necho \"Smoke test passed - container running and healthy\"\n\n# Cleanup\ndocker stop hindsight-test && docker rm hindsight-test"
+    - name: Push image to GHCR (only on merge to main)
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: docker/standalone/Dockerfile.oracle
+        target: oracle-full
+        platforms: ${{ matrix.platform }}
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        build-args: 'INCLUDE_LOCAL_MODELS=false
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/karljsamuel/hindsight
-          tags: |
-            type=raw,value=oracle-latest
-            type=sha,prefix=oracle-
-            type=ref,event=branch,suffix=-oracle
+          PRELOAD_ML_MODELS=false
 
-      - name: Build Oracle unified image (load for testing)
-        id: build
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: docker/standalone/Dockerfile.oracle
-          target: oracle-full
-          platforms: ${{ matrix.platform }}
-          push: false
-          load: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            INCLUDE_LOCAL_MODELS=false
-            PRELOAD_ML_MODELS=false
-            ORACLEDB_VERSION=26.0.1
-
-      - name: Smoke test - API health check
-        env:
-          KJS_TEST_ODB_URL: ${{ secrets.KJS_TEST_ODB_URL }}
-        run: |
-          # URL-decode DSN: replace %28=( %29=) %3D==
-          DECODED_DATABASE_URL=$(echo "$KJS_TEST_ODB_URL" | sed 's/%28/(/g; s/%29/)/g; s/%3D/=/g; s/%2F/\//g; s/%3A/:/g')
-
-          # Start container with real test database for health check
-          docker run -d --name hindsight-test \
-            -e HINDSIGHT_API_DATABASE_BACKEND=oracle \
-            -e HINDSIGHT_API_VECTOR_EXTENSION=oracle \
-            -e HINDSIGHT_API_EMBEDDINGS_DIMENSION=2048 \
-            -e HINDSIGHT_API_DATABASE_URL="$DECODED_DATABASE_URL" \
-            -e HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP=false \
-            -e HINDSIGHT_API_WORKER_ENABLED=false \
-            -p 8888:8888 \
-            ${{ steps.meta.outputs.tags }}
-
-          # Wait for startup (max 60s)
-          for i in {1..30}; do
-            if curl -sf http://localhost:8888/health >/dev/null 2>&1; then
-              echo "Health endpoint responded"
-              break
-            fi
-            sleep 2
-          done
-
-          # Check process is running
-          if ! docker ps | grep -q hindsight-test; then
-            echo "Container died"
-            docker logs hindsight-test
-            exit 1
-          fi
-
-          echo "Smoke test passed - container running and healthy"
-
-          # Cleanup
-          docker stop hindsight-test && docker rm hindsight-test
-
-      - name: Push image to GHCR (only on merge to main)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: docker/standalone/Dockerfile.oracle
-          target: oracle-full
-          platforms: ${{ matrix.platform }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            INCLUDE_LOCAL_MODELS=false
-            PRELOAD_ML_MODELS=false
-            ORACLEDB_VERSION=26.0.1
-
+          ORACLEDB_VERSION=26.0.1'
   upstream-sync:
     name: KJS Upstream Sync
     runs-on: ubuntu-26.04
@@ -154,84 +95,85 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: Checkout with full history
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GH_PAT }}
+    - name: Checkout with full history
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.GH_PAT }}
+    - name: Configure git
+      run: 'git config user.name "github-actions[bot]"
 
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"'
+    - name: Add upstream remote
+      run: 'git remote add upstream https://github.com/vectorize-io/hindsight.git
 
-      - name: Add upstream remote
-        run: |
-          git remote add upstream https://github.com/vectorize-io/hindsight.git
+        git fetch upstream'
+    - name: Sync main branch (fast-forward only)
+      run: "git checkout main\nif git merge upstream/main --ff-only; then\n  git push origin main\n  echo \"main_synced=true\" >> $GITHUB_OUTPUT\nelse\n  echo \"main_synced=false\" >> $GITHUB_OUTPUT\n  echo \"main cannot fast-forward to upstream/main - manual intervention needed\"\nfi"
+      id: sync_main
+    - name: Rebase kjs-edits onto main
+      if: steps.sync_main.outputs.main_synced == 'true'
+      run: "git checkout kjs-edits 2>/dev/null || git checkout -b kjs-edits origin/kjs-edits\nif git rebase main; then\n  git push origin kjs-edits --force-with-lease\n  echo \"rebase_ok=true\" >> $GITHUB_OUTPUT\nelse\n  echo \"rebase_ok=false\" >> $GITHUB_OUTPUT\n  git rebase --abort\nfi"
+      id: check_rebase
+    - name: Create upstream-sync PR (always open PR for review)
+      if: steps.check_rebase.outputs.rebase_ok == 'false' || steps.check_rebase.outputs.rebase_ok == 'true'
+      uses: peter-evans/create-pull-request@v5
+      with:
+        token: ${{ secrets.GH_PAT }}
+        branch: kjs-edits
+        base: main
+        title: upstream-sync/${{ github.run_id }}-${{ github.run_number }}
+        body: '**Automated upstream sync** - `kjs-edits` rebased onto latest `upstream/main`.
+
+
+          ${{ steps.check_rebase.outputs.rebase_ok == ''false'' && ''**Conflicts detected** - manual resolution required.'' || ''Clean rebase - ready for review.'' }}
+
+
+          **Changes from upstream:**
+
+          - `upstream/main` merged to `main` (fast-forward)
+
+          - `kjs-edits` rebased onto new `main`
+
+
+          **Conflict resolution (if needed):**
+
+          ```bash
+
           git fetch upstream
 
-      - name: Sync main branch (fast-forward only)
-        run: |
-          git checkout main
-          if git merge upstream/main --ff-only; then
-            git push origin main
-            echo "main_synced=true" >> $GITHUB_OUTPUT
-          else
-            echo "main_synced=false" >> $GITHUB_OUTPUT
-            echo "main cannot fast-forward to upstream/main - manual intervention needed"
-          fi
-        id: sync_main
+          git checkout kjs-edits
 
-      - name: Rebase kjs-edits onto main
-        if: steps.sync_main.outputs.main_synced == 'true'
-        run: |
-          git checkout kjs-edits 2>/dev/null || git checkout -b kjs-edits origin/kjs-edits
-          if git rebase main; then
-            git push origin kjs-edits --force-with-lease
-            echo "rebase_ok=true" >> $GITHUB_OUTPUT
-          else
-            echo "rebase_ok=false" >> $GITHUB_OUTPUT
-            git rebase --abort
-          fi
-        id: check_rebase
+          git rebase main
 
-      - name: Create upstream-sync PR (always open PR for review)
-        if: steps.check_rebase.outputs.rebase_ok == 'false' || steps.check_rebase.outputs.rebase_ok == 'true'
-        uses: peter-evans/create-pull-request@v5
-        with:
-          token: ${{ secrets.GH_PAT }}
-          branch: kjs-edits
-          base: main
-          title: "upstream-sync/${{ github.run_id }}-${{ github.run_number }}"
-          body: |
-            **Automated upstream sync** - `kjs-edits` rebased onto latest `upstream/main`.
+          # Resolve conflicts in:
 
-            ${{ steps.check_rebase.outputs.rebase_ok == 'false' && '**Conflicts detected** - manual resolution required.' || 'Clean rebase - ready for review.' }}
+          #   - hindsight-api-slim/hindsight_api/migrations.py
 
-            **Changes from upstream:**
-            - `upstream/main` merged to `main` (fast-forward)
-            - `kjs-edits` rebased onto new `main`
+          #   - hindsight-api-slim/hindsight_api/engine/db/oracle.py
 
-            **Conflict resolution (if needed):**
-            ```bash
-            git fetch upstream
-            git checkout kjs-edits
-            git rebase main
-            # Resolve conflicts in:
-            #   - hindsight-api-slim/hindsight_api/migrations.py
-            #   - hindsight-api-slim/hindsight_api/engine/db/oracle.py
-            #   - hindsight-api-slim/hindsight_api/engine/memories/oracle.py
-            #   - hindsight-api-slim/hindsight_api/_vector_index.py
-            #   - hindsight-api-slim/hindsight_api/alembic/versions/o1a2b3c4d5e6_oracle_baseline.py
-            git rebase --continue
-            git push origin kjs-edits --force-with-lease
-            ```
+          #   - hindsight-api-slim/hindsight_api/engine/memories/oracle.py
 
-            **Review checklist:**
-            - [ ] KJS Build & Smoke Test pass (required check)
-            - [ ] No unexpected upstream changes break Oracle compatibility
-            - [ ] Schema migrations still apply cleanly
+          #   - hindsight-api-slim/hindsight_api/_vector_index.py
 
-            Once approved and checks pass, merge to trigger GHCR image push.
-          labels: "upstream-sync,automated"
-          draft: false
+          #   - hindsight-api-slim/hindsight_api/alembic/versions/o1a2b3c4d5e6_oracle_baseline.py
+
+          git rebase --continue
+
+          git push origin kjs-edits --force-with-lease
+
+          ```
+
+
+          **Review checklist:**
+
+          - [ ] KJS Build & Smoke Test pass (required check)
+
+          - [ ] No unexpected upstream changes break Oracle compatibility
+
+          - [ ] Schema migrations still apply cleanly
+
+
+          Once approved and checks pass, merge to trigger GHCR image push.'
+        labels: upstream-sync,automated
+        draft: false

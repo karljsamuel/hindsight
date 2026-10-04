@@ -1,5 +1,5 @@
 # PR Validation Workflow - Runs on PRs to main and kjs-edits
-# 3 sequential validations: Repository Check → Build Image + Smoke Test → Validation Summary
+# Sequential: Repository Check → Build amd64 + Smoke Test → Build arm64 + Smoke Test → Validation Summary
 
 name: KJS-PR Validation
 
@@ -81,20 +81,13 @@ jobs:
           fi
           echo "smoketest.sh ready"
 
-  build-and-smoke-test:
-    name: KJS-PR Build & Smoke Test
+  build-amd64:
+    name: KJS-PR Build amd64 + Smoke Test
     needs: validate-repository
-    strategy:
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-26.04
-            run_smoke_test: "true"
-          - platform: linux/arm64
-            runner: ubuntu-26.04-arm
-            run_smoke_test: "false"
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-26.04
     timeout-minutes: 120
+    env:
+      KJS_TEST_ODB_PASSWORD: ${{ secrets.KJS_TEST_ODB_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -125,7 +118,7 @@ jobs:
           context: .
           file: docker/standalone/Dockerfile.oracle
           target: oracle-full
-          platforms: ${{ matrix.platform }}
+          platforms: linux/amd64
           push: false
           load: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -136,27 +129,78 @@ jobs:
             ORACLEDB_VERSION=26.0.1
 
       - name: Run smoke test on loaded image
-        if: matrix.run_smoke_test == 'true'
-        env:
-          KJS_TEST_ODB_URL: ${{ secrets.KJS_TEST_ODB_URL }}
+        run: |
+          chmod +x smoketest.sh
+          ./smoketest.sh ${{ steps.meta.outputs.tags }}
+
+  build-arm64:
+    name: KJS-PR Build arm64 + Smoke Test
+    needs: build-amd64
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 120
+    env:
+      KJS_TEST_ODB_PASSWORD: ${{ secrets.KJS_TEST_ODB_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: localhost/hindsight-oracle-test
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=sha-
+
+      - name: Build Oracle unified image (load for testing)
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/standalone/Dockerfile.oracle
+          target: oracle-full
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            INCLUDE_LOCAL_MODELS=false
+            PRELOAD_ML_MODELS=false
+            ORACLEDB_VERSION=26.0.1
+
+      - name: Run smoke test on loaded image
         run: |
           chmod +x smoketest.sh
           ./smoketest.sh ${{ steps.meta.outputs.tags }}
 
   validation-summary:
     name: KJS-PR Validation Summary
-    needs: [validate-repository, build-and-smoke-test]
+    needs: [validate-repository, build-amd64, build-arm64]
     if: always()
     runs-on: ubuntu-26.04
     steps:
       - name: Check all validations passed
         run: |
           if [[ "${{ needs.validate-repository.result }}" == "success" && \
-                "${{ needs.build-and-smoke-test.result }}" == "success" ]]; then
+                "${{ needs.build-amd64.result }}" == "success" && \
+                "${{ needs.build-arm64.result }}" == "success" ]]; then
             echo "All validations passed"
           else
             echo "Some validations failed"
             echo "Repository: ${{ needs.validate-repository.result }}"
-            echo "Build & Smoke Test: ${{ needs.build-and-smoke-test.result }}"
+            echo "Build amd64: ${{ needs.build-amd64.result }}"
+            echo "Build arm64: ${{ needs.build-arm64.result }}"
             exit 1
           fi
