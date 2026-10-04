@@ -501,13 +501,21 @@ class OracleMemories(PostgresMemories):
     ) -> None:
         """Oracle-specific document upsert using MERGE."""
         # Oracle MERGE equivalent of PostgreSQL ON CONFLICT
-        # original_text can be very large, bind as CLOB
-        # Use table name directly (on Oracle fq_table returns bare name)
-        # Explicitly cast preserved_created_at to TIMESTAMP WITH TIME ZONE to avoid
-        # oracledb binding it as CHAR which causes ORA-00932 in COALESCE
+        # original_text, retain_params, tags can be very large, bind as CLOB
         doc_table = "documents"
-        await conn.execute(
-            f"""
+        params = [
+            document_id,  # :1 id
+            bank_id,      # :2 bank_id
+            original_text,  # :3 original_text (CLOB)
+            content_hash,  # :4 content_hash
+            json.dumps(retain_params) if retain_params else None,  # :5 retain_params (CLOB)
+            document_tags or [],  # :6 tags (CLOB)
+            preserved_created_at,  # :7 preserved_created_at
+        ]
+        # Use executemany with single row and column_types for CLOB binding
+        # column_types: "clob[]" forces CLOB binding for that position
+        column_types = ["text[]", "text[]", "clob[]", "text[]", "clob[]", "clob[]", "text[]"]
+        query = f"""
             MERGE INTO {doc_table} t
             USING (SELECT
                 :1 AS id,
@@ -527,14 +535,13 @@ class OracleMemories(PostgresMemories):
                 updated_at = SYSTIMESTAMP
             WHEN NOT MATCHED THEN INSERT (id, bank_id, original_text, content_hash, retain_params, tags, created_at, updated_at)
             VALUES (s.id, s.bank_id, s.original_text, s.content_hash, s.retain_params, s.tags, COALESCE(s.preserved_created_at, SYSTIMESTAMP), SYSTIMESTAMP)
-            """,
-            document_id,
-            bank_id,
-            original_text,
-            content_hash,
-            json.dumps(retain_params) if retain_params else None,
-            document_tags or [],
-            preserved_created_at,
+        """
+        # Use executemany with single row and column_types for CLOB binding
+        await conn.executemany(
+            query,
+            [params],  # Single row as list
+            column_types=["text[]", "text[]", "clob[]", "text[]", "clob[]", "clob[]", "text[]"],
+            n_cols=7
         )
 
     # ------------------------------------------------------------------ addressed reads (delegate to pg)

@@ -76,3 +76,10 @@ hindsight-integrations/_drafts/
 
 blog-post*
 .worktrees/
+
+# local secrets / scratch files - never commit
+.env.test
+.env.test.*
+fix_oracle_*.py
+test_clear_tables*.py
+test_oracle_import.py
