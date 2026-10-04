@@ -15,6 +15,12 @@
 #   2. PR runs build-and-test (required check)
 #   3. karljsamuel reviews via `gh pr view` → `gh pr review --approve`
 #   4. Merge triggers image push to GHCR
+#
+# LOCAL ML MODELS: DISABLED (use external providers via OpenRouter)
+# - INCLUDE_LOCAL_MODELS=false (no sentence-transformers, no local embeddings/reranking)
+# - PRELOAD_ML_MODELS=false (no model preload at build time)
+# - All embeddings/reranking via OpenRouter (Nemotron free tier)
+# - LLM via OpenRouter (Nemotron 3 Super)
 
 name: Oracle Unified Image
 
@@ -22,14 +28,14 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - 'docker/standalone/Dockerfile.oracle'
+      - 'docker/standalone/Dockerfile'
       - 'hindsight-api-slim/hindsight_api/**'
       - 'hindsight-control-plane/**'
       - '.github/workflows/oracle-image.yml'
   push:
     branches: [main]
     paths:
-      - 'docker/standalone/Dockerfile.oracle'
+      - 'docker/standalone/Dockerfile'
       - 'hindsight-api-slim/hindsight_api/**'
       - 'hindsight-control-plane/**'
       - '.github/workflows/oracle-image.yml'
@@ -45,15 +51,14 @@ permissions:
 jobs:
   build-and-test:
     name: Build & Smoke Test
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
-            runner: ubuntu-latest
+            runner: ubuntu-26.04
           - platform: linux/arm64
-            runner: ubuntu-latest
+            runner: ubuntu-26.04-arm
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -83,8 +88,8 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: docker/standalone/Dockerfile.oracle
-          target: oracle-full
+          file: docker/standalone/Dockerfile
+          target: standalone
           platforms: ${{ matrix.platform }}
           push: false
           load: true
@@ -96,16 +101,39 @@ jobs:
             ORACLEDB_VERSION=26.0.1
 
       - name: Smoke test - API health check
+        env:
+          KJS_TEST_ODB_PASSWORD: ${{ secrets.KJS_TEST_ODB_PASSWORD }}
+          KJS_TEST_LLM_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
         run: |
-          # Start container with minimal config for health check
+          # Build the database URL with decoded DSN (oracledb thin mode compatible)
+          cat > /tmp/build_dsn.py << 'PYEOF'
+          import urllib.parse
+          dsn = '(description=(retry_count=20)(retry_delay=3)(address=(protocol=tcps)(port=1522)(host=adb.ap-hyderabad-1.oraclecloud.com))(connect_data=(service_name=g4a90f2577f59fb_hindsightdb_high.adb.oraclecloud.com))(security=(ssl_server_dn_match=yes)))'
+          print(urllib.parse.quote(dsn))
+          PYEOF
+          DSN_QUOTED=$(python3 /tmp/build_dsn.py)
+          DATABASE_URL="oracle+oracledb://HINDSIGHT_TEST:${KJS_TEST_ODB_PASSWORD}@/?dsn=${DSN_QUOTED}"
+
+          # Start container with real test database for health check
           docker run -d --name hindsight-test \
             -e HINDSIGHT_API_DATABASE_BACKEND=oracle \
             -e HINDSIGHT_API_VECTOR_EXTENSION=oracle \
             -e HINDSIGHT_API_EMBEDDINGS_DIMENSION=2048 \
-            -e HINDSIGHT_API_DATABASE_URL="oracle+oracledb://test:test@/?dsn=(description=(address=(protocol=tcps)(host=invalid)(port=1521))(connect_data=(service_name=test)))" \
+            -e HINDSIGHT_API_DATABASE_URL="$DATABASE_URL" \
+            -e HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP=false \
+            -e HINDSIGHT_API_WORKER_ENABLED=false \
+            -e HINDSIGHT_API_LLM_PROVIDER=openrouter \
+            -e HINDSIGHT_API_LLM_OPENROUTER_API_KEY="${{ secrets.KJS_TEST_LLM_API_KEY }}" \
+            -e HINDSIGHT_API_LLM_MODEL=nvidia/nemotron-3-super-120b-a12b:free \
+            -e HINDSIGHT_API_EMBEDDINGS_PROVIDER=openrouter \
+            -e HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY="${{ secrets.KJS_TEST_LLM_API_KEY }}" \
+            -e HINDSIGHT_API_EMBEDDINGS_MODEL=nvidia/llama-nemotron-embed-vl-1b-v2:free \
+            -e HINDSIGHT_API_RERANKER_PROVIDER=openrouter \
+            -e HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY="${{ secrets.KJS_TEST_LLM_API_KEY }}" \
+            -e HINDSIGHT_API_RERANKER_MODEL=nvidia/llama-nemotron-rerank-vl-1b-v2:free \
             -p 8888:8888 \
             ${{ steps.meta.outputs.tags }}
-          
+
           # Wait for startup (max 60s)
           for i in {1..30}; do
             if curl -sf http://localhost:8888/health >/dev/null 2>&1; then
@@ -114,16 +142,16 @@ jobs:
             fi
             sleep 2
           done
-          
+
           # Check process is running
           if ! docker ps | grep -q hindsight-test; then
             echo "❌ Container died"
             docker logs hindsight-test
             exit 1
           fi
-          
+
           echo "✅ Smoke test passed - container running and healthy"
-          
+
           # Cleanup
           docker stop hindsight-test && docker rm hindsight-test
 
@@ -132,8 +160,8 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: docker/standalone/Dockerfile.oracle
-          target: oracle-full
+          file: docker/standalone/Dockerfile
+          target: standalone
           platforms: ${{ matrix.platform }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -202,13 +230,13 @@ jobs:
           title: "upstream-sync/${{ github.run_id }}-${{ github.run_number }}"
           body: |
             **Automated upstream sync** — `kjs-edits` rebased onto latest `upstream/main`.
-            
+
             ${{ steps.check_rebase.outputs.rebase_ok == 'false' && '⚠️ **Conflicts detected** — manual resolution required.' || '✅ Clean rebase — ready for review.' }}
-            
+
             **Changes from upstream:**
             - `upstream/main` merged to `main` (fast-forward)
             - `kjs-edits` rebased onto new `main`
-            
+
             **Conflict resolution (if needed):**
             ```bash
             git fetch upstream
@@ -223,12 +251,12 @@ jobs:
             git rebase --continue
             git push origin kjs-edits --force-with-lease
             ```
-            
+
             **Review checklist:**
             - [ ] Build & smoke test pass (required check)
             - [ ] No unexpected upstream changes break Oracle compatibility
             - [ ] Schema migrations still apply cleanly
-            
+
             Once approved and checks pass, merge to trigger GHCR image push.
           labels: "upstream-sync,automated"
           draft: false
