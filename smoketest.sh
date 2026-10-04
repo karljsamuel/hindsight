@@ -8,37 +8,20 @@ IMAGE="${1:-hindsight-oracle-test:latest}"
 HINDSIGHT_PORT=8888
 CONTAINER_NAME="hindsight-smoke-test-$$"
 
-# Use the test database URL from environment (set via GitHub secret)
-DATABASE_URL="${KJS_TEST_ODB_URL:-}"
-if [[ -z "$DATABASE_URL" ]]; then
-    echo "❌ KJS_TEST_ODB_URL environment variable not set"
+# Get password from secret (only the password, not the full URL)
+DB_PASSWORD="${KJS_TEST_ODB_PASSWORD:-}"
+if [[ -z "$DB_PASSWORD" ]]; then
+    echo "❌ KJS_TEST_ODB_PASSWORD environment variable not set"
     exit 1
 fi
 
-# URL-decode the DSN part using Python (oracledb expects decoded connect string)
-# Then simplify the DSN for oracledb thin mode compatibility
-DECODED_DATABASE_URL=$(python3 -c "
-import urllib.parse, sys
-url = sys.argv[1]
-parsed = urllib.parse.urlparse(url)
-query = urllib.parse.parse_qs(parsed.query)
-if 'dsn' in query:
-    # Decode the DSN and simplify for oracledb thin mode
-    dsn = urllib.parse.unquote(query['dsn'][0])
-    # Remove unsupported parameters for thin mode (retry_count, retry_delay)
-    import re
-    dsn = re.sub(r'\(retry_count=\d+\)', '', dsn)
-    dsn = re.sub(r'\(retry_delay=\d+\)', '', dsn)
-    # Also ensure port is 1522 for TLS (from wallet)
-    dsn = dsn.replace('port=1521', 'port=1522')
-    # Rebuild the query with simplified DSN
-    query['dsn'] = [dsn]
-new_query = urllib.parse.urlencode({'dsn': [dsn]})
-decoded = urllib.parse.urlunparse((
-    parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment
-))
-print(decoded)
-" "$DATABASE_URL")
+# Build the database URL with decoded DSN (oracledb thin mode compatible)
+# Use the high performance service (port 1522, TLS)
+DATABASE_URL="oracle+oracledb://HINDSIGHT_TEST:${DB_PASSWORD}@/?dsn=$(python3 -c "
+import urllib.parse
+dsn = '(description=(retry_count=20)(retry_delay=3)(address=(protocol=tcps)(port=1522)(host=adb.ap-hyderabad-1.oraclecloud.com))(connect_data=(service_name=g4a90f2577f59fb_hindsightdb_high.adb.oraclecloud.com))(security=(ssl_server_dn_match=yes)))'
+print(urllib.parse.quote(dsn))
+")"
 
 echo "=== Smoke Test Starting ==="
 echo "Image: $IMAGE"
@@ -54,7 +37,7 @@ trap cleanup EXIT
 # Clear all tables in the test database before starting
 echo "Clearing existing tables in test database..."
 docker run --rm \
-    -e DATABASE_URL="$DECODED_DATABASE_URL" \
+    -e DATABASE_URL="$DATABASE_URL" \
     python:3.11-slim bash -c '
 pip install -q sqlalchemy oracledb 2>/dev/null
 cat > /tmp/clear_tables.py << "PYEOF"
@@ -87,7 +70,7 @@ docker run -d --name "$CONTAINER_NAME" \
     -e HINDSIGHT_API_DATABASE_BACKEND=oracle \
     -e HINDSIGHT_API_VECTOR_EXTENSION=oracle \
     -e HINDSIGHT_API_EMBEDDINGS_DIMENSION=2048 \
-    -e HINDSIGHT_API_DATABASE_URL="$DECODED_DATABASE_URL" \
+    -e HINDSIGHT_API_DATABASE_URL="$DATABASE_URL" \
     -e HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP=false \
     -e HINDSIGHT_API_WORKER_ENABLED=false \
     -p "${HINDSIGHT_PORT}:8888" \
@@ -156,7 +139,7 @@ from hindsight_api.migrations import _detect_vector_extension
 from sqlalchemy import create_engine
 from sqlalchemy.pool import NullPool
 
-db_url = '$DECODED_DATABASE_URL'
+db_url = '$DATABASE_URL'
 engine = create_engine(db_url, poolclass=NullPool)
 with engine.connect() as conn:
     from hindsight_api.migrations import _detect_vector_extension
@@ -177,7 +160,7 @@ docker exec "$CONTAINER_NAME" python3 -c "
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.pool import NullPool
 
-db_url = '$DECODED_DATABASE_URL'
+db_url = '$DATABASE_URL'
 engine = create_engine(db_url, poolclass=NullPool)
 inspector = inspect(engine)
 tables = inspector.get_table_names()
