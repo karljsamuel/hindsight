@@ -45,10 +45,10 @@ jobs:
       uses: docker/metadata-action@v5
       with:
         images: ghcr.io/karljsamuel/hindsight
-        tags:
-        - type=raw,value=oracle-latest
-        - type=sha,prefix=oracle-
-        - type=ref,event=branch,suffix=-oracle
+        tags: |
+          type=raw,value=oracle-latest
+          type=sha,prefix=oracle-
+          type=ref,event=branch,suffix=-oracle
     - name: Build Oracle unified image (load for testing)
       id: build
       uses: docker/build-push-action@v5
