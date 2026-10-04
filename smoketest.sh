@@ -258,18 +258,25 @@ async def ingest():
     
     rc = RequestContext(internal=True, tenant_id=None, api_key_id=None)
     
-    result = await engine.retain_async(
-        bank_id='$BANK_ID',
-        content='Hindsight is an agent memory system that learns from interactions. It uses Oracle 26ai for vector storage and OpenRouter for LLM/embedding providers.',
-        context='smoke test observation',
-        fact_type_override='observation',
-        document_id='doc-001',
-        request_context=rc
-    )
-    print(f'INGEST_ID:{result[0] if result else \"\"}')
+    try:
+        result = await engine.retain_async(
+            bank_id='$BANK_ID',
+            content='Hindsight is an agent memory system that learns from interactions. It uses Oracle 26ai for vector storage and OpenRouter for LLM/embedding providers.',
+            context='smoke test observation',
+            fact_type_override='observation',
+            document_id='doc-001',
+            request_context=rc
+        )
+        print(f'INGEST_RESULT:{result}')
+        print(f'INGEST_ID:{result[0] if result else \"\"}')
+    except Exception as e:
+        print(f'INGEST_ERROR:{e}')
+        import traceback
+        traceback.print_exc()
+        raise
     await engine.close()
 
-asyncio.run(ingest())
+asyncio.run(ingest()
 ")
 
 INGEST1_ID=$(echo "$INGEST1" | grep 'INGEST_ID:' | cut -d: -f2)
