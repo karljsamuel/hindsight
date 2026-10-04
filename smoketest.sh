@@ -365,6 +365,7 @@ import asyncio
 import sys
 sys.path.insert(0, '/app/api')
 from hindsight_api.models import RequestContext
+from hindsight_api.engine.memory_engine import Budget
 
 async def recall():
     from hindsight_api.engine.memory_engine import MemoryEngine
@@ -377,34 +378,36 @@ async def recall():
     rc = RequestContext(internal=True, tenant_id=None, api_key_id=None)
     
     # Search for Oracle-related content
-    results = await engine.recall(
+    results = await engine.recall_async(
         bank_id='$BANK_ID',
         query='Oracle VECTOR type HNSW indexing',
-        limit=5,
-        fact_types=['observation'],
+        budget=Budget.MID,
+        max_tokens=4096,
+        fact_type=['observation'],
         request_context=rc
     )
     
-    print(f'RECALL_COUNT:{len(results)}')
-    for r in results:
+    print(f'RECALL_COUNT:{len(results.facts)}')
+    for r in results.facts:
         print(f'  - Score: {r.score:.4f}, Text: {r.text[:80]}...')
     
     # Search for Nemotron content
-    results2 = await engine.recall(
+    results2 = await engine.recall_async(
         bank_id='$BANK_ID',
         query='Nemotron model OpenRouter provider',
-        limit=5,
-        fact_types=['observation'],
+        budget=Budget.MID,
+        max_tokens=4096,
+        fact_type=['observation'],
         request_context=rc
     )
     
-    print(f'RECALL_COUNT2:{len(results2)}')
-    for r in results2:
+    print(f'RECALL_COUNT2:{len(results2.facts)}')
+    for r in results2.facts:
         print(f'  - Score: {r.score:.4f}, Text: {r.text[:80]}...')
     
     await engine.close()
 
-asyncio.run(recall())
+asyncio.run(recall()
 ")
 
 echo "$RECALL_RESULT"
@@ -470,6 +473,7 @@ import asyncio
 import sys
 sys.path.insert(0, '/app/api')
 from hindsight_api.models import RequestContext
+from hindsight_api.engine.memory_engine import Budget
 
 async def recall():
     from hindsight_api.engine.memory_engine import MemoryEngine
@@ -481,21 +485,22 @@ async def recall():
     
     rc = RequestContext(internal=True, tenant_id=None, api_key_id=None)
     
-    results = await engine.recall(
+    results = await engine.recall_async(
         bank_id='$BANK_ID',
         query='Oracle VECTOR type',
-        limit=5,
-        fact_types=['observation'],
+        budget=Budget.MID,
+        max_tokens=4096,
+        fact_type=['observation'],
         request_context=rc
     )
     
-    print(f'RECALL_COUNT:{len(results)}')
-    for r in results:
+    print(f'RECALL_COUNT:{len(results.facts)}')
+    for r in results.facts:
         print(f'  - Score: {r.score:.4f}, Text: {r.text[:80]}...')
     
     await engine.close()
 
-asyncio.run(recall())
+asyncio.run(recall()
 ")
 
 echo "$RECALL_AFTER"
