@@ -63,32 +63,32 @@ with engine.connect() as conn:
     existing_tables = []
     for table in tables:
         try:
-            conn.execute(text(f"SELECT 1 FROM \"{table}\" WHERE ROWNUM = 1"))
+            conn.execute(text("SELECT 1 FROM \"" + table + "\" WHERE ROWNUM = 1"))
             existing_tables.append(table)
         except Exception as e:
             if "ORA-00942" in str(e):
-                print(f"  Skipped (not exist): {table}")
+                print("  Skipped (not exist): " + table)
             else:
-                print(f"  Could not check {table}: {e}")
+                print("  Could not check " + table + ": " + str(e))
     
     if len(existing_tables) == 0:
         print("✅ Tables cleared (clean schema)")
     else:
-        print(f"Found {len(existing_tables)} tables to drop")
+        print("Found " + str(len(existing_tables)) + " tables to drop")
         errors = 0
         for table in existing_tables:
             try:
-                conn.execute(text(f"DROP TABLE \"{table}\" CASCADE CONSTRAINTS PURGE"))
-                print(f"  Dropped: {table}")
+                conn.execute(text("DROP TABLE \"" + table + "\" CASCADE CONSTRAINTS PURGE"))
+                print("  Dropped: " + table)
             except Exception as e:
-                print(f"  Could not drop {table}: {e}")
+                print("  Could not drop " + table + ": " + str(e))
                 errors += 1
         conn.commit()
         if errors > 0:
-            print(f"❌ Tables cleared with {errors} errors")
+            print("❌ Tables cleared with " + str(errors) + " errors")
             sys.exit(1)
         else:
-            print(f"✅ Dropped {len(existing_tables)} tables")
+            print("✅ Dropped " + str(len(existing_tables)) + " tables")
 PYEOF
 python3 /tmp/clear_tables.py
 '
