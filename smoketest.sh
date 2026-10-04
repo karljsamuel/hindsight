@@ -80,7 +80,7 @@ docker run -d --name "$CONTAINER_NAME" \
     -e HINDSIGHT_API_DATABASE_URL="$DATABASE_URL" \
     -e HINDSIGHT_API_LLM_PROVIDER=openrouter \
     -e HINDSIGHT_API_LLM_API_KEY="$LLM_API_KEY" \
-    -e HINDSIGHT_API_LLM_MODEL=stealth/space-bunny-alpha \
+    -e HINDSIGHT_API_LLM_MODEL=nvidia/nemotron-3-super-120b-a12b:free \
     -e HINDSIGHT_API_EMBEDDINGS_PROVIDER=openrouter \
     -e HINDSIGHT_API_EMBEDDINGS_MODEL=nvidia/llama-nemotron-embed-vl-1b-v2:free \
     -e HINDSIGHT_API_RERANKER_PROVIDER=openrouter \
@@ -175,48 +175,290 @@ docker exec "$CONTAINER_NAME" hindsight-admin run-db-migration --embedding-dimen
     echo "⚠️ Migration failed (upstream Oracle deadlock issue), continuing with schema validation..."
 }
 
-# Verify schema created correctly
-echo "Verifying schema..."
-docker exec "$CONTAINER_NAME" python3 -c "
-from sqlalchemy import create_engine, inspect
-from sqlalchemy.pool import NullPool
+# ============================================================
+# Functional tests: Bank creation, ingestion, recall, consolidation
+# ============================================================
 
-db_url = '$DATABASE_URL'
-engine = create_engine(db_url, poolclass=NullPool)
-inspector = inspect(engine)
-tables = inspector.get_table_names()
-print(f'Tables created: {len(tables)}')
+echo "=== Functional Tests: Bank, Ingest, Recall, Consolidation ==="
 
-# Check for expected core tables
-expected = ['memory_units', 'documents', 'banks', 'mental_models']
-for exp in expected:
-    if exp in tables:
-        print(f'  ✅ {exp} exists')
-    else:
-        print(f'  ❌ {exp} MISSING')
+# Create a test bank
+echo "Creating test bank..."
+BANK_RESPONSE=$(docker exec "$CONTAINER_NAME" python3 -c "
+import asyncio
+import sys
+sys.path.insert(0, '/app/api')
+from hindsight_api.main import create_app
+from hindsight_api.config import get_config
 
-# Check vector columns and varchar limits
-for t in sorted(tables):
-    cols = inspector.get_columns(t)
-    print(f'  {t}: {len(cols)} columns')
-    for col in cols:
-        col_type = str(col[\"type\"]).upper()
-        col_name = col[\"name\"]
-        if 'VECTOR' in col_type:
-            print(f'    VECTOR column: {col_name} = {col[\"type\"]}')
-        if 'VARCHAR' in col_type or 'CHAR' in col_type:
-            if '2048' in str(col[\"type\"]) or '1024' in str(col[\"type\"]) or '512' in str(col[\"type\"]):
-                print(f'    VARCHAR column: {col_name} = {col[\"type\"]}')
+app = create_app()
 
-# Check VECTOR dimensions for memory_units
-if 'memory_units' in tables:
-    cols = inspector.get_columns('memory_units')
-    for col in cols:
-        if 'EMBEDDING' in col['name'].upper() and 'VECTOR' in str(col['type']).upper():
-            print(f'    memory_units.embedding = {col[\"type\"]} (expected VECTOR(2048, FLOAT32))')
+async def create_bank():
+    from hindsight_api.engine.memory_engine import MemoryEngine
+    from hindsight_api.config import get_config
+    
+    cfg = get_config()
+    engine = MemoryEngine(cfg)
+    await engine.initialize()
+    
+    bank_id = await engine.create_bank(
+        name='smoke_test_bank',
+        description='Smoke test bank for validation'
+    )
+    print(f'BANK_ID:{bank_id}')
+    await engine.close()
 
-print('✅ Schema validation complete')
-"
+asyncio.run(create_bank())
+")
 
-echo "=== All Smoke Tests Passed ==="
+BANK_ID=$(echo "$BANK_RESPONSE" | grep 'BANK_ID:' | cut -d: -f2)
+if [[ -z "$BANK_ID" ]]; then
+    echo "❌ Failed to create bank"
+    echo "$BANK_RESPONSE"
+    exit 1
+fi
+echo "✅ Created bank: $BANK_ID"
+
+# Ingest test content 1
+echo "Ingesting test content 1..."
+INGEST1=$(docker exec "$CONTAINER_NAME" python3 -c "
+import asyncio
+import sys
+sys.path.insert(0, '/app/api')
+from hindsight_api.main import create_app
+
+async def ingest():
+    from hindsight_api.engine.memory_engine import MemoryEngine
+    from hindsight_api.config import get_config
+    
+    cfg = get_config()
+    engine = MemoryEngine(cfg)
+    await engine.initialize()
+    
+    result = await engine.ingest(
+        bank_id='$BANK_ID',
+        content='Hindsight is an agent memory system that learns from interactions. It uses Oracle 26ai for vector storage and OpenRouter for LLM/embedding providers.',
+        fact_type='observation',
+        document_id='doc-001',
+        metadata={'source': 'smoke-test', 'topic': 'hindsight-overview'}
+    )
+    print(f'INGEST_ID:{result.id}')
+    await engine.close()
+
+asyncio.run(ingest())
+")
+
+INGEST1_ID=$(echo "$INGEST1" | grep 'INGEST_ID:' | cut -d: -f2)
+if [[ -z "$INGEST1_ID" ]]; then
+    echo "❌ Failed to ingest content 1"
+    echo "$INGEST1"
+    exit 1
+fi
+echo "✅ Ingested content 1: $INGEST1_ID"
+
+# Ingest test content 2
+echo "Ingesting test content 2..."
+INGEST2=$(docker exec "$CONTAINER_NAME" python3 -c "
+import asyncio
+import sys
+sys.path.insert(0, '/app/api')
+
+async def ingest():
+    from hindsight_api.engine.memory_engine import MemoryEngine
+    from hindsight_api.config import get_config
+    
+    cfg = get_config()
+    engine = MemoryEngine(cfg)
+    await engine.initialize()
+    
+    result = await engine.ingest(
+        bank_id='$BANK_ID',
+        content='Oracle 26ai provides native VECTOR type support with HNSW indexing for efficient similarity search. The VECTOR(2048, FLOAT32) type stores 2048-dimensional embeddings.',
+        fact_type='observation',
+        document_id='doc-002',
+        metadata={'source': 'smoke-test', 'topic': 'oracle-vector'}
+    )
+    print(f'INGEST_ID:{result.id}')
+    await engine.close()
+
+asyncio.run(ingest())
+")
+
+INGEST2_ID=$(echo "$INGEST2" | grep 'INGEST_ID:' | cut -d: -f2)
+if [[ -z "$INGEST2_ID" ]]; then
+    echo "❌ Failed to ingest content 2"
+    exit 1
+fi
+echo "✅ Ingested content 2: $INGEST2_ID"
+
+# Ingest test content 3
+echo "Ingesting test content 3..."
+INGEST3=$(docker exec "$CONTAINER_NAME" python3 -c "
+import asyncio
+import sys
+sys.path.insert(0, '/app/api')
+
+async def ingest():
+    from hindsight_api.engine.memory_engine import MemoryEngine
+    from hindsight_api.config import get_config
+    
+    cfg = get_config()
+    engine = MemoryEngine(cfg)
+    await engine.initialize()
+    
+    result = await engine.ingest(
+        bank_id='$BANK_ID',
+        content='OpenRouter provides access to multiple LLM providers including Nemotron models. The nemotron-3-super-120b-a12b:free model offers strong reasoning capabilities.',
+        fact_type='observation',
+        document_id='doc-003',
+        metadata={'source': 'smoke-test', 'topic': 'openrouter-nemotron'}
+    )
+    print(f'INGEST_ID:{result.id}')
+    await engine.close()
+
+asyncio.run(ingest())
+")
+
+INGEST3_ID=$(echo "$INGEST3" | grep 'INGEST_ID:' | cut -d: -f2)
+if [[ -z "$INGEST3_ID" ]]; then
+    echo "❌ Failed to ingest content 3"
+    exit 1
+fi
+echo "✅ Ingested content 3: $INGEST3_ID"
+
+# Test recall - semantic search
+echo "Testing recall (semantic search)..."
+RECALL_RESULT=$(docker exec "$CONTAINER_NAME" python3 -c "
+import asyncio
+import sys
+sys.path.insert(0, '/app/api')
+
+async def recall():
+    from hindsight_api.engine.memory_engine import MemoryEngine
+    from hindsight_api.config import get_config
+    
+    cfg = get_config()
+    engine = MemoryEngine(cfg)
+    await engine.initialize()
+    
+    # Search for Oracle-related content
+    results = await engine.recall(
+        bank_id='$BANK_ID',
+        query='Oracle VECTOR type HNSW indexing',
+        limit=5,
+        fact_types=['observation']
+    )
+    
+    print(f'RECALL_COUNT:{len(results)}')
+    for r in results:
+        print(f'  - Score: {r.score:.4f}, Text: {r.text[:80]}...')
+    
+    # Search for Nemotron content
+    results2 = await engine.recall(
+        bank_id='$BANK_ID',
+        query='Nemotron model OpenRouter provider',
+        limit=5,
+        fact_types=['observation']
+    )
+    
+    print(f'RECALL_COUNT2:{len(results2)}')
+    for r in results2:
+        print(f'  - Score: {r.score:.4f}, Text: {r.text[:80]}...')
+    
+    await engine.close()
+
+asyncio.run(recall())
+")
+
+echo "$RECALL_RESULT"
+RECALL_COUNT=$(echo "$RECALL_RESULT" | grep 'RECALL_COUNT:' | head -1 | cut -d: -f2)
+RECALL_COUNT2=$(echo "$RECALL_RESULT" | grep 'RECALL_COUNT2:' | head -1 | cut -d: -f2)
+
+if [[ -z "$RECALL_COUNT" ]] || [[ "$RECALL_COUNT" -eq 0 ]]; then
+    echo "❌ Recall returned no results"
+    exit 1
+fi
+echo "✅ Recall test passed: $RECALL_COUNT results for Oracle query, $RECALL_COUNT2 for Nemotron query"
+
+# Trigger consolidation
+echo "Triggering consolidation..."
+CONSOLIDATE_RESULT=$(docker exec "$CONTAINER_NAME" python3 -c "
+import asyncio
+import sys
+sys.path.insert(0, '/app/api')
+
+async def consolidate():
+    from hindsight_api.engine.memory_engine import MemoryEngine
+    from hindsight_api.config import get_config
+    
+    cfg = get_config()
+    engine = MemoryEngine(cfg)
+    await engine.initialize()
+    
+    # Run consolidation for the test bank
+    result = await engine.consolidate(
+        bank_id='$BANK_ID',
+        fact_types=['observation'],
+        max_iterations=2
+    )
+    
+    print(f'CONSOLIDATED:{result.consolidated_count}')
+    print(f'MERGED:{result.merged_count}')
+    print(f'NEW_FACTS:{result.new_fact_count}')
+    
+    await engine.close()
+
+asyncio.run(consolidate())
+")
+
+echo "$CONSOLIDATE_RESULT"
+CONSOLIDATED=$(echo "$CONSOLIDATE_RESULT" | grep 'CONSOLIDATED:' | cut -d: -f2)
+MERGED=$(echo "$CONSOLIDATE_RESULT" | grep 'MERGED:' | cut -d: -f2)
+NEW_FACTS=$(echo "$CONSOLIDATE_RESULT" | grep 'NEW_FACTS:' | cut -d: -f2)
+
+if [[ -z "$CONSOLIDATED" ]] || [[ "$CONSOLIDATED" -eq 0 ]]; then
+    echo "⚠️  Consolidation ran but no facts consolidated (may be expected for small dataset)"
+else
+    echo "✅ Consolidation: $CONSOLIDATED consolidated, $MERGED merged, $NEW_FACTS new facts"
+fi
+
+# Verify recall still works after consolidation
+echo "Testing recall after consolidation..."
+RECALL_AFTER=$(docker exec "$CONTAINER_NAME" python3 -c "
+import asyncio
+import sys
+sys.path.insert(0, '/app/api')
+
+async def recall():
+    from hindsight_api.engine.memory_engine import MemoryEngine
+    from hindsight_api.config import get_config
+    
+    cfg = get_config()
+    engine = MemoryEngine(cfg)
+    await engine.initialize()
+    
+    results = await engine.recall(
+        bank_id='$BANK_ID',
+        query='Oracle VECTOR type',
+        limit=5,
+        fact_types=['observation']
+    )
+    
+    print(f'RECALL_COUNT:{len(results)}')
+    for r in results:
+        print(f'  - Score: {r.score:.4f}, Text: {r.text[:80]}...')
+    
+    await engine.close()
+
+asyncio.run(recall())
+")
+
+echo "$RECALL_AFTER"
+RECALL_AFTER_COUNT=$(echo "$RECALL_AFTER" | grep 'RECALL_COUNT:' | cut -d: -f2)
+if [[ -z "$RECALL_AFTER_COUNT" ]] || [[ "$RECALL_AFTER_COUNT" -eq 0 ]]; then
+    echo "❌ Recall after consolidation returned no results"
+    exit 1
+fi
+echo "✅ Recall after consolidation: $RECALL_AFTER_COUNT results"
+
+echo \"=== All Smoke Tests Passed ===\"
 exit 0
