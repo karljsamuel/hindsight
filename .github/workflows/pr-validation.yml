@@ -137,9 +137,11 @@ jobs:
       - name: Clean up docker image
         if: always()
         run: |
-          # Remove the loaded image to prevent cleanup issues
-          docker rmi ${{ steps.meta.outputs.tags }} || true
-          docker system prune -f || true
+          # Remove the loaded images to prevent cleanup issues
+          # The metadata action creates multiple tags (latest, sha-...) for the same image
+          # Use docker rmi with force flag to handle multiple tags gracefully
+          docker rmi -f ${{ steps.meta.outputs.tags }} 2>/dev/null || true
+          docker system prune -f 2>/dev/null || true
 
   build-arm64:
     name: KJS-PR Build arm64 + Smoke Test
@@ -197,9 +199,11 @@ jobs:
       - name: Clean up docker image
         if: always()
         run: |
-          # Remove the loaded image to prevent cleanup issues
-          docker rmi ${{ steps.meta.outputs.tags }} || true
-          docker system prune -f || true
+          # Remove the loaded images to prevent cleanup issues
+          # The metadata action creates multiple tags (latest, sha-...) for the same image
+          # Use docker rmi with force flag to handle multiple tags gracefully
+          docker rmi -f ${{ steps.meta.outputs.tags }} 2>/dev/null || true
+          docker system prune -f 2>/dev/null || true
 
   validation-summary:
     name: KJS-PR Validation Summary
