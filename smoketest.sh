@@ -76,17 +76,22 @@ docker run -d --name "$CONTAINER_NAME" \
     -p "${HINDSIGHT_PORT}:8888" \
     "$IMAGE" >/dev/null
 
-# Wait for health endpoint
-echo "Waiting for Hindsight health endpoint (max 300s)..."
-for i in {1..150}; do
+# Wait for health endpoint - print logs while waiting
+echo "Waiting for Hindsight health endpoint (max 120s)..."
+for i in {1..60}; do
     if curl -sf "http://localhost:${HINDSIGHT_PORT}/health" >/dev/null 2>&1; then
         echo "✅ Health endpoint responded"
         break
     fi
+    # Print container logs every 10 seconds
+    if [ $((i % 10)) -eq 0 ]; then
+        echo "--- Container logs (attempt $i/60) ---"
+        docker logs "$CONTAINER_NAME" 2>&1 | tail -20
+    fi
     sleep 2
-    if [ $i -eq 150 ]; then
-        echo "❌ Health endpoint never responded"
-        echo "=== Hindsight container logs ==="
+    if [ $i -eq 60 ]; then
+        echo "❌ Health endpoint never responded after 120s"
+        echo "=== Final container logs ==="
         docker logs "$CONTAINER_NAME"
         exit 1
     fi
@@ -98,6 +103,8 @@ if ! docker ps --format '{{.Names}}' | grep -q "^$CONTAINER_NAME$"; then
     docker logs "$CONTAINER_NAME"
     exit 1
 fi
+
+echo "✅ Container is running and healthy"
 
 # Test internal imports
 echo "Testing internal imports..."
@@ -151,7 +158,7 @@ with engine.connect() as conn:
 # Run actual database migration (non-fatal - upstream Oracle deadlock issue)
 echo "Running database migration..."
 docker exec "$CONTAINER_NAME" hindsight-admin run-db-migration --embedding-dimension 2048 2>&1 | tail -30 || {
-    echo "⚠️ Migration failed (upstream Oracle deadlock issue), continuing with smoke test..."
+    echo "⚠️ Migration failed (upstream Oracle deadlock issue), continuing with schema validation..."
 }
 
 # Verify schema created correctly
@@ -165,20 +172,36 @@ engine = create_engine(db_url, poolclass=NullPool)
 inspector = inspect(engine)
 tables = inspector.get_table_names()
 print(f'Tables created: {len(tables)}')
-for t in sorted(tables):
-    cols = inspector.get_columns(t)
-    print(f'  {t}: {len(cols)} columns')
-    for col in cols:
-        if 'VECTOR' in str(col[\"type\"]).upper():
-            print(f'    VECTOR column: {col[\"name\"]} = {col[\"type\"]}')
 
 # Check for expected core tables
-expected = [\"memory_units\", \"documents\", \"banks\", \"mental_models\"]
+expected = ['memory_units', 'documents', 'banks', 'mental_models']
 for exp in expected:
     if exp in tables:
         print(f'  ✅ {exp} exists')
     else:
         print(f'  ❌ {exp} MISSING')
+
+# Check vector columns and varchar limits
+for t in sorted(tables):
+    cols = inspector.get_columns(t)
+    print(f'  {t}: {len(cols)} columns')
+    for col in cols:
+        col_type = str(col[\"type\"]).upper()
+        col_name = col[\"name\"]
+        if 'VECTOR' in col_type:
+            print(f'    VECTOR column: {col_name} = {col[\"type\"]}')
+        if 'VARCHAR' in col_type or 'CHAR' in col_type:
+            if '2048' in str(col[\"type\"]) or '1024' in str(col[\"type\"]) or '512' in str(col[\"type\"]):
+                print(f'    VARCHAR column: {col_name} = {col[\"type\"]}')
+
+# Check VECTOR dimensions for memory_units
+if 'memory_units' in tables:
+    cols = inspector.get_columns('memory_units')
+    for col in cols:
+        if 'EMBEDDING' in col['name'].upper() and 'VECTOR' in str(col['type']).upper():
+            print(f'    memory_units.embedding = {col[\"type\"]} (expected VECTOR(2048, FLOAT32))')
+
+print('✅ Schema validation complete')
 "
 
 echo "=== All Smoke Tests Passed ==="
