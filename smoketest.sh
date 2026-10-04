@@ -30,28 +30,31 @@ trap cleanup EXIT
 echo "Clearing existing tables in test database..."
 docker run --rm \
     -e DATABASE_URL="$DATABASE_URL" \
-    python:3.11-slim bash -c "
+    python:3.11-slim bash -c '
 pip install -q sqlalchemy oracledb 2>/dev/null
-python3 << 'PYEOF'
+cat > /tmp/clear_tables.py << "PYEOF"
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.pool import NullPool
+import os
 import sys
 
-engine = create_engine('$DATABASE_URL', poolclass=NullPool)
+database_url = os.environ["DATABASE_URL"]
+engine = create_engine(database_url, poolclass=NullPool)
 with engine.connect() as conn:
     inspector = inspect(engine)
     tables = inspector.get_table_names()
-    print(f'Found {len(tables)} tables to drop')
+    print(f"Found {len(tables)} tables to drop")
     for table in tables:
         try:
-            conn.execute(text(f'DROP TABLE \"{table}\" CASCADE CONSTRAINTS PURGE'))
-            print(f'  Dropped: {table}')
+            conn.execute(text(f"DROP TABLE \"{table}\" CASCADE CONSTRAINTS PURGE"))
+            print(f"  Dropped: {table}")
         except Exception as e:
-            print(f'  Could not drop {table}: {e}')
+            print(f"  Could not drop {table}: {e}")
     conn.commit()
-print('✅ Tables cleared')
+print("✅ Tables cleared")
 PYEOF
-" 2>&1 | tail -20
+python3 /tmp/clear_tables.py
+' 2>&1 | tail -20
 
 # Start Hindsight container
 echo "Starting Hindsight container (database-only mode)..."
@@ -158,11 +161,11 @@ for t in sorted(tables):
     cols = inspector.get_columns(t)
     print(f'  {t}: {len(cols)} columns')
     for col in cols:
-        if 'VECTOR' in str(col['type']).upper():
+        if 'VECTOR' in str(col[\"type\"]).upper():
             print(f'    VECTOR column: {col[\"name\"]} = {col[\"type\"]}')
 
 # Check for expected core tables
-expected = ['memory_units', 'documents', 'banks', 'mental_models']
+expected = [\"memory_units\", \"documents\", \"banks\", \"mental_models\"]
 for exp in expected:
     if exp in tables:
         print(f'  ✅ {exp} exists')
