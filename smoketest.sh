@@ -15,9 +15,21 @@ if [[ -z "$DATABASE_URL" ]]; then
     exit 1
 fi
 
-# URL-decode the DSN part using sed (oracledb expects decoded connect string)
-# The secret has URL-encoded DSN (%28=( %29=) %3D== %2F=/ %3A=:)
-DECODED_DATABASE_URL=$(echo "$DATABASE_URL" | sed 's/%28/(/g; s/%29/)/g; s/%3D/=/g; s/%2F/\//g; s/%3A/:/g; s/%2B/+/g')
+# URL-decode the DSN part using Python (oracledb expects decoded connect string)
+# The secret has URL-encoded DSN in the query parameter
+DECODED_DATABASE_URL=$(python3 -c "
+import urllib.parse, sys, os
+url = sys.argv[1]
+parsed = urllib.parse.urlparse(url)
+query = urllib.parse.parse_qs(parsed.query)
+if 'dsn' in query:
+    query['dsn'] = [urllib.parse.unquote(query['dsn'][0])]
+new_query = urllib.parse.urlencode(query, doseq=True)
+decoded = urllib.parse.urlunparse((
+    parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment
+))
+print(decoded)
+" "$DATABASE_URL")
 
 echo "=== Smoke Test Starting ==="
 echo "Image: $IMAGE"
