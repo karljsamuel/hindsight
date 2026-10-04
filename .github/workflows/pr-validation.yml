@@ -133,6 +133,8 @@ jobs:
 
       - name: Run smoke test on loaded image
         if: matrix.run_smoke_test == 'true'
+        env:
+          KJS_TEST_ODB_URL: ${{ secrets.KJS_TEST_ODB_URL }}
         run: |
           chmod +x smoketest.sh
           ./smoketest.sh ${{ steps.meta.outputs.tags }}

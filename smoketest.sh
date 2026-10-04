@@ -1,90 +1,65 @@
 #!/bin/bash
 # Smoke test script for Hindsight Oracle image
-# Tests: database schema creation, migration, and validation (NO models/LLMs)
+# Uses OCI Oracle database via connection string (no local container)
 
 set -euo pipefail
 
 IMAGE="${1:-hindsight-oracle-test:latest}"
-ORACLE_PORT=1521
-ORACLE_SID="FREE"
-ORACLE_PDB="FREEPDB1"
-ORACLE_PASSWORD="testpassword123"
 HINDSIGHT_PORT=8888
 CONTAINER_NAME="hindsight-smoke-test-$$"
-ORACLE_CONTAINER_NAME="oracle-smoke-test-$$"
-NETWORK_NAME="smoke-test-net-$$"
 
-# Use Docker network for inter-container communication
-ORACLE_DSN="(description=(address=(protocol=tcp)(host=${ORACLE_CONTAINER_NAME})(port=${ORACLE_PORT}))(connect_data=(service_name=${ORACLE_PDB})))"
-DATABASE_URL="oracle+oracledb://ADMIN:${ORACLE_PASSWORD}@/?dsn=${ORACLE_DSN}"
+# Use the test database URL from environment (set via GitHub secret)
+DATABASE_URL="${KJS_TEST_ODB_URL:-}"
+if [[ -z "$DATABASE_URL" ]]; then
+    echo "❌ KJS_TEST_ODB_URL environment variable not set"
+    exit 1
+fi
 
 echo "=== Smoke Test Starting ==="
 echo "Image: $IMAGE"
-echo "Oracle DSN: $ORACLE_DSN"
+echo "Using OCI Oracle database via connection string"
 
 cleanup() {
     echo "=== Cleanup ==="
     docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
     docker rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
-    docker stop "$ORACLE_CONTAINER_NAME" >/dev/null 2>&1 || true
-    docker rm "$ORACLE_CONTAINER_NAME" >/dev/null 2>&1 || true
-    docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-# Create Docker network for inter-container communication
-echo "Creating Docker network..."
-docker network create "$NETWORK_NAME" >/dev/null
+# Clear all tables in the test database before starting
+echo "Clearing existing tables in test database..."
+docker run --rm \
+    -e DATABASE_URL="$DATABASE_URL" \
+    python:3.11-slim bash -c "
+pip install -q sqlalchemy oracledb 2>/dev/null
+python3 << 'PYEOF'
+from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.pool import NullPool
+import sys
 
-# Start Oracle Database Free container
-echo "Starting Oracle Database Free container..."
-docker run -d --name "$ORACLE_CONTAINER_NAME" \
-    --network "$NETWORK_NAME" \
-    -e ORACLE_PASSWORD="${ORACLE_PASSWORD}" \
-    -p "${ORACLE_PORT}:1521" \
-    container-registry.oracle.com/database/free:23.4.0.0 >/dev/null
+engine = create_engine('$DATABASE_URL', poolclass=NullPool)
+with engine.connect() as conn:
+    inspector = inspect(engine)
+    tables = inspector.get_table_names()
+    print(f'Found {len(tables)} tables to drop')
+    for table in tables:
+        try:
+            conn.execute(text(f'DROP TABLE \"{table}\" CASCADE CONSTRAINTS PURGE'))
+            print(f'  Dropped: {table}')
+        except Exception as e:
+            print(f'  Could not drop {table}: {e}')
+    conn.commit()
+print('✅ Tables cleared')
+PYEOF
+" 2>&1 | tail -20
 
-# Wait for Oracle to be ready
-echo "Waiting for Oracle to be ready (max 5400s)..."
-for i in {1..1800}; do
-    if docker exec "$ORACLE_CONTAINER_NAME" /opt/oracle/checkDBReady.sh >/dev/null 2>&1; then
-        echo "✅ Oracle Database is ready"
-        break
-    fi
-    sleep 3
-    if [ $i -eq 1800 ]; then
-        echo "❌ Oracle Database never became ready"
-        docker logs "$ORACLE_CONTAINER_NAME" | tail -50
-        exit 1
-    fi
-done
-
-# Create HINDSIGHT user and grant privileges
-echo "Creating HINDSIGHT user..."
-docker exec "$ORACLE_CONTAINER_NAME" bash -c "
-sqlplus -s / as sysdba <<EOF
-ALTER SESSION SET CONTAINER = FREEPDB1;
-CREATE USER HINDSIGHT IDENTIFIED BY ${ORACLE_PASSWORD} DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS;
-GRANT CONNECT, RESOURCE, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW, CREATE PROCEDURE, CTXAPP TO HINDSIGHT;
-ALTER USER HINDSIGHT DEFAULT ROLE ALL;
-EXIT;
-EOF
-" >/dev/null 2>&1
-
-echo "✅ HINDSIGHT user created"
-
-# Update DSN to use the container name (resolves via Docker network)
-ORACLE_DSN="(description=(address=(protocol=tcp)(host=${ORACLE_CONTAINER_NAME})(port=${ORACLE_PORT}))(connect_data=(service_name=${ORACLE_PDB})))"
-DATABASE_URL="oracle+oracledb://HINDSIGHT:${ORACLE_PASSWORD}@/?dsn=${ORACLE_DSN}"
-
-# Start Hindsight container on the same network
+# Start Hindsight container
 echo "Starting Hindsight container (database-only mode)..."
 docker run -d --name "$CONTAINER_NAME" \
-    --network "$NETWORK_NAME" \
     -e HINDSIGHT_API_DATABASE_BACKEND=oracle \
     -e HINDSIGHT_API_VECTOR_EXTENSION=oracle \
     -e HINDSIGHT_API_EMBEDDINGS_DIMENSION=2048 \
-    -e HINDSIGHT_API_DATABASE_URL="${DATABASE_URL}" \
+    -e HINDSIGHT_API_DATABASE_URL="$DATABASE_URL" \
     -e HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP=false \
     -e HINDSIGHT_API_WORKER_ENABLED=false \
     -p "${HINDSIGHT_PORT}:8888" \
@@ -146,15 +121,14 @@ assert index_type_keyword('oracle') == 'hnsw'
 print('✅ Oracle vector index config correct')
 "
 
-# Test migration functions - use the actual container name
-DB_URL="oracle+oracledb://HINDSIGHT:${ORACLE_PASSWORD}@/?dsn=(description=(address=(protocol=tcp)(host=${ORACLE_CONTAINER_NAME})(port=${ORACLE_PORT}))(connect_data=(service_name=${ORACLE_PDB})))"
+# Test migration functions
 echo "Testing migration functions..."
 docker exec "$CONTAINER_NAME" python3 -c "
 from hindsight_api.migrations import _detect_vector_extension
 from sqlalchemy import create_engine
 from sqlalchemy.pool import NullPool
 
-db_url = '${DATABASE_URL}'
+db_url = '$DATABASE_URL'
 engine = create_engine(db_url, poolclass=NullPool)
 with engine.connect() as conn:
     from hindsight_api.migrations import _detect_vector_extension
@@ -175,7 +149,7 @@ docker exec "$CONTAINER_NAME" python3 -c "
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.pool import NullPool
 
-db_url = '${DATABASE_URL}'
+db_url = '$DATABASE_URL'
 engine = create_engine(db_url, poolclass=NullPool)
 inspector = inspect(engine)
 tables = inspector.get_table_names()
@@ -183,11 +157,18 @@ print(f'Tables created: {len(tables)}')
 for t in sorted(tables):
     cols = inspector.get_columns(t)
     print(f'  {t}: {len(cols)} columns')
-    # Check vector columns
     for col in cols:
         if 'VECTOR' in str(col['type']).upper():
             print(f'    VECTOR column: {col[\"name\"]} = {col[\"type\"]}')
+
+# Check for expected core tables
+expected = ['memory_units', 'documents', 'banks', 'mental_models']
+for exp in expected:
+    if exp in tables:
+        print(f'  ✅ {exp} exists')
+    else:
+        print(f'  ❌ {exp} MISSING')
 "
 
-echo \"=== All Smoke Tests Passed ===\"
+echo "=== All Smoke Tests Passed ==="
 exit 0
