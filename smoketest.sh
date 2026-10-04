@@ -187,10 +187,7 @@ BANK_RESPONSE=$(docker exec "$CONTAINER_NAME" python3 -c "
 import asyncio
 import sys
 sys.path.insert(0, '/app/api')
-from hindsight_api.main import create_app
 from hindsight_api.config import get_config
-
-app = create_app()
 
 async def create_bank():
     from hindsight_api.engine.memory_engine import MemoryEngine
