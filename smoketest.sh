@@ -59,7 +59,7 @@ with engine.connect() as conn:
     inspector = inspect(engine)
     tables = inspector.get_table_names()
     
-    # Filter out tables that don't actually exist (ORA-00942 when dropping)
+    # Filter out tables that don not actually exist (ORA-00942 when dropping)
     existing_tables = []
     for table in tables:
         try:
@@ -72,7 +72,7 @@ with engine.connect() as conn:
                 print("  Could not check " + table + ": " + str(e))
     
     if len(existing_tables) == 0:
-        print("✅ Tables cleared (clean schema)")
+        print("Tables cleared (clean schema)")
     else:
         print("Found " + str(len(existing_tables)) + " tables to drop")
         errors = 0
@@ -85,10 +85,10 @@ with engine.connect() as conn:
                 errors += 1
         conn.commit()
         if errors > 0:
-            print("❌ Tables cleared with " + str(errors) + " errors")
+            print("Tables cleared with " + str(errors) + " errors")
             sys.exit(1)
         else:
-            print("✅ Dropped " + str(len(existing_tables)) + " tables")
+            print("Dropped " + str(len(existing_tables)) + " tables")
 PYEOF
 python3 /tmp/clear_tables.py
 '
