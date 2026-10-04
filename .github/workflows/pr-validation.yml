@@ -110,7 +110,6 @@ jobs:
           images: localhost/hindsight-oracle-test
           tags: |
             type=raw,value=latest
-            type=sha,prefix=sha-
 
       - name: Build Oracle unified image (load for testing)
         id: build
@@ -122,7 +121,7 @@ jobs:
           platforms: linux/amd64
           push: false
           load: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: localhost/hindsight-oracle-test:latest
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             INCLUDE_LOCAL_MODELS=false
@@ -132,16 +131,7 @@ jobs:
       - name: Run smoke test on loaded image
         run: |
           chmod +x smoketest.sh
-          ./smoketest.sh ${{ steps.meta.outputs.tags }}
-
-      - name: Clean up docker image
-        if: always()
-        run: |
-          # Remove the loaded images to prevent cleanup issues
-          # The metadata action creates multiple tags (latest, sha-...) for the same image
-          # Use docker rmi with force flag to handle multiple tags gracefully
-          docker rmi -f ${{ steps.meta.outputs.tags }} 2>/dev/null || true
-          docker system prune -f 2>/dev/null || true
+          ./smoketest.sh localhost/hindsight-oracle-test:latest
 
   build-arm64:
     name: KJS-PR Build arm64 + Smoke Test
@@ -172,7 +162,6 @@ jobs:
           images: localhost/hindsight-oracle-test
           tags: |
             type=raw,value=latest
-            type=sha,prefix=sha-
 
       - name: Build Oracle unified image (load for testing)
         id: build
@@ -184,7 +173,7 @@ jobs:
           platforms: linux/arm64
           push: false
           load: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: localhost/hindsight-oracle-test:latest
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             INCLUDE_LOCAL_MODELS=false
@@ -194,16 +183,7 @@ jobs:
       - name: Run smoke test on loaded image
         run: |
           chmod +x smoketest.sh
-          ./smoketest.sh ${{ steps.meta.outputs.tags }}
-
-      - name: Clean up docker image
-        if: always()
-        run: |
-          # Remove the loaded images to prevent cleanup issues
-          # The metadata action creates multiple tags (latest, sha-...) for the same image
-          # Use docker rmi with force flag to handle multiple tags gracefully
-          docker rmi -f ${{ steps.meta.outputs.tags }} 2>/dev/null || true
-          docker system prune -f 2>/dev/null || true
+          ./smoketest.sh localhost/hindsight-oracle-test:latest
 
   validation-summary:
     name: KJS-PR Validation Summary
