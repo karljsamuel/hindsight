@@ -76,7 +76,7 @@ echo "Starting Hindsight container (database-only mode)..."
 docker run -d --name "$CONTAINER_NAME" \
     -e HINDSIGHT_API_DATABASE_BACKEND=oracle \
     -e HINDSIGHT_API_VECTOR_EXTENSION=oracle \
-    -e HINDSIGHT_API_EMBEDDINGS_DIMENSION=2048 \
+    -e HINDSIGHT_API_EMBEDDINGS_ONNX_DIMENSIONS=2048 \
     -e HINDSIGHT_API_DATABASE_URL="$DATABASE_URL" \
     -e HINDSIGHT_API_LLM_PROVIDER=openrouter \
     -e HINDSIGHT_API_LLM_API_KEY="$LLM_API_KEY" \
