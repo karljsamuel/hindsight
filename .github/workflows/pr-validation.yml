@@ -88,6 +88,7 @@ jobs:
     timeout-minutes: 120
     env:
       KJS_TEST_ODB_PASSWORD: ${{ secrets.KJS_TEST_ODB_PASSWORD }}
+      KJS_TEST_LLM_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -140,6 +141,7 @@ jobs:
     timeout-minutes: 120
     env:
       KJS_TEST_ODB_PASSWORD: ${{ secrets.KJS_TEST_ODB_PASSWORD }}
+      KJS_TEST_LLM_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

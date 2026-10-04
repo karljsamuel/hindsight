@@ -53,9 +53,17 @@ RUN ln -sf /usr/share/zoneinfo/Asia/Kolkata /etc/localtime || true
 # Expose API and Control Plane ports
 EXPOSE 8888 9999
 
-# Default entrypoint for unified deployment (API + Control Plane as processes)
-ENTRYPOINT ["/app/api/.venv/bin/python", "-m", "hindsight_api.cli"]
-CMD ["--host", "0.0.0.0", "--port", "8888"]
+# Copy Oracle-enabled hindsight-api code from local source
+# This replaces the upstream hindsight-api with Oracle-enabled version
+COPY hindsight-api-slim/hindsight_api /app/api/hindsight_api
 
-# Alternative: Control Plane entry (if running separately)
-# CMD ["node", "/app/control-plane/standalone/server.js"]
+# Use upstream entrypoint (start-all.sh) which runs API + Control Plane
+# Override with env vars to disable CP and embedded pg0
+# Health endpoint wait is handled by start-all.sh (HINDSIGHT_API_STARTUP_WAIT_SECONDS)
+# For smoke test, we can override to run just the API
+
+# Use upstream entrypoint - it handles API + CP startup with health checks
+ENTRYPOINT ["/app/start-all.sh"]
+
+# Default to API-only mode for smoke test (CP can be enabled with HINDSIGHT_ENABLE_CP=true)
+CMD ["hindsight-api"]
