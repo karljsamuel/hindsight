@@ -134,6 +134,13 @@ jobs:
           chmod +x smoketest.sh
           ./smoketest.sh ${{ steps.meta.outputs.tags }}
 
+      - name: Clean up docker image
+        if: always()
+        run: |
+          # Remove the loaded image to prevent cleanup issues
+          docker rmi ${{ steps.meta.outputs.tags }} || true
+          docker system prune -f || true
+
   build-arm64:
     name: KJS-PR Build arm64 + Smoke Test
     needs: build-amd64
@@ -186,6 +193,13 @@ jobs:
         run: |
           chmod +x smoketest.sh
           ./smoketest.sh ${{ steps.meta.outputs.tags }}
+
+      - name: Clean up docker image
+        if: always()
+        run: |
+          # Remove the loaded image to prevent cleanup issues
+          docker rmi ${{ steps.meta.outputs.tags }} || true
+          docker system prune -f || true
 
   validation-summary:
     name: KJS-PR Validation Summary

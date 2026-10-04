@@ -72,6 +72,13 @@ jobs:
         KJS_TEST_LLM_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
       run: "# Build the database URL with decoded DSN (oracledb thin mode compatible)\ncat > /tmp/build_dsn.py << 'PYEOF'\nimport urllib.parse\ndsn = '(description=(retry_count=20)(retry_delay=3)(address=(protocol=tcps)(port=1522)(host=adb.ap-hyderabad-1.oraclecloud.com))(connect_data=(service_name=g4a90f2577f59fb_hindsightdb_high.adb.oraclecloud.com))(security=(ssl_server_dn_match=yes)))'\nprint(urllib.parse.quote(dsn))\nPYEOF\nDSN_QUOTED=$(python3 /tmp/build_dsn.py)\nDATABASE_URL=\"oracle+oracledb://HINDSIGHT_TEST:${KJS_TEST_ODB_PASSWORD}@/?dsn=${DSN_QUOTED}\"\n\n# Start container with real test database for health check\ndocker run -d --name hindsight-test \\\n  -e HINDSIGHT_API_DATABASE_BACKEND=oracle \\\n  -e HINDSIGHT_API_VECTOR_EXTENSION=oracle \\\n  -e HINDSIGHT_API_EMBEDDINGS_DIMENSION=2048 \\\n  -e HINDSIGHT_API_DATABASE_URL=\"$DATABASE_URL\" \\\n  -e HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP=false \\\n  -e HINDSIGHT_API_WORKER_ENABLED=false \\\n  -p 8888:8888 \\\n  ${{ steps.meta.outputs.tags\
         \ }}\n\n# Wait for startup (max 60s)\nfor i in {1..30}; do\n  if curl -sf http://localhost:8888/health >/dev/null 2>&1; then\n    echo \"Health endpoint responded\"\n    break\n  fi\n  sleep 2\ndone\n\n# Check process is running\nif ! docker ps | grep -q hindsight-test; then\n  echo \"Container died\"\n  docker logs hindsight-test\n  exit 1\nfi\n\necho \"Smoke test passed - container running and healthy\"\n\n# Cleanup\ndocker stop hindsight-test && docker rm hindsight-test"
+
+    - name: Clean up docker image
+      if: always()
+      run: |
+        # Remove the loaded image to prevent cleanup issues
+        docker rmi ${{ steps.meta.outputs.tags }} || true
+        docker system prune -f || true
     - name: Push image to GHCR (only on merge to main)
       if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       uses: docker/build-push-action@v5
