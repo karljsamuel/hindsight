@@ -194,7 +194,9 @@ async def create_bank():
     from hindsight_api.config import get_config
     
     cfg = get_config()
-    engine = MemoryEngine(cfg)
+    engine = MemoryEngine(
+        db_url=cfg.database_url,
+    )
     await engine.initialize()
     
     bank_id = await engine.create_bank(
@@ -228,7 +230,7 @@ async def ingest():
     from hindsight_api.config import get_config
     
     cfg = get_config()
-    engine = MemoryEngine(cfg)
+    engine = MemoryEngine(db_url=cfg.database_url,)
     await engine.initialize()
     
     result = await engine.ingest(
@@ -264,7 +266,7 @@ async def ingest():
     from hindsight_api.config import get_config
     
     cfg = get_config()
-    engine = MemoryEngine(cfg)
+    engine = MemoryEngine(db_url=cfg.database_url,)
     await engine.initialize()
     
     result = await engine.ingest(
@@ -299,7 +301,7 @@ async def ingest():
     from hindsight_api.config import get_config
     
     cfg = get_config()
-    engine = MemoryEngine(cfg)
+    engine = MemoryEngine(db_url=cfg.database_url,)
     await engine.initialize()
     
     result = await engine.ingest(
@@ -334,7 +336,7 @@ async def recall():
     from hindsight_api.config import get_config
     
     cfg = get_config()
-    engine = MemoryEngine(cfg)
+    engine = MemoryEngine(db_url=cfg.database_url,)
     await engine.initialize()
     
     # Search for Oracle-related content
@@ -388,7 +390,7 @@ async def consolidate():
     from hindsight_api.config import get_config
     
     cfg = get_config()
-    engine = MemoryEngine(cfg)
+    engine = MemoryEngine(db_url=cfg.database_url,)
     await engine.initialize()
     
     # Run consolidation for the test bank
@@ -430,7 +432,7 @@ async def recall():
     from hindsight_api.config import get_config
     
     cfg = get_config()
-    engine = MemoryEngine(cfg)
+    engine = MemoryEngine(db_url=cfg.database_url,)
     await engine.initialize()
     
     results = await engine.recall(
