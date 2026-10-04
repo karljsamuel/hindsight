@@ -138,7 +138,7 @@ from hindsight_api.config import get_config
 cfg = get_config()
 assert cfg.database_backend == 'oracle'
 assert cfg.vector_extension == 'oracle'
-assert cfg.embeddings_dimension == 2048
+assert cfg.embeddings_onnx_dimensions == 2048
 print('✅ Config validation passed')
 "
 
