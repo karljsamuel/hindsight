@@ -192,6 +192,7 @@ from hindsight_api.config import get_config
 async def create_bank():
     from hindsight_api.engine.memory_engine import MemoryEngine
     from hindsight_api.config import get_config
+    from hindsight_api.models import RequestContext
     
     cfg = get_config()
     engine = MemoryEngine(
@@ -199,10 +200,10 @@ async def create_bank():
     )
     await engine.initialize()
     
-    bank_id = await engine.create_bank(
-        name='smoke_test_bank',
-        description='Smoke test bank for validation'
-    )
+    # Use internal API to ensure bank exists
+    rc = RequestContext(internal=True, tenant_id=None, api_key_id=None)
+    bank_id = 'smoke_test_bank'
+    await engine._ensure_bank_exists(bank_id, rc)
     print(f'BANK_ID:{bank_id}')
     await engine.close()
 
