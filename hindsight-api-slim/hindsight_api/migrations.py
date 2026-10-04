@@ -152,29 +152,60 @@ def _vector_index_names(
     the scan inside one table's own indexes, so an unrelated schema going away
     cannot break it.
     """
-    rows = conn.execute(
-        text("""
-            SELECT i.relname
-            FROM pg_class t
-            JOIN pg_namespace n ON n.oid = t.relnamespace
-            JOIN pg_index x ON x.indrelid = t.oid
-            JOIN pg_class i ON i.oid = x.indexrelid
-            JOIN pg_am am ON am.oid = i.relam
-            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(x.indkey)
-            WHERE n.nspname = :schema
-              AND t.relname = :table
-              AND a.attname = 'embedding'
-              AND (NOT :vector_ams_only OR am.amname IN ('hnsw', 'vchordrq', 'diskann', 'scann'))
-              AND (:name_like IS NULL OR i.relname LIKE :name_like)
-        """),
-        {
-            "schema": schema_name,
-            "table": table_name,
-            "name_like": name_like,
-            "vector_ams_only": vector_access_methods_only,
-        },
-    ).fetchall()
-    return [row[0] for row in rows]
+    # Detect dialect
+    drivername = str(conn.engine.url.drivername).lower()
+    is_oracle = "oracle" in drivername
+
+    if is_oracle:
+        # Oracle: use all_indexes and all_ind_columns
+        query = text("""
+            SELECT i.index_name
+            FROM all_indexes i
+            JOIN all_ind_columns c ON i.index_name = c.index_name AND i.owner = c.index_owner
+            WHERE i.table_owner = :schema
+              AND i.table_name = UPPER(:table)
+              AND c.column_name = 'EMBEDDING'
+        """)
+        params = {"schema": schema_name.upper(), "table": table_name}
+    else:
+        # PostgreSQL: use pg_catalog
+        rows = conn.execute(
+            text("""
+                SELECT i.relname
+                FROM pg_class t
+                JOIN pg_namespace n ON n.oid = t.relnamespace
+                JOIN pg_index x ON x.indrelid = t.oid
+                JOIN pg_class i ON i.oid = x.indexrelid
+                JOIN pg_am am ON am.oid = i.relam
+                JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(x.indkey)
+                WHERE n.nspname = :schema
+                  AND t.relname = :table
+                  AND a.attname = 'embedding'
+                  AND (NOT :vector_ams_only OR am.amname IN ('hnsw', 'vchordrq', 'diskann', 'scann'))
+                  AND (:name_like IS NULL OR i.relname LIKE :name_like)
+            """),
+            {
+                "schema": schema_name,
+                "table": table_name,
+                "name_like": name_like,
+                "vector_ams_only": vector_access_methods_only,
+            },
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    if is_oracle:
+        rows = conn.execute(
+            text("""
+                SELECT i.index_name
+                FROM all_indexes i
+                JOIN all_ind_columns c ON i.index_name = c.index_name AND i.owner = c.index_owner
+                WHERE i.table_owner = :schema
+                  AND i.table_name = UPPER(:table)
+                  AND c.column_name = 'EMBEDDING'
+            """),
+            {"schema": schema_name.upper(), "table": table_name},
+        ).fetchall()
+        return [row[0] for row in rows]
 
 
 def _drop_index(conn: Connection, schema_name: str, index_name: str) -> None:
@@ -668,7 +699,9 @@ def _migrate_table_embedding_dimension(
     # Get current dimension
     if is_oracle:
         # Oracle: all_tab_columns.DATA_LENGTH / 4 = dimension for VECTOR
-        current_dim = conn.execute(
+        # Oracle adds 8 bytes (2 dimensions) of padding to VECTOR columns
+        # So we need to round down to the nearest standard dimension
+        raw_dim = conn.execute(
             text("""
                 SELECT data_length / 4
                 FROM all_tab_columns
@@ -679,6 +712,22 @@ def _migrate_table_embedding_dimension(
             """),
             {"schema": schema_name.upper(), "table": table_name.upper()},
         ).scalar()
+        
+        # Oracle VECTOR adds 8 bytes (2 dimensions) of padding
+        # Standard dimensions: 384, 768, 1024, 1536, 2048, 4096, etc.
+        if raw_dim is not None:
+            standard_dims = [384, 768, 1024, 1536, 2048, 4096, 8192]
+            # Find the standard dimension that matches (raw_dim - 2) or raw_dim
+            current_dim = None
+            for std_dim in standard_dims:
+                if raw_dim == std_dim or raw_dim == std_dim + 2:
+                    current_dim = std_dim
+                    break
+            if current_dim is None:
+                # Fallback: round down to nearest even number
+                current_dim = raw_dim - (raw_dim % 2)
+        else:
+            current_dim = None
     else:
         # PostgreSQL: pg_attribute.atttypmod
         current_dim = conn.execute(
@@ -784,13 +833,25 @@ def _create_embedding_vector_index(
         )
         return
 
-    conn.execute(
-        text(f"""
-            CREATE INDEX IF NOT EXISTS idx_{table_name}_embedding_{index_type}
-            ON {schema_name}.{table_name}
-            {index_using_clause(vector_ext)}
-        """)
-    )
+    # Detect dialect
+    drivername = str(conn.engine.url.drivername).lower()
+    is_oracle = "oracle" in drivername
+
+    if is_oracle:
+        # Oracle: use native CREATE VECTOR INDEX syntax with uppercase table names
+        conn.execute(
+            text(f"""
+                CREATE VECTOR INDEX idx_{table_name.upper()}_embedding_{index_type} 
+                ON {schema_name}.{table_name.upper()}(embedding) 
+                ORGANIZATION NEIGHBOR PARTITIONS 
+                DISTANCE COSINE 
+                WITH TARGET ACCURACY 95
+            """)
+        )
+    else:
+        conn.execute(
+            text(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_embedding_{index_type} ON {schema_name}.{table_name} (embedding) {index_using_clause(vector_ext, dimension)}")
+        )
     logger.info(f"Created {index_type} index on {table_name} for {dimension}-dimensional embeddings")
     conn.commit()
 
@@ -1324,6 +1385,7 @@ def ensure_text_search_extension(
         tables_to_check = ["memory_units", "mental_models"]
 
         # Determine target column type and index type
+        is_oracle = "oracle" in database_url.lower()
         if text_search_extension == "vchord":
             target_column_type = "bm25vector"
             target_index_type = "bm25"
@@ -1342,8 +1404,13 @@ def ensure_text_search_extension(
             target_column_type = "text"
             target_index_type = "bm25"
         else:  # native
-            target_column_type = "tsvector"
-            target_index_type = "gin"
+            if is_oracle:
+                # Oracle uses CLOB column + Oracle Text (DOMAIN index) for native text search
+                target_column_type = "clob"
+                target_index_type = "domain"
+            else:
+                target_column_type = "tsvector"
+                target_index_type = "gin"
 
         mismatched_tables = []
         tables_with_data = []
@@ -1469,9 +1536,7 @@ def ensure_text_search_extension(
             if column_matches and current_index_type is None:
                 logger.info(f"Text search index missing on {table_name}; rebuilding it")
                 missing_index_tables.append(table_name)
-                continue
-
-            if not (column_matches and index_matches):
+            elif not (column_matches and index_matches):
                 logger.info(
                     f"Text search mismatch on {table_name}: "
                     f"column={current_column_type} (want {target_column_type}), "
@@ -1513,7 +1578,17 @@ def ensure_text_search_extension(
             current_col_type = mismatched_tables[0][1]
             current_idx_type = mismatched_tables[0][2]
             first_is_pg_search = mismatched_tables[0][3]
-            if current_col_type == "tsvector":
+            
+            # Detect Oracle native text search (Oracle Text/CTXSYS.CONTEXT)
+            drivername = str(conn.engine.url.drivername).lower()
+            is_oracle = "oracle" in drivername
+            
+            if is_oracle and current_col_type and current_col_type.lower() in ("clob", "blob", "varchar2", "varchar") and current_idx_type and current_idx_type.lower() == "domain":
+                current_ext = "native"
+            elif is_oracle and current_col_type and current_col_type.lower() in ("clob", "blob", "varchar2", "varchar") and (current_idx_type is None or current_idx_type.lower() == "domain"):
+                # Oracle with CLOB column and no index (or DOMAIN index) = native
+                current_ext = "native"
+            elif current_col_type == "tsvector":
                 current_ext = "native"
             elif current_col_type == "bm25vector":
                 current_ext = "vchord"
@@ -1539,86 +1614,6 @@ def ensure_text_search_extension(
         # boot concurrently during a rolling restart and each runs this
         # reconciliation, so a plain CREATE/ADD would crash whichever replica
         # loses the race to the first one's committed DDL.
-        logger.info(f"Recreating text search columns/indexes for {text_search_extension}")
-
-        for table_name, current_col_type, current_idx_type, _was_pg_search in mismatched_tables:
-            # Drop existing index if it exists
-            if current_idx_type:
-                logger.info(f"Dropping {current_idx_type} index on {table_name}")
-                conn.execute(
-                    text(f"""
-                        DROP INDEX IF EXISTS {schema_name}.idx_{table_name.replace(".", "_")}_text_search
-                    """)
-                )
-
-            # Drop existing column if it exists
-            if current_col_type:
-                logger.info(f"Dropping {current_col_type} column on {table_name}")
-                conn.execute(text(f"ALTER TABLE {schema_name}.{table_name} DROP COLUMN IF EXISTS search_vector"))
-
-            # Create new column with appropriate type
-            if text_search_extension == "vchord":
-                logger.info(f"Creating bm25vector column on {table_name}")
-                # Note: vchord_bm25 extension creates types in bm25_catalog schema
-                conn.execute(
-                    text(
-                        f"ALTER TABLE {schema_name}.{table_name} "
-                        f"ADD COLUMN IF NOT EXISTS search_vector bm25_catalog.bm25vector"
-                    )
-                )
-            elif text_search_extension == "pg_textsearch":
-                logger.info(f"Creating TEXT column on {table_name}")
-                # Dummy TEXT column for consistency (indexes operate on base columns)
-                conn.execute(
-                    text(f"ALTER TABLE {schema_name}.{table_name} ADD COLUMN IF NOT EXISTS search_vector TEXT")
-                )
-            elif text_search_extension == "pgroonga":
-                _ensure_pgroonga_extension(conn)
-                logger.info(f"Creating dummy TEXT search_vector on {table_name} for pgroonga")
-                # pgroonga indexes the base text columns directly, but we keep a
-                # dummy search_vector column for symmetry with pg_textsearch and
-                # so the column-type mismatch detection above keeps working.
-                conn.execute(
-                    text(f"ALTER TABLE {schema_name}.{table_name} ADD COLUMN IF NOT EXISTS search_vector TEXT")
-                )
-            elif text_search_extension == "pg_search":
-                logger.info(f"Creating TEXT column on {table_name}")
-                # Dummy TEXT column for schema symmetry; pg_search indexes operate on base columns.
-                conn.execute(
-                    text(f"ALTER TABLE {schema_name}.{table_name} ADD COLUMN IF NOT EXISTS search_vector TEXT")
-                )
-            else:  # native
-                logger.info(f"Creating tsvector column on {table_name}")
-                if table_name == "mental_models":
-                    # No write path populates mental_models.search_vector for
-                    # native (pg_search_vector_expr passes native_inline=False),
-                    # so it must be GENERATED exactly like the learnings /
-                    # pinned_reflections migration creates it — a plain column
-                    # here would stay NULL and silently empty knowledge search.
-                    # The 'english' config is hard-coded there and in
-                    # knowledge_bm25_arm's native branch; keep all three in step.
-                    conn.execute(
-                        text(f"""
-                            ALTER TABLE {schema_name}.{table_name}
-                            ADD COLUMN IF NOT EXISTS search_vector tsvector
-                            GENERATED ALWAYS AS (
-                                to_tsvector('english', {mental_models_text_document()})
-                            ) STORED
-                        """)
-                    )
-                else:
-                    # memory_units writes populate this plain column with the
-                    # configured native language in ops_postgresql.
-                    conn.execute(
-                        text(f"ALTER TABLE {schema_name}.{table_name} ADD COLUMN IF NOT EXISTS search_vector tsvector")
-                    )
-
-            _create_text_search_index(conn, schema_name, table_name, text_search_extension, pg_search_tokenizer)
-
-        conn.commit()
-        logger.info(f"Successfully migrated text search to {text_search_extension}")
-
-
 def _migrate_one_schema_pg(
     database_url: str,
     schema: str,

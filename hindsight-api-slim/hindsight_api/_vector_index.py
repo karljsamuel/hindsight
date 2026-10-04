@@ -39,7 +39,7 @@ _INDEX_USING_CLAUSES = {
     "pg_diskann": "USING diskann (embedding vector_cosine_ops) WITH (max_neighbors = 50)",
     "vchord": "USING vchordrq (embedding vector_cosine_ops)",
     "scann": "USING scann (embedding cosine) WITH (mode = 'AUTO')",
-    "oracle": "",  # Oracle native HNSW index syntax handled in migration
+    "oracle": "USING VECTOR PARAMETERS (distance = 'COSINE', dimension = 2048)",
 }
 
 _INDEX_TYPE_KEYWORDS = {
@@ -207,9 +207,14 @@ def pg_extension_name(ext: str) -> str:
     return _EXTENSION_NAMES[validate_extension(ext)]
 
 
-def index_using_clause(ext: str) -> str:
+def index_using_clause(ext: str, dimension: int | None = None) -> str:
     """Return the CREATE INDEX USING clause for the vector backend."""
-    return _INDEX_USING_CLAUSES[_normalize_resolved(ext)]
+    clause = _INDEX_USING_CLAUSES[_normalize_resolved(ext)]
+    # For Oracle, substitute the dimension parameter
+    if ext == "oracle" and dimension is not None:
+        return clause.replace("dimension=2048", f"dimension={dimension}")
+    # Ensure single-line output
+    return " ".join(clause.split())
 
 
 def index_type_keyword(ext: str) -> str:

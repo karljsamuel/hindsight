@@ -164,14 +164,13 @@ class OracleMemories(PostgresMemories):
                     budget=limit,
                     bank_id=bank_id,
                     fact_type=ft,
-                    seeds=semantic_bm25.get(ft, SemanticBm25Result(semantic=[], bm25=[], graph_seeds=None)).semantic[:limit],
-                    limit=limit,
+                    preselected_semantic_seeds=semantic_bm25.get(ft, SemanticBm25Result(semantic=[], bm25=[], graph_seeds=None)).semantic[:limit],
                 )
                 for ft in fact_types
             ]
             graph_results = await asyncio.gather(*graph_tasks)
             for ft, results in zip(fact_types, graph_results):
-                graph_by_ft[ft] = results
+                graph_by_ft[ft] = results.results
 
         # Assemble RecallArms
         result: dict[str, RecallArms] = {}
@@ -182,7 +181,6 @@ class OracleMemories(PostgresMemories):
                 bm25=arms.bm25[:limit],
                 graph=graph_by_ft.get(ft, []),
                 temporal=temporal_by_ft.get(ft) or [],
-                graph_seeds=arms.graph_seeds,
             )
         return result
 
@@ -215,7 +213,7 @@ class OracleMemories(PostgresMemories):
             GRAPH_SEED_LIMIT,
         )
         from ...config import get_config
-        from ...sql import create_sql_dialect
+        from ..sql import create_sql_dialect
 
         result_dict = {ft: SemanticBm25Result(semantic=[], bm25=[], graph_seeds=None) for ft in fact_types}
 
@@ -373,7 +371,7 @@ class OracleMemories(PostgresMemories):
                 raise
 
         # Group results
-        from ...search.types import RetrievalResult
+        from ..search.types import RetrievalResult
 
         semantic_candidates: dict[str, list[RetrievalResult]] = {ft: [] for ft in fact_types}
         for r in rows:
@@ -393,7 +391,7 @@ class OracleMemories(PostgresMemories):
             if graph_seed_threshold is not None:
                 result_dict[ft].graph_seeds = [
                     r for r in candidates[:limit]
-                    if r.score >= graph_seed_threshold
+                    if (r.similarity or 0) >= graph_seed_threshold
                 ][:GRAPH_SEED_LIMIT]
 
         return result_dict
@@ -421,8 +419,8 @@ class OracleMemories(PostgresMemories):
             build_tag_groups_where_clause,
         )
         from ...config import get_config
-        from ...sql import create_sql_dialect
-        from ...search.types import RetrievalResult
+        from ..sql import create_sql_dialect
+        from ..search.types import RetrievalResult
 
         config = get_config()
         dialect = create_sql_dialect("oracle")

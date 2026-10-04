@@ -5,7 +5,7 @@
 set -euo pipefail
 
 IMAGE="${1:-hindsight-oracle-test:latest}"
-HINDSIGHT_PORT=8888
+HINDSIGHT_PORT=18888
 CONTAINER_NAME="hindsight-smoke-test-$$"
 
 # Get password from secret (only the password, not the full URL)
@@ -43,12 +43,9 @@ trap cleanup EXIT
 
 # Clear all tables in the test database before starting
 echo "Clearing existing tables in test database..."
-docker run --rm \
-    -e DATABASE_URL="$DATABASE_URL" \
-    python:3.11-slim bash -c '
-pip install -q sqlalchemy oracledb 2>/dev/null
-cat > /tmp/clear_tables.py << "PYEOF"
-from sqlalchemy import create_engine, inspect, text
+# Create a temporary clearing script
+cat > /tmp/clear_tables_smoke.py << 'PYEOF'
+from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
 import os
 import sys
@@ -56,43 +53,68 @@ import sys
 database_url = os.environ["DATABASE_URL"]
 engine = create_engine(database_url, poolclass=NullPool)
 with engine.connect() as conn:
-    inspector = inspect(engine)
-    tables = inspector.get_table_names()
+    # First, drop vector indexes (they have auxiliary tables that prevent table drops)
+    result = conn.execute(text("""
+        SELECT index_name, table_name FROM all_indexes 
+        WHERE table_owner = :owner
+        AND index_type = 'DOMAIN'
+        AND parameters LIKE '%VECTOR%'
+    """), {"owner": "HINDSIGHT_TEST"})
+    vector_indexes = [(row[0], row[1]) for row in result.fetchall()]
     
-    # Oracle stores table names in UPPERCASE. Use the names as returned by inspector.
-    existing_tables = []
+    print(f"Found {len(vector_indexes)} vector indexes to drop")
+    for index_name, table_name in vector_indexes:
+        try:
+            drop_sql = f'DROP INDEX "{index_name}"'
+            conn.execute(text(drop_sql))
+            print(f"  Dropped vector index: {index_name} on {table_name}")
+        except Exception as e:
+            if "ORA-01418" in str(e) or "ORA-00942" in str(e):
+                print(f"  Skipped (not exist): {index_name}")
+            else:
+                print(f"  Could not drop index {index_name}: {e}")
+    conn.commit()
+    
+    # For Oracle, get actual table names from all_tables (uppercase)
+    result = conn.execute(text("""
+        SELECT table_name FROM all_tables 
+        WHERE owner = :owner
+        AND table_name NOT LIKE :pattern
+    """), {"owner": "HINDSIGHT_TEST", "pattern": "BIN$%"})
+    tables = [row[0] for row in result.fetchall()]
+    
+    print(f"Found {len(tables)} tables to drop")
+    errors = 0
     for table in tables:
         try:
-            # Use the table name as-is (Oracle returns uppercase)
-            conn.execute(text("SELECT 1 FROM \"" + table + "\" WHERE ROWNUM = 1"))
-            existing_tables.append(table)
+            drop_sql = 'DROP TABLE "{}" CASCADE CONSTRAINTS PURGE'.format(table)
+            conn.execute(text(drop_sql))
+            print(f"  Dropped: {table}")
         except Exception as e:
-            if "ORA-00942" in str(e):
-                print("  Skipped (not exist): " + table)
+            error_str = str(e)
+            if "ORA-00942" in error_str:
+                print(f"  Skipped (not exist): {table}")
+            elif "ORA-51903" in error_str:
+                # Vector index auxiliary tables (centroids) are auto-dropped with the index
+                print(f"  Skipped (vector auxiliary): {table}")
             else:
-                print("  Could not check " + table + ": " + str(e))
-    
-    if len(existing_tables) == 0:
-        print("Tables cleared (clean schema)")
-    else:
-        print("Found " + str(len(existing_tables)) + " tables to drop")
-        errors = 0
-        for table in existing_tables:
-            try:
-                conn.execute(text("DROP TABLE \"" + table + "\" CASCADE CONSTRAINTS PURGE"))
-                print("  Dropped: " + table)
-            except Exception as e:
-                print("  Could not drop " + table + ": " + str(e))
+                print(f"  Could not drop {table}: {e}")
                 errors += 1
-        conn.commit()
-        if errors > 0:
-            print("Tables cleared with " + str(errors) + " errors")
-            sys.exit(1)
-        else:
-            print("Dropped " + str(len(existing_tables)) + " tables")
+    conn.commit()
+    if errors > 0:
+        print(f"Tables cleared with {errors} errors")
+        sys.exit(1)
+    else:
+        print(f"Dropped {len(tables)} tables")
 PYEOF
-python3 /tmp/clear_tables.py
-'
+
+docker run --rm \
+    -e DATABASE_URL="$DATABASE_URL" \
+    -v /tmp/clear_tables_smoke.py:/clear_tables.py \
+    python:3.11-slim bash -c 'pip install -q sqlalchemy oracledb 2>/dev/null && python3 /clear_tables.py'
+
+# Clean up temp script
+rm -f /tmp/clear_tables_smoke.py
 
 # Start Hindsight container
 echo "Starting Hindsight container (database-only mode)..."
@@ -192,10 +214,10 @@ with engine.connect() as conn:
     print('✅ Migration functions work with Oracle')
 "
 
-# Run actual database migration (non-fatal - upstream Oracle deadlock issue)
+# Run actual database migration (non-fatal - various Oracle issues possible)
 echo "Running database migration..."
-docker exec "$CONTAINER_NAME" hindsight-admin run-db-migration --embedding-dimension 2048 2>&1 | tail -30 || {
-    echo "⚠️ Migration failed (upstream Oracle deadlock issue), continuing with schema validation..."
+docker exec "$CONTAINER_NAME" hindsight-admin run-db-migration --embedding-dimension 2048 --schema HINDSIGHT_TEST 2>&1 | tail -30 || {
+    echo "⚠️ Migration failed (see error above), continuing with schema validation..."
 }
 
 # ============================================================
@@ -395,9 +417,10 @@ async def recall():
         request_context=rc
     )
     
-    print(f'RECALL_COUNT:{len(results.facts)}')
-    for r in results.facts:
-        print(f'  - Score: {r.score:.4f}, Text: {r.text[:80]}...')
+    print(f'RECALL_COUNT:{len(results.results)}')
+    for r in results.results:
+        score = r.scores.final if r.scores else 0.0
+        print(f'  - Score: {score:.4f}, Text: {r.text[:80]}...')
     
     # Search for Nemotron content
     results2 = await engine.recall_async(
@@ -409,13 +432,14 @@ async def recall():
         request_context=rc
     )
     
-    print(f'RECALL_COUNT2:{len(results2.facts)}')
-    for r in results2.facts:
-        print(f'  - Score: {r.score:.4f}, Text: {r.text[:80]}...')
+    print(f'RECALL_COUNT2:{len(results2.results)}')
+    for r in results2.results:
+        score = r.scores.final if r.scores else 0.0
+        print(f'  - Score: {score:.4f}, Text: {r.text[:80]}...')
     
     await engine.close()
 
-asyncio.run(recall()
+asyncio.run(recall())
 ")
 
 echo "$RECALL_RESULT"
@@ -447,16 +471,14 @@ async def consolidate():
     rc = RequestContext(internal=True, tenant_id=None, api_key_id=None)
     
     # Run consolidation for the test bank
-    result = await engine.consolidate(
+    result = await engine.run_consolidation(
         bank_id='$BANK_ID',
-        fact_types=['observation'],
-        max_iterations=2,
         request_context=rc
     )
     
-    print(f'CONSOLIDATED:{result.consolidated_count}')
-    print(f'MERGED:{result.merged_count}')
-    print(f'NEW_FACTS:{result.new_fact_count}')
+    print(f'CONSOLIDATED:{result.get(\"created\", 0)}')
+    print(f'UPDATED:{result.get(\"updated\", 0)}')
+    print(f'PROCESSED:{result.get(\"processed\", 0)}')
     
     await engine.close()
 
@@ -465,13 +487,13 @@ asyncio.run(consolidate())
 
 echo "$CONSOLIDATE_RESULT"
 CONSOLIDATED=$(echo "$CONSOLIDATE_RESULT" | grep 'CONSOLIDATED:' | cut -d: -f2)
-MERGED=$(echo "$CONSOLIDATE_RESULT" | grep 'MERGED:' | cut -d: -f2)
-NEW_FACTS=$(echo "$CONSOLIDATE_RESULT" | grep 'NEW_FACTS:' | cut -d: -f2)
+UPDATED=$(echo "$CONSOLIDATE_RESULT" | grep 'UPDATED:' | cut -d: -f2)
+PROCESSED=$(echo "$CONSOLIDATE_RESULT" | grep 'PROCESSED:' | cut -d: -f2)
 
 if [[ -z "$CONSOLIDATED" ]] || [[ "$CONSOLIDATED" -eq 0 ]]; then
     echo "⚠️  Consolidation ran but no facts consolidated (may be expected for small dataset)"
 else
-    echo "✅ Consolidation: $CONSOLIDATED consolidated, $MERGED merged, $NEW_FACTS new facts"
+    echo "✅ Consolidation: $CONSOLIDATED consolidated, $UPDATED updated, $PROCESSED processed"
 fi
 
 # Verify recall still works after consolidation
@@ -502,13 +524,14 @@ async def recall():
         request_context=rc
     )
     
-    print(f'RECALL_COUNT:{len(results.facts)}')
-    for r in results.facts:
-        print(f'  - Score: {r.score:.4f}, Text: {r.text[:80]}...')
+    print(f'RECALL_COUNT:{len(results.results)}')
+    for r in results.results:
+        score = r.scores.final if r.scores else 0.0
+        print(f'  - Score: {score:.4f}, Text: {r.text[:80]}...')
     
     await engine.close()
 
-asyncio.run(recall()
+asyncio.run(recall())
 ")
 
 echo "$RECALL_AFTER"
