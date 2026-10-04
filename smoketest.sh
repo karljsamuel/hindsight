@@ -15,6 +15,13 @@ if [[ -z "$DB_PASSWORD" ]]; then
     exit 1
 fi
 
+# Get OpenRouter API key from secret (for embeddings/reranker)
+OPENROUTER_API_KEY="${KJS_TEST_LLM_API_KEY:-}"
+if [[ -z "$OPENROUTER_API_KEY" ]]; then
+    echo "❌ KJS_TEST_LLM_API_KEY environment variable not set"
+    exit 1
+fi
+
 # Build the database URL with decoded DSN (oracledb thin mode compatible)
 # Use the high performance service (port 1522, TLS)
 DATABASE_URL="oracle+oracledb://HINDSIGHT_TEST:${DB_PASSWORD}@/?dsn=$(python3 -c "
@@ -95,8 +102,10 @@ docker run -d --name "$CONTAINER_NAME" \
     -e HINDSIGHT_API_DATABASE_URL="$DATABASE_URL" \
     -e HINDSIGHT_API_LLM_PROVIDER=none \
     -e HINDSIGHT_API_EMBEDDINGS_PROVIDER=openrouter \
+    -e HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY="$OPENROUTER_API_KEY" \
     -e HINDSIGHT_API_EMBEDDINGS_MODEL=nvidia/llama-nemotron-embed-vl-1b-v2:free \
     -e HINDSIGHT_API_RERANKER_PROVIDER=openrouter \
+    -e HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY="$OPENROUTER_API_KEY" \
     -e HINDSIGHT_API_RERANKER_MODEL=nvidia/llama-nemotron-rerank-vl-1b-v2:free \
     -e HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP=false \
     -e HINDSIGHT_API_WORKER_ENABLED=false \
