@@ -45,14 +45,14 @@ docker run -d --name "$ORACLE_CONTAINER_NAME" \
     container-registry.oracle.com/database/free:23.4.0.0 >/dev/null
 
 # Wait for Oracle to be ready
-echo "Waiting for Oracle to be ready (max 4500s)..."
-for i in {1..1500}; do
+echo "Waiting for Oracle to be ready (max 5400s)..."
+for i in {1..1800}; do
     if docker exec "$ORACLE_CONTAINER_NAME" /opt/oracle/checkDBReady.sh >/dev/null 2>&1; then
         echo "✅ Oracle Database is ready"
         break
     fi
     sleep 3
-    if [ $i -eq 1500 ]; then
+    if [ $i -eq 1800 ]; then
         echo "❌ Oracle Database never became ready"
         docker logs "$ORACLE_CONTAINER_NAME" | tail -50
         exit 1
