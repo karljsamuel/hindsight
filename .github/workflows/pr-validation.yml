@@ -13,6 +13,10 @@ on:
       - 'smoketest.sh'
       - '.github/workflows/pr-validation.yml'
 
+concurrency:
+  group: kjs-oracle-smoke-test
+  cancel-in-progress: false
+
 permissions:
   contents: read
   packages: read

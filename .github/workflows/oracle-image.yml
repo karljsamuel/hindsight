@@ -19,13 +19,6 @@
 name: KJS Oracle Unified Image
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - 'docker/standalone/Dockerfile.oracle'
-      - 'hindsight-api-slim/hindsight_api/**'
-      - 'hindsight-control-plane/**'
-      - '.github/workflows/oracle-image.yml'
   push:
     branches: [main]
     paths:
@@ -36,6 +29,10 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '0 2 * * 0'  # Weekly: Sunday 02:00 UTC
+
+concurrency:
+  group: kjs-oracle-smoke-test
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -95,13 +92,20 @@ jobs:
             ORACLEDB_VERSION=26.0.1
 
       - name: Smoke test - API health check
+        env:
+          KJS_TEST_ODB_URL: ${{ secrets.KJS_TEST_ODB_URL }}
         run: |
-          # Start container with minimal config for health check
+          # URL-decode DSN: replace %28=( %29=) %3D==
+          DECODED_DATABASE_URL=$(echo "$KJS_TEST_ODB_URL" | sed 's/%28/(/g; s/%29/)/g; s/%3D/=/g; s/%2F/\//g; s/%3A/:/g')
+
+          # Start container with real test database for health check
           docker run -d --name hindsight-test \
             -e HINDSIGHT_API_DATABASE_BACKEND=oracle \
             -e HINDSIGHT_API_VECTOR_EXTENSION=oracle \
             -e HINDSIGHT_API_EMBEDDINGS_DIMENSION=2048 \
-            -e HINDSIGHT_API_DATABASE_URL="oracle+oracledb://test:test@/?dsn=(description=(address=(protocol=tcps)(host=invalid)(port=1521))(connect_data=(service_name=test)))" \
+            -e HINDSIGHT_API_DATABASE_URL="$DECODED_DATABASE_URL" \
+            -e HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP=false \
+            -e HINDSIGHT_API_WORKER_ENABLED=false \
             -p 8888:8888 \
             ${{ steps.meta.outputs.tags }}
 
