@@ -276,7 +276,7 @@ async def ingest():
         raise
     await engine.close()
 
-asyncio.run(ingest()
+asyncio.run(ingest())
 ")
 
 INGEST1_ID=$(echo "$INGEST1" | grep 'INGEST_ID:' | cut -d: -f2)
