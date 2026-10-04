@@ -504,9 +504,11 @@ class OracleMemories(PostgresMemories):
         """Oracle-specific document upsert using MERGE."""
         # Oracle MERGE equivalent of PostgreSQL ON CONFLICT
         # original_text can be very large, bind as CLOB
+        # Use table name directly (on Oracle fq_table returns bare name)
+        doc_table = "documents"
         await conn.execute(
             f"""
-            MERGE INTO {fq_table("documents")} t
+            MERGE INTO {doc_table} t
             USING (SELECT
                 :1 AS id,
                 :2 AS bank_id,
