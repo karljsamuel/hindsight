@@ -505,6 +505,8 @@ class OracleMemories(PostgresMemories):
         # Oracle MERGE equivalent of PostgreSQL ON CONFLICT
         # original_text can be very large, bind as CLOB
         # Use table name directly (on Oracle fq_table returns bare name)
+        # Explicitly cast preserved_created_at to TIMESTAMP WITH TIME ZONE to avoid
+        # oracledb binding it as CHAR which causes ORA-00932 in COALESCE
         doc_table = "documents"
         await conn.execute(
             f"""
@@ -516,7 +518,7 @@ class OracleMemories(PostgresMemories):
                 :4 AS content_hash,
                 :5 AS retain_params,
                 :6 AS tags,
-                :7 AS preserved_created_at
+                CAST(:7 AS TIMESTAMP WITH TIME ZONE) AS preserved_created_at
                 FROM DUAL) s
             ON (t.id = s.id AND t.bank_id = s.bank_id)
             WHEN MATCHED THEN UPDATE SET
