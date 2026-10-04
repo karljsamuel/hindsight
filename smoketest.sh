@@ -16,15 +16,24 @@ if [[ -z "$DATABASE_URL" ]]; then
 fi
 
 # URL-decode the DSN part using Python (oracledb expects decoded connect string)
-# The secret has URL-encoded DSN in the query parameter
+# Then simplify the DSN for oracledb thin mode compatibility
 DECODED_DATABASE_URL=$(python3 -c "
-import urllib.parse, sys, os
+import urllib.parse, sys
 url = sys.argv[1]
 parsed = urllib.parse.urlparse(url)
 query = urllib.parse.parse_qs(parsed.query)
 if 'dsn' in query:
-    query['dsn'] = [urllib.parse.unquote(query['dsn'][0])]
-new_query = urllib.parse.urlencode(query, doseq=True)
+    # Decode the DSN and simplify for oracledb thin mode
+    dsn = urllib.parse.unquote(query['dsn'][0])
+    # Remove unsupported parameters for thin mode (retry_count, retry_delay)
+    import re
+    dsn = re.sub(r'\(retry_count=\d+\)', '', dsn)
+    dsn = re.sub(r'\(retry_delay=\d+\)', '', dsn)
+    # Also ensure port is 1522 for TLS (from wallet)
+    dsn = dsn.replace('port=1521', 'port=1522')
+    # Rebuild the query with simplified DSN
+    query['dsn'] = [dsn]
+new_query = urllib.parse.urlencode({'dsn': [dsn]})
 decoded = urllib.parse.urlunparse((
     parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment
 ))
