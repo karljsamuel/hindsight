@@ -159,7 +159,9 @@ class OracleMemories(PostgresMemories):
             assert retriever is not None
             graph_tasks = [
                 retriever.retrieve(
-                    conn=pool,
+                    pool=pool,
+                    query_embedding_str=query_embedding,
+                    budget=limit,
                     bank_id=bank_id,
                     fact_type=ft,
                     seeds=semantic_bm25.get(ft, SemanticBm25Result(semantic=[], bm25=[], graph_seeds=None)).semantic[:limit],
@@ -179,7 +181,7 @@ class OracleMemories(PostgresMemories):
                 semantic=arms.semantic[:limit],
                 bm25=arms.bm25[:limit],
                 graph=graph_by_ft.get(ft, []),
-                temporal=temporal_by_ft.get(ft),
+                temporal=temporal_by_ft.get(ft) or [],
                 graph_seeds=arms.graph_seeds,
             )
         return result
