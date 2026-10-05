@@ -20,6 +20,7 @@ from .ops import (
     bank_serialization_sql,
     key_serialization_sql,
     memory_unit_columns,
+    safe_entity_event_date,
 )
 from .result import DictResultRow as ResultRow
 
@@ -217,7 +218,11 @@ class OracleOps(DataAccessOps):
         # so INSERT (ignoring dups) then SELECT all IDs at the end.
         id_by_name: dict[str, str] = {}
         for name, event_date, kind in zip(entity_names, entity_dates, entity_kinds):
-            ts = event_date if event_date else datetime.now(UTC)
+            # safe_entity_event_date: a per-entity event_date can be datetime.min,
+            # which is truthy and would bypass the `else now()` guard and be
+            # stored as 0001-01-01 -- unreadable back through python-oracledb.
+            # None falls through to the column default.
+            ts = safe_entity_event_date(event_date) or datetime.now(UTC)
             await conn.execute(
                 f"""
                 INSERT INTO {table} (bank_id, canonical_name, first_seen, last_seen, mention_count, entity_kind)

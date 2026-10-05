@@ -24,6 +24,35 @@ from typing import Any
 from .base import DatabaseConnection
 from .result import ResultRow
 
+# Earliest timestamp we are willing to store for an entity observation.
+#
+# A per-entity ``event_date`` can arrive as ``datetime.min`` (0001-01-01) from
+# extraction, and because ``datetime.min`` is truthy it slips past the usual
+# "no date -> use now" guard and lands in the NOT NULL ``first_seen`` /
+# ``last_seen`` columns. Oracle stores it without complaint, but python-oracledb
+# cannot read it back: the Julian-day conversion lands on year -1, which Python's
+# datetime cannot represent, so the whole fetch raises
+# ``ValueError: year -1 is out of range`` and the recall dies with it.
+#
+# Anything at or below the floor is treated as "no date known" and falls back to
+# the column default. Shared by both backends so neither can reintroduce it.
+ENTITY_EVENT_DATE_FLOOR = datetime(1970, 1, 1)
+
+
+def safe_entity_event_date(value: datetime | None) -> datetime | None:
+    """Return `value` if it is a representable, in-range date, else None.
+
+    None means "unknown", which callers turn into the column default. Guards
+    against ``datetime.min`` reaching a stored timestamp column.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        return None
+    if value <= ENTITY_EVENT_DATE_FLOOR:
+        return None
+    return value
+
 
 class ChunkIdOwnedByAnotherBank(Exception):
     """A chunk upsert hit a ``chunks`` row that belongs to a different bank.

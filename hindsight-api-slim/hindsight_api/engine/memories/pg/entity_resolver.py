@@ -736,15 +736,41 @@ class EntityResolver:
         labels_cfg=None,
     ) -> list[ResolvedEntity]:
         """Original strategy: load all bank entities then match in Python."""
-        # Query ALL candidates for this bank
-        all_entities = await conn.fetch(
-            f"""
-            SELECT canonical_name, id, metadata, last_seen, mention_count
-            FROM {fq_table("entities")}
-            WHERE bank_id = $1
-            """,
-            bank_id,
-        )
+        # Query ALL candidates for this bank.
+        #
+        # Oracle stores 0001-01-01 happily in last_seen, but python-oracledb
+        # cannot convert it back: the Julian-day arithmetic lands on year -1,
+        # which Python's datetime cannot represent, so a single bad row raises
+        # ValueError and kills the entire retain. Fall back to a query without
+        # last_seen rather than losing the batch -- last_seen only feeds recency
+        # scoring, so dropping it degrades ranking slightly instead of aborting
+        # ingest. The column type is deliberately unchanged: callers do datetime
+        # arithmetic on it.
+        try:
+            all_entities = await conn.fetch(
+                f"""
+                SELECT canonical_name, id, metadata, last_seen, mention_count
+                FROM {fq_table("entities")}
+                WHERE bank_id = $1
+                """,
+                bank_id,
+            )
+        except ValueError as exc:
+            logger.warning(
+                "entity candidate fetch failed on timestamp conversion "
+                "(%s); retrying without last_seen. Recency scoring will be "
+                "degraded for this batch. Run the sentinel-timestamp data "
+                "migration to repair the affected rows.",
+                exc,
+            )
+            all_entities = await conn.fetch(
+                f"""
+                SELECT canonical_name, id, metadata, NULL AS last_seen, mention_count
+                FROM {fq_table("entities")}
+                WHERE bank_id = $1
+                """,
+                bank_id,
+            )
 
         # Build entity ID to name mapping for co-occurrence lookups
         entity_id_to_name = {row["id"]: row["canonical_name"].lower() for row in all_entities}
