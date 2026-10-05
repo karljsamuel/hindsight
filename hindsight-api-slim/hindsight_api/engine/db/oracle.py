@@ -44,6 +44,16 @@ from .result import DictResultRow as ResultRow
 logger = logging.getLogger(__name__)
 
 
+class OracleRewriteError(RuntimeError):
+    """A PostgreSQL statement could not be fully translated for Oracle.
+
+    Raised by `assert_fully_rewritten` when a construct the rewriter does not
+    handle survives into the final statement. Failing here -- before the
+    statement reaches Oracle -- turns what would be an opaque ORA-00900 in
+    production into a local error naming the construct.
+    """
+
+
 class RewriteResult(NamedTuple):
     """Result of rewriting a PostgreSQL query to Oracle SQL."""
 
@@ -757,7 +767,69 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
             into_vars = ", ".join(f":ret_{i}" for i in range(len(returning_cols)))
             query = query[: m.start()] + f"RETURNING {ret_cols_str} INTO {into_vars}" + query[m.end() :]
 
+    # Fail closed: anything still PostgreSQL at this point would be sent to
+    # Oracle verbatim and rejected there as an opaque syntax error, usually in
+    # production and often only for particular input shapes. Naming it here
+    # makes it reproducible locally and points straight at the missing rewrite.
+    assert_fully_rewritten(query)
+
     return RewriteResult(query, ignore_dup, returning_cols)
+
+
+# PostgreSQL constructs with no Oracle equivalent that this rewriter does not
+# translate. If one survives into the rewritten statement it is sent to Oracle
+# verbatim and fails there as an opaque syntax error (ORA-00900/00903/00907),
+# usually in production and often only for some shapes of input.
+#
+# This list is the safety net that turns that class of bug from "mysterious
+# runtime failure" into "loud, local, naming the construct". It has already
+# caught real defects: `jsonb_set` and `<@` were both reaching Oracle
+# untranslated because nothing checked. Add an entry when adding a rewrite --
+# and delete entries as they gain proper handling.
+#
+# Each entry is (compiled pattern, human name). Patterns are matched against
+# SQL text with string literals still present, so a literal containing e.g.
+# "LIMIT " would false-positive; keep patterns specific enough to avoid that.
+_UNREWRITTEN_PG_CONSTRUCTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?<![\w.<>=!])&&(?!\s*=)"), "&& array overlap"),
+    (re.compile(r"(?<![\w.])@>(?![\w.])"), "@> jsonb contains"),
+    (re.compile(r"(?<![\w.])<@(?![\w.])"), "<@ jsonb contained-by"),
+    (re.compile(r"::"), ":: cast"),
+    (re.compile(r"\bILIKE\b", re.IGNORECASE), "ILIKE"),
+    (re.compile(r"\bDISTINCT\s+ON\b", re.IGNORECASE), "DISTINCT ON"),
+    (re.compile(r"\bLIMIT\s+\$?\d", re.IGNORECASE), "LIMIT"),
+    (re.compile(r"\bSIMILAR\s+TO\b", re.IGNORECASE), "SIMILAR TO"),
+    (re.compile(r"\bdate_trunc\s*\(", re.IGNORECASE), "date_trunc()"),
+    (re.compile(r"\bjsonb_", re.IGNORECASE), "jsonb_* function"),
+    (re.compile(r"\bunnest\s*\(", re.IGNORECASE), "unnest()"),
+    (re.compile(r"\bgenerate_series\s*\(", re.IGNORECASE), "generate_series()"),
+    (re.compile(r"\barray_agg\s*\(", re.IGNORECASE), "array_agg()"),
+    (re.compile(r"\bstring_agg\s*\(", re.IGNORECASE), "string_agg()"),
+    (re.compile(r"\bAT\s+TIME\s+ZONE\b", re.IGNORECASE), "AT TIME ZONE"),
+    (re.compile(r"\bFILTER\s*\(\s*WHERE\b", re.IGNORECASE), "FILTER (WHERE ...)"),
+    (re.compile(r"\bON\s+CONFLICT\b", re.IGNORECASE), "ON CONFLICT"),
+    (re.compile(r"\bTRUE\b|\bFALSE\b"), "boolean literal"),
+    (re.compile(r"\bto_jsonb\s*\(|\bto_json\s*\(", re.IGNORECASE), "to_json*()"),
+    (re.compile(r"\bint4range\s*\(|\bint8range\s*\(|\btstzrange\s*\(", re.IGNORECASE), "range constructor"),
+)
+
+
+def assert_fully_rewritten(query: str) -> None:
+    """Raise if `query` still contains a PostgreSQL construct we do not translate.
+
+    Called at the end of `_rewrite_pg_to_oracle`. The rewriter is an ordered
+    pipeline of regex substitutions with no parser, so anything it does not
+    anticipate reaches Oracle verbatim and surfaces there as a syntax error far
+    from its cause. Failing here instead names the construct immediately.
+    """
+    for pattern, name in _UNREWRITTEN_PG_CONSTRUCTS:
+        if pattern.search(query):
+            raise OracleRewriteError(
+                f"Untranslated PostgreSQL construct reached Oracle: {name!r} "
+                f"(pattern {pattern.pattern!r}). The rewriter does not handle "
+                f"it, so Oracle would reject the statement with a syntax error. "
+                f"Statement: {query[:400]!r}"
+            )
 
 
 # ---------------------------------------------------------------------------

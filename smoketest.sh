@@ -253,9 +253,13 @@ async def create_bank():
     await engine.close()
 
 asyncio.run(create_bank())
-")
+" 2>&1)
 
-BANK_ID=$(echo "$BANK_RESPONSE" | grep 'BANK_ID:' | cut -d: -f2)
+# `|| true`: a grep that matches nothing returns non-zero, which under
+# `set -e` kills the script inside the command substitution -- before the
+# -z check below could print the real error. Append a sentinel so grep
+# always matches, then strip it.
+BANK_ID=$(echo "${BANK_RESPONSE}" | { grep 'BANK_ID:' || true; } | cut -d: -f2 | head -1)
 if [[ -z "$BANK_ID" ]]; then
     echo "❌ Failed to create bank"
     echo "$BANK_RESPONSE"
@@ -300,9 +304,9 @@ async def ingest():
     await engine.close()
 
 asyncio.run(ingest())
-")
+" 2>&1)
 
-INGEST1_ID=$(echo "$INGEST1" | grep 'INGEST_ID:' | cut -d: -f2)
+INGEST1_ID=$(echo "${INGEST1}" | { grep 'INGEST_ID:' || true; } | cut -d: -f2)
 if [[ -z "$INGEST1_ID" ]]; then
     echo "❌ Failed to ingest content 1"
     echo "$INGEST1"
@@ -340,9 +344,9 @@ async def ingest():
     await engine.close()
 
 asyncio.run(ingest())
-")
+" 2>&1)
 
-INGEST2_ID=$(echo "$INGEST2" | grep 'INGEST_ID:' | cut -d: -f2)
+INGEST2_ID=$(echo "${INGEST2}" | { grep 'INGEST_ID:' || true; } | cut -d: -f2)
 if [[ -z "$INGEST2_ID" ]]; then
     echo "❌ Failed to ingest content 2"
     exit 1
@@ -379,9 +383,9 @@ async def ingest():
     await engine.close()
 
 asyncio.run(ingest())
-")
+" 2>&1)
 
-INGEST3_ID=$(echo "$INGEST3" | grep 'INGEST_ID:' | cut -d: -f2)
+INGEST3_ID=$(echo "${INGEST3}" | { grep 'INGEST_ID:' || true; } | cut -d: -f2)
 if [[ -z "$INGEST3_ID" ]]; then
     echo "❌ Failed to ingest content 3"
     exit 1
@@ -440,11 +444,11 @@ async def recall():
     await engine.close()
 
 asyncio.run(recall())
-")
+" 2>&1)
 
 echo "$RECALL_RESULT"
-RECALL_COUNT=$(echo "$RECALL_RESULT" | grep 'RECALL_COUNT:' | head -1 | cut -d: -f2)
-RECALL_COUNT2=$(echo "$RECALL_RESULT" | grep 'RECALL_COUNT2:' | head -1 | cut -d: -f2)
+RECALL_COUNT=$(echo "${RECALL_RESULT}" | { grep 'RECALL_COUNT:' || true; } | head -1 | cut -d: -f2)
+RECALL_COUNT2=$(echo "${RECALL_RESULT}" | { grep 'RECALL_COUNT2:' || true; } | head -1 | cut -d: -f2)
 
 if [[ -z "$RECALL_COUNT" ]] || [[ "$RECALL_COUNT" -eq 0 ]]; then
     echo "❌ Recall returned no results"
@@ -483,12 +487,12 @@ async def consolidate():
     await engine.close()
 
 asyncio.run(consolidate())
-")
+" 2>&1)
 
 echo "$CONSOLIDATE_RESULT"
-CONSOLIDATED=$(echo "$CONSOLIDATE_RESULT" | grep 'CONSOLIDATED:' | cut -d: -f2)
-UPDATED=$(echo "$CONSOLIDATE_RESULT" | grep 'UPDATED:' | cut -d: -f2)
-PROCESSED=$(echo "$CONSOLIDATE_RESULT" | grep 'PROCESSED:' | cut -d: -f2)
+CONSOLIDATED=$(echo "${CONSOLIDATE_RESULT}" | { grep 'CONSOLIDATED:' || true; } | cut -d: -f2)
+UPDATED=$(echo "${CONSOLIDATE_RESULT}" | { grep 'UPDATED:' || true; } | cut -d: -f2)
+PROCESSED=$(echo "${CONSOLIDATE_RESULT}" | { grep 'PROCESSED:' || true; } | cut -d: -f2)
 
 if [[ -z "$CONSOLIDATED" ]] || [[ "$CONSOLIDATED" -eq 0 ]]; then
     echo "⚠️  Consolidation ran but no facts consolidated (may be expected for small dataset)"
@@ -532,10 +536,10 @@ async def recall():
     await engine.close()
 
 asyncio.run(recall())
-")
+" 2>&1)
 
 echo "$RECALL_AFTER"
-RECALL_AFTER_COUNT=$(echo "$RECALL_AFTER" | grep 'RECALL_COUNT:' | cut -d: -f2)
+RECALL_AFTER_COUNT=$(echo "${RECALL_AFTER}" | { grep 'RECALL_COUNT:' || true; } | cut -d: -f2)
 if [[ -z "$RECALL_AFTER_COUNT" ]] || [[ "$RECALL_AFTER_COUNT" -eq 0 ]]; then
     echo "❌ Recall after consolidation returned no results"
     exit 1
