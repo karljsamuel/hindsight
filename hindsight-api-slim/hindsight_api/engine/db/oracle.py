@@ -579,7 +579,49 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
     # JSON operators
     query = _JSON_ARROW_TEXT_RE.sub(r"JSON_VALUE(\1, '$.\2')", query)
     query = _JSON_HAS_KEY_RE.sub(r"JSON_EXISTS(\1, '$.\2')", query)
-    query = _JSONB_CONTAINS_RE.sub(r"JSON_EXISTS(\1, '$' PASSING :\2 AS cond)", query)
+
+    def _rewrite_jsonb_contains(m: re.Match) -> str:
+        col, param_num = m.group(1), m.group(2)
+        # _JSONB_CONTAINS_RE captures only the numeric part of :N.
+        param = f":{param_num}"
+        # Oracle stores PG text[] tag columns as JSON arrays in CLOB. Handle
+        # array containment here, before the generic JSON-object rewrite below;
+        # relying on the later JSON_EXISTS repair only worked for an unqualified
+        # bare name and was semantically wrong for aliases (mu.tags).
+        leaf = col.rsplit(".", 1)[-1].strip('"').lower()
+        if leaf == "tags":
+            return (
+                f"(SELECT COUNT(*) FROM JSON_TABLE({param}, '$[*]' "
+                "COLUMNS (val VARCHAR2(256) PATH '$')) jt "
+                f"WHERE JSON_EXISTS({col}, '$[*]?(@ == $v)' "
+                'PASSING jt.val AS "v")) = '
+                f"JSON_VALUE({param}, '$.size()' RETURNING NUMBER)"
+            )
+        return f"JSON_EXISTS({col}, '$' PASSING {param} AS cond)"
+
+    query = _JSONB_CONTAINS_RE.sub(_rewrite_jsonb_contains, query)
+
+    # PG array contained-by: tags <@ :N means every element in the column is in
+    # the supplied JSON array. Oracle has no JSON-array subset operator, so
+    # count the column's elements that occur in the parameter and compare with
+    # the column's array size. Restrict the rewrite to the known text[] storage
+    # column; JSON-object contained-by is not equivalent to this operation.
+    def _rewrite_tags_contained_by(m: re.Match) -> str:
+        col, param = m.group(1), m.group(2)
+        return (
+            f"(SELECT COUNT(*) FROM JSON_TABLE({col}, '$[*]' "
+            "COLUMNS (val VARCHAR2(256) PATH '$')) jt "
+            f"WHERE JSON_EXISTS({param}, '$[*]?(@ == $v)' "
+            'PASSING jt.val AS "v")) = '
+            f"JSON_VALUE({col}, '$.size()' RETURNING NUMBER)"
+        )
+
+    query = re.sub(
+        r"([A-Za-z_][\w.]*\.tags|tags)\s*<@\s*(:\w+)",
+        _rewrite_tags_contained_by,
+        query,
+        flags=re.IGNORECASE,
+    )
 
     # pgvector distance operator: col <=> :N → VECTOR_DISTANCE(col, :N, COSINE)
     # Use [\w.]+ to capture table-qualified columns like mu.embedding
