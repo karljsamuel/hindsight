@@ -1128,7 +1128,15 @@ class OracleConnection(DatabaseConnection):
         finally:
             cursor.close()
 
-    async def executemany(self, query: str, args: list[tuple[Any, ...]], *, timeout: float | None = None) -> None:
+    async def executemany(
+        self,
+        query: str,
+        args: list[tuple[Any, ...]],
+        *,
+        timeout: float | None = None,
+        column_types: list[str] | None = None,
+        n_cols: int | None = None,
+    ) -> None:
         query, ignore_dup, _ = _rewrite_pg_to_oracle(query)
         converted = _convert_args_list(args)
         cursor = self._conn.cursor()
@@ -1149,6 +1157,15 @@ class OracleConnection(DatabaseConnection):
                 # The driver types each column from the first row, so a column holding
                 # any CLOB-sized value must be declared CLOB for the whole batch.
                 clob_keys = {k for row in converted_dicts for k, v in row.items() if _needs_clob_bind(v)}
+                # A column declared "clob[]" in column_types is always a CLOB, even
+                # when this batch's first row happens to hold a short value. The
+                # driver types the column once for the whole batch, so a short first
+                # row would otherwise pin a later long row to VARCHAR2 and Oracle
+                # rejects it with ORA-01461.
+                if column_types:
+                    for i, ct in enumerate(column_types):
+                        if ct == "clob[]" and i < (n_cols if n_cols is not None else len(column_types)):
+                            clob_keys.add(str(i + 1))
                 if clob_keys:
                     cursor.setinputsizes(**dict.fromkeys(clob_keys, _import_oracledb().DB_TYPE_CLOB))
                 try:
@@ -1191,7 +1208,7 @@ class OracleConnection(DatabaseConnection):
 
         rows_data = [tuple(arrays[col_idx][row_idx] for col_idx in range(n_cols)) for row_idx in range(n_rows)]
         query = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})"
-        await self.executemany(query, rows_data)
+        await self.executemany(query, rows_data, column_types=column_types, n_cols=n_cols)
         return f"INSERT 0 {n_rows}"
 
     async def fetch(self, query: str, *args: Any, timeout: float | None = None) -> list[ResultRow]:

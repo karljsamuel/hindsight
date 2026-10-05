@@ -50,12 +50,19 @@ jobs:
           echo "Changed files:"
           echo "$CHANGED"
           
+          # This gate exists to stop an Oracle branch from silently changing
+          # unrelated parts of the repo (leaked credential files being the main
+          # concern). .gitignore is allowed because changes to it only ever
+          # *exclude* paths -- an added ignore rule cannot disclose a secret,
+          # it prevents one. Blocking it would leave local .env files and
+          # scratch scripts merely untracked rather than ignored.
           ALLOWED_PREFIXES=(
             "docker/standalone/Dockerfile.oracle"
             "hindsight-api-slim/hindsight_api/"
             "hindsight-control-plane/"
             "smoketest.sh"
             ".github/workflows/"
+            ".gitignore"
           )
           
           for file in $CHANGED; do

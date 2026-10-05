@@ -66,6 +66,42 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 logger = logging.getLogger(__name__)
 
 
+def _is_unique_violation(exc: BaseException) -> bool:
+    """True if `exc` is an Oracle unique-constraint violation (ORA-00001).
+
+    Used by the document upsert to fall back from INSERT to UPDATE. Checks the
+    Oracle error code on the exception and on any DatabaseError in its args,
+    unwrapping chained exceptions, before falling back to the code string.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        codes = [getattr(cur, "code", None)]
+        codes += [getattr(a, "code", None) for a in (getattr(cur, "args", ()) or ())]
+        if any(str(c) == "ORA-00001" for c in codes):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return "ORA-00001" in str(exc)
+
+
+def _status_rowcount(status: str | None) -> int:
+    """Extract the affected row count from a PG-style status string.
+
+    OracleConnection.execute() returns strings like "UPDATE 1" or
+    "INSERT 0 0". Anything unparseable is treated as "unknown" and reported as
+    a non-zero count, so a future change to the status format cannot silently
+    turn into a spurious "no rows updated" failure.
+    """
+    if not status:
+        return -1
+    tail = status.rsplit(" ", 1)[-1].strip()
+    try:
+        return int(tail)
+    except ValueError:
+        return -1
+
+
 class OracleMemories(PostgresMemories):
     """Oracle-specific memories store using native VECTOR and Oracle Text.
 
@@ -240,6 +276,7 @@ class OracleMemories(PostgresMemories):
 
         # Parameter layout for Oracle: :1 = query_emb, :2 = bank_id, :3+ = others
         _include_bm25 = bool(tokens)
+        bm25_text_param: str = ""
         tags_param_idx = 3
         tags_clause = build_tags_where_clause_simple(tags, tags_param_idx, match=tags_match)
 
@@ -280,7 +317,7 @@ class OracleMemories(PostgresMemories):
         # --- BM25 UNION ALL arms ---
         if _include_bm25:
             text_ext = config.text_search_extension
-            bm25_text_param: str = await build_bm25_query_text(
+            bm25_text_param = await build_bm25_query_text(
                 conn,
                 dialect,
                 tokens=tokens,
@@ -289,6 +326,16 @@ class OracleMemories(PostgresMemories):
                 language=config.text_search_extension_native_language,
                 config=config,
             )
+            # Every BM25 arm binds the same limit and the same query text, so
+            # they all share one pair of parameter indices. Giving each arm its
+            # own pair (:3/:4, then :5/:6, ...) made the SQL reference
+            # placeholders that were never appended -- params are built once
+            # below, not per arm -- and Oracle rejected the statement with
+            # DPY-4010 "a bind variable replacement value for placeholder :N
+            # was not provided" as soon as more than one fact_type was
+            # requested.
+            bm25_limit_param = f":{_next_idx}"
+            bm25_text_param_idx = f":{_next_idx + 1}"
             for i, ft in enumerate(fact_types):
                 arms.append(
                     dialect.build_bm25_arm(
@@ -296,8 +343,8 @@ class OracleMemories(PostgresMemories):
                         cols=cols,
                         fact_type=ft,
                         bank_id_param=":2",
-                        limit_param=f":{_next_idx}",
-                        text_param=f":{_next_idx + 1}",
+                        limit_param=bm25_limit_param,
+                        text_param=bm25_text_param_idx,
                         tags_clause=tags_clause,
                         groups_clause=groups_clause,
                         arm_index=i,
@@ -310,19 +357,23 @@ class OracleMemories(PostgresMemories):
                         extra_where=updated_range_clause,
                     )
                 )
-                _next_idx += 2
+            _next_idx += 2
 
         query = "\nUNION ALL\n".join(arms)
 
-        # Build params: :1 = query_emb, :2 = bank_id, :3+ = rest
+        # Build params: :1 = query_emb, :2 = bank_id, then tags, tag groups, the
+        # updated_at range, and finally the BM25 limit/text pair -- in exactly
+        # that order. The indices above are allocated in that sequence, so
+        # appending the BM25 pair before the tags would bind every value to the
+        # wrong placeholder as soon as a tag filter or date range was used.
         params: list = [query_embedding, bank_id]
-        if _include_bm25:
-            params.append(limit)  # limit_param
-            params.append(bm25_text_param)  # text_param
         if tags:
             params.append(tags)
         params.extend(groups_params)
         params.extend(updated_range_params)
+        if _include_bm25:
+            params.append(limit)  # bm25_limit_param
+            params.append(bm25_text_param)  # bm25_text_param_idx
 
         try:
             rows = await conn.fetch(query, *params)
@@ -501,41 +552,70 @@ class OracleMemories(PostgresMemories):
     ) -> None:
         """Oracle-specific document upsert using MERGE."""
         # Oracle MERGE equivalent of PostgreSQL ON CONFLICT
-        # original_text can be very large, bind as CLOB
-        # Use table name directly (on Oracle fq_table returns bare name)
-        # Explicitly cast preserved_created_at to TIMESTAMP WITH TIME ZONE to avoid
-        # oracledb binding it as CHAR which causes ORA-00932 in COALESCE
+        # original_text, retain_params, tags can be very large, bind as CLOB
         doc_table = "documents"
-        await conn.execute(
-            f"""
-            MERGE INTO {doc_table} t
-            USING (SELECT
-                :1 AS id,
-                :2 AS bank_id,
-                :3 AS original_text,
-                :4 AS content_hash,
-                :5 AS retain_params,
-                :6 AS tags,
-                CAST(:7 AS TIMESTAMP WITH TIME ZONE) AS preserved_created_at
-                FROM DUAL) s
-            ON (t.id = s.id AND t.bank_id = s.bank_id)
-            WHEN MATCHED THEN UPDATE SET
-                original_text = s.original_text,
-                content_hash = s.content_hash,
-                retain_params = s.retain_params,
-                tags = s.tags,
+        params = [
+            document_id,  # :1 id
+            bank_id,      # :2 bank_id
+            original_text,  # :3 original_text (CLOB)
+            content_hash,  # :4 content_hash
+            json.dumps(retain_params) if retain_params else None,  # :5 retain_params (CLOB)
+            document_tags or [],  # :6 tags (CLOB)
+            preserved_created_at,  # :7 preserved_created_at
+        ]
+        # original_text is an unbounded CLOB, and Oracle cannot bind a CLOB larger
+        # than 32767 bytes through a MERGE's `SELECT :N FROM DUAL` source --
+        # the DUAL projection forces VARCHAR2 typing and the bind fails with
+        # ORA-01461 at bind position 3. Verified against the test schema: the
+        # same MERGE binds fine at 32767 bytes and fails at 32768, while a plain
+        # INSERT of the identical 256KB value succeeds. So do the upsert as
+        # INSERT-then-UPDATE, which both accept arbitrarily large CLOBs.
+        #
+        # Do not "fix" this by adding CAST(:N AS CLOB) to the MERGE either --
+        # CAST of a CLOB inside `SELECT ... FROM DUAL` raises ORA-22849.
+        insert_sql = f"""
+            INSERT INTO {doc_table} (
+                id, bank_id, original_text, content_hash,
+                retain_params, tags, created_at, updated_at
+            ) VALUES (
+                :1, :2, :3, :4,
+                :5, :6,
+                COALESCE(CAST(:7 AS TIMESTAMP WITH TIME ZONE), SYSTIMESTAMP),
+                SYSTIMESTAMP
+            )
+        """
+        update_sql = f"""
+            UPDATE {doc_table} SET
+                original_text = :3,
+                content_hash = :4,
+                retain_params = :5,
+                tags = :6,
                 updated_at = SYSTIMESTAMP
-            WHEN NOT MATCHED THEN INSERT (id, bank_id, original_text, content_hash, retain_params, tags, created_at, updated_at)
-            VALUES (s.id, s.bank_id, s.original_text, s.content_hash, s.retain_params, s.tags, COALESCE(s.preserved_created_at, SYSTIMESTAMP), SYSTIMESTAMP)
-            """,
-            document_id,
-            bank_id,
-            original_text,
-            content_hash,
-            json.dumps(retain_params) if retain_params else None,
-            document_tags or [],
-            preserved_created_at,
-        )
+            WHERE id = :1 AND bank_id = :2
+        """
+        try:
+            await conn.execute(insert_sql, *params)
+        except Exception as exc:
+            # ORA-00001: unique constraint violated -> row already exists
+            if not _is_unique_violation(exc):
+                raise
+            # update_sql does not bind :7 (preserved_created_at is insert-only),
+            # and python-oracledb rejects a param the SQL never references.
+            status = await conn.execute(update_sql, *params[:6])
+            # MERGE reported the affected row count directly. INSERT-then-UPDATE
+            # does not: if the row is deleted between the failed INSERT and this
+            # UPDATE -- a concurrent document purge, or a competing writer that
+            # rolled back -- the UPDATE matches nothing, raises nothing, and the
+            # upsert would report success with no row written. Check the count
+            # so the caller sees the failure instead of silent data loss.
+            # execute() returns a PG-style status string such as "UPDATE 1".
+            updated = _status_rowcount(status)
+            if updated == 0:
+                raise RuntimeError(
+                    "document upsert matched no existing row: "
+                    f"id={document_id!r} bank_id={bank_id!r} was reported as a "
+                    "duplicate by the insert, but the update affected 0 rows"
+                )
 
     # ------------------------------------------------------------------ addressed reads (delegate to pg)
     async def get_memories(self, *, conn, fq_table, bank_id: str, unit_ids: list[str]) -> list[StoredMemory]:

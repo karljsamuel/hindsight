@@ -54,7 +54,7 @@ class OracleOps(DataAccessOps):
                 chunk_indices,
                 content_hashes,
             ],
-            column_types=["text[]", "text[]", "text[]", "text[]", "integer[]", "text[]"],
+            column_types=["text[]", "text[]", "text[]", "clob[]", "integer[]", "text[]"],
         )
 
     async def lock_document_for_write(
