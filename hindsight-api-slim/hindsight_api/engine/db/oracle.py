@@ -1083,7 +1083,20 @@ class OracleConnection(DatabaseConnection):
 
     # -- DML methods ------------------------------------------------------
 
-    async def execute(self, query: str, *args: Any, timeout: float | None = None) -> str:
+    async def execute(
+        self,
+        query: str,
+        *args: Any,
+        timeout: float | None = None,
+        ignore_duplicate: bool = False,
+    ) -> str:
+        # `ignore_duplicate` tells this layer that a unique-constraint violation
+        # is an expected outcome the caller handles itself, not a failure.
+        # The document upsert relies on it: PostgreSQL does this in one
+        # statement via ON CONFLICT ... DO UPDATE, Oracle has no ON CONFLICT,
+        # so an ORA-00001 is how the upsert learns the row already exists and
+        # falls back to UPDATE. Without this flag that normal path logged the
+        # full statement at ERROR on every idempotent re-retain.
         # PostgreSQL planner/session GUCs (SET LOCAL enable_seqscan, lock_timeout,
         # hnsw.ef_search, ...) have no Oracle equivalent; running them raises
         # ORA-00922. They are tuning hints scoped to the transaction, so skip them.
@@ -1099,12 +1112,20 @@ class OracleConnection(DatabaseConnection):
             _convert_vector_bind_params(query, params)
 
             self._apply_clob_input_sizes(cursor, query, params)
-            if ignore_dup:
+            if ignore_dup or ignore_duplicate:
                 try:
                     await cursor.execute(query, params)
                 except Exception as e:
                     if "ORA-00001" in str(e):
+                        # Expected control flow, not an error -- stay quiet.
                         return "INSERT 0 0"
+                    # Anything else is a genuine failure and should be logged.
+                    logger.error(
+                        "Oracle execute failed. Query: %s\nParams keys: %s\nError: %s",
+                        query[:500],
+                        list(params.keys()) if params else None,
+                        e,
+                    )
                     raise
             else:
                 try:

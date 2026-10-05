@@ -563,16 +563,24 @@ class OracleMemories(PostgresMemories):
             document_tags or [],  # :6 tags (CLOB)
             preserved_created_at,  # :7 preserved_created_at
         ]
+        # Mirrors upstream PostgreSQL, which does this in a single statement:
+        #   INSERT ... ON CONFLICT (id, bank_id) DO UPDATE SET ...
+        # Oracle has no ON CONFLICT, so the upsert is INSERT, and on a unique
+        # violation fall back to UPDATE. The duplicate is the expected signal,
+        # not a failure, so it is requested via ignore_duplicate rather than
+        # caught and re-logged as an error.
+        #
         # original_text is an unbounded CLOB, and Oracle cannot bind a CLOB larger
         # than 32767 bytes through a MERGE's `SELECT :N FROM DUAL` source --
         # the DUAL projection forces VARCHAR2 typing and the bind fails with
         # ORA-01461 at bind position 3. Verified against the test schema: the
         # same MERGE binds fine at 32767 bytes and fails at 32768, while a plain
-        # INSERT of the identical 256KB value succeeds. So do the upsert as
-        # INSERT-then-UPDATE, which both accept arbitrarily large CLOBs.
+        # INSERT of the identical 256KB value succeeds. So the upsert cannot go
+        # back to MERGE.
         #
-        # Do not "fix" this by adding CAST(:N AS CLOB) to the MERGE either --
-        # CAST of a CLOB inside `SELECT ... FROM DUAL` raises ORA-22849.
+        # Do not "fix" any of this by adding CAST(:N AS CLOB) to a MERGE
+        # either -- CAST of a CLOB inside `SELECT ... FROM DUAL` raises
+        # ORA-22849.
         insert_sql = f"""
             INSERT INTO {doc_table} (
                 id, bank_id, original_text, content_hash,
@@ -593,29 +601,27 @@ class OracleMemories(PostgresMemories):
                 updated_at = SYSTIMESTAMP
             WHERE id = :1 AND bank_id = :2
         """
-        try:
-            await conn.execute(insert_sql, *params)
-        except Exception as exc:
-            # ORA-00001: unique constraint violated -> row already exists
-            if not _is_unique_violation(exc):
-                raise
-            # update_sql does not bind :7 (preserved_created_at is insert-only),
-            # and python-oracledb rejects a param the SQL never references.
-            status = await conn.execute(update_sql, *params[:6])
-            # MERGE reported the affected row count directly. INSERT-then-UPDATE
-            # does not: if the row is deleted between the failed INSERT and this
-            # UPDATE -- a concurrent document purge, or a competing writer that
-            # rolled back -- the UPDATE matches nothing, raises nothing, and the
-            # upsert would report success with no row written. Check the count
-            # so the caller sees the failure instead of silent data loss.
-            # execute() returns a PG-style status string such as "UPDATE 1".
-            updated = _status_rowcount(status)
-            if updated == 0:
-                raise RuntimeError(
-                    "document upsert matched no existing row: "
-                    f"id={document_id!r} bank_id={bank_id!r} was reported as a "
-                    "duplicate by the insert, but the update affected 0 rows"
-                )
+        # Returns "INSERT 0 0" when the row already exists.
+        status = await conn.execute(insert_sql, *params, ignore_duplicate=True)
+        if status != "INSERT 0 0":
+            return
+
+        # update_sql does not bind :7 (preserved_created_at is insert-only),
+        # and python-oracledb rejects a param the SQL never references.
+        status = await conn.execute(update_sql, *params[:6])
+        # MERGE reported the affected row count directly; INSERT-then-UPDATE
+        # does not. If the row is deleted between the failed INSERT and this
+        # UPDATE -- a concurrent document purge, or a competing writer that
+        # rolled back -- the UPDATE matches nothing, raises nothing, and the
+        # upsert would report success with no row written. Check the count so
+        # the caller sees the failure instead of silent data loss.
+        updated = _status_rowcount(status)
+        if updated == 0:
+            raise RuntimeError(
+                "document upsert matched no existing row: "
+                f"id={document_id!r} bank_id={bank_id!r} was reported as a "
+                "duplicate by the insert, but the update affected 0 rows"
+            )
 
     # ------------------------------------------------------------------ addressed reads (delegate to pg)
     async def get_memories(self, *, conn, fq_table, bank_id: str, unit_ids: list[str]) -> list[StoredMemory]:
