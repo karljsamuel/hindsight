@@ -37,11 +37,42 @@ permissions:
   contents: read
   packages: write
 
+# The per-arch tags (oracle-latest-amd64 / -arm64) are mutable, and the combine
+# job assembles them into the shared multi-arch tag. Two runs overlapping on the
+# same ref would interleave -- run A pushes amd64, run B pushes amd64, run A
+# pushes arm64, run A combines -- and the published manifest would mix two
+# different commits. Cancelling the superseded run removes that interleaving:
+# the surviving run always rebuilds both architectures before combining.
+concurrency:
+  group: publish-image-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # Resolve the date tag once. Computing `date -u` independently in each job
+  # meant a build crossing UTC midnight produced arch tags dated D1 while the
+  # combine job looked for D2 tags, failing the combine or -- worse -- combining
+  # the previous day's arch tags under today's date. A matrix job is a poor
+  # carrier for this because matrix outputs are last-writer-wins.
+  prepare:
+    name: KJS Resolve publish tags
+    runs-on: ubuntu-26.04
+    outputs:
+      date_tag: ${{ steps.date.outputs.date_tag }}
+    steps:
+      - name: Compute date tag
+        id: date
+        run: echo "date_tag=$(date -u +'%d%m%Y')" >> $GITHUB_OUTPUT
+
   build-arch:
     name: KJS Build ${{ matrix.arch }}
+    needs: [prepare]
     strategy:
       fail-fast: false
+      # One architecture built at a time. The two builds are independent and
+      # could run in parallel, but only a single image is wanted in flight at
+      # any moment, so max-parallel serialises them. Each still runs natively on
+      # its own architecture runner -- this is sequencing, not emulation.
+      max-parallel: 1
       matrix:
         include:
           - platform: linux/amd64
@@ -67,10 +98,10 @@ jobs:
 
       - name: Compute arch-suffixed tags
         id: tags
+        env:
+          DATE_TAG: ${{ needs.prepare.outputs.date_tag }}
         run: |
-          DATE_TAG=$(date -u +'%d%m%Y')
           REPO=ghcr.io/karljsamuel/hindsight
-          echo "date_tag=${DATE_TAG}" >> $GITHUB_OUTPUT
           echo "tags=${REPO}:oracle-latest-${{ matrix.arch }},${REPO}:oracle-${DATE_TAG}-${{ matrix.arch }}" >> $GITHUB_OUTPUT
 
       - name: Extract labels
@@ -79,7 +110,7 @@ jobs:
         with:
           images: ghcr.io/karljsamuel/hindsight
           labels: |
-            org.opencontainers.image.version=${{ steps.tags.outputs.date_tag }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.date_tag }}
 
       # No local ML models. Embeddings and reranking both resolve to OpenRouter
       # at runtime, so torch/sentence-transformers are deliberately absent --
@@ -104,8 +135,10 @@ jobs:
 
   combine-manifest:
     name: KJS Combine multi-arch manifest
-    needs: [build-arch]
+    needs: [prepare, build-arch]
     runs-on: ubuntu-26.04
+    env:
+      DATE_TAG: ${{ needs.prepare.outputs.date_tag }}
     steps:
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -116,7 +149,6 @@ jobs:
 
       - name: Create multi-arch manifest
         run: |
-          DATE_TAG=$(date -u +'%d%m%Y')
           REPO=ghcr.io/karljsamuel/hindsight
           docker buildx imagetools create \
             --tag "${REPO}:oracle-latest" \
@@ -130,12 +162,16 @@ jobs:
       - name: Verify combined manifest has both architectures
         run: |
           REPO=ghcr.io/karljsamuel/hindsight
-          DATE_TAG=$(date -u +'%d%m%Y')
           rc=0
           for ref in "${REPO}:oracle-latest" "${REPO}:oracle-${DATE_TAG}"; do
             echo "=== ${ref} ==="
+            # Tolerate whitespace: `imagetools inspect --raw` is compact today,
+            # but a pretty-printed index would make a whitespace-sensitive
+            # pattern match nothing and report both arches missing.
             archs=$(docker buildx imagetools inspect "${ref}" --raw \
-              | grep -o '"architecture":"[a-z0-9]*"' | sort -u)
+              | tr -d '[:space:]' \
+              | grep -o '"architecture":"[a-z0-9]*"' \
+              | sort -u)
             echo "${archs}"
             for want in amd64 arm64; do
               echo "${archs}" | grep -q "\"${want}\"" || { echo "MISSING ${want} in ${ref}"; rc=1; }
@@ -145,7 +181,6 @@ jobs:
 
       - name: Output published tags
         run: |
-          DATE_TAG=$(date -u +'%d%m%Y')
           REPO=ghcr.io/karljsamuel/hindsight
           echo "=== Published Image Tags (multi-arch) ==="
           echo "${REPO}:oracle-latest"

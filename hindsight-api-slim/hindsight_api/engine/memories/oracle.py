@@ -85,6 +85,23 @@ def _is_unique_violation(exc: BaseException) -> bool:
     return "ORA-00001" in str(exc)
 
 
+def _status_rowcount(status: str | None) -> int:
+    """Extract the affected row count from a PG-style status string.
+
+    OracleConnection.execute() returns strings like "UPDATE 1" or
+    "INSERT 0 0". Anything unparseable is treated as "unknown" and reported as
+    a non-zero count, so a future change to the status format cannot silently
+    turn into a spurious "no rows updated" failure.
+    """
+    if not status:
+        return -1
+    tail = status.rsplit(" ", 1)[-1].strip()
+    try:
+        return int(tail)
+    except ValueError:
+        return -1
+
+
 class OracleMemories(PostgresMemories):
     """Oracle-specific memories store using native VECTOR and Oracle Text.
 
@@ -584,7 +601,21 @@ class OracleMemories(PostgresMemories):
                 raise
             # update_sql does not bind :7 (preserved_created_at is insert-only),
             # and python-oracledb rejects a param the SQL never references.
-            await conn.execute(update_sql, *params[:6])
+            status = await conn.execute(update_sql, *params[:6])
+            # MERGE reported the affected row count directly. INSERT-then-UPDATE
+            # does not: if the row is deleted between the failed INSERT and this
+            # UPDATE -- a concurrent document purge, or a competing writer that
+            # rolled back -- the UPDATE matches nothing, raises nothing, and the
+            # upsert would report success with no row written. Check the count
+            # so the caller sees the failure instead of silent data loss.
+            # execute() returns a PG-style status string such as "UPDATE 1".
+            updated = _status_rowcount(status)
+            if updated == 0:
+                raise RuntimeError(
+                    "document upsert matched no existing row: "
+                    f"id={document_id!r} bank_id={bank_id!r} was reported as a "
+                    "duplicate by the insert, but the update affected 0 rows"
+                )
 
     # ------------------------------------------------------------------ addressed reads (delegate to pg)
     async def get_memories(self, *, conn, fq_table, bank_id: str, unit_ids: list[str]) -> list[StoredMemory]:
