@@ -131,6 +131,52 @@ def _convert_args(args: tuple[Any, ...]) -> tuple[Any, ...]:
     return tuple(_convert_arg(a) for a in args)
 
 
+# Oracle's numeric server error code for "unique constraint violated"
+# (ORA-00001). python-oracledb has no named constant for it -- its `errors`
+# module holds only driver-level ERR_* codes -- so the number is used directly.
+_ORACLE_DUPLICATE_KEY = 1
+
+
+def _code_is_duplicate(code: Any) -> bool:
+    """True if a driver-supplied error code means a unique-constraint violation.
+
+    Accepts both representations: python-oracledb puts the numeric server
+    error on `args[0].code`, while some drivers expose the "ORA-00001" string
+    form.
+    """
+    if code is None:
+        return False
+    if isinstance(code, int):
+        return code == _ORACLE_DUPLICATE_KEY
+    return str(code) == "ORA-00001"
+
+
+def _is_duplicate_key(exc: BaseException) -> bool:
+    """True if `exc` is an Oracle unique-constraint violation (ORA-00001).
+
+    Reads the error code rather than matching message text: wording is not a
+    contract, and a reworded or localized message would silently turn
+    `ignore_duplicate` into a no-op and put the ERROR log straight back.
+
+    python-oracledb's DatabaseError has **no** `.code` attribute in thin mode --
+    the server error number lives on the `_Error` object in `args[0]`, as a
+    plain int. Walking both `cause` and `context` as well as nested args
+    covers the ways oracledb surfaces the error depending on how it was
+    raised.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if _code_is_duplicate(getattr(cur, "code", None)):
+            return True
+        for arg in getattr(cur, "args", ()) or ():
+            if _code_is_duplicate(getattr(arg, "code", None)):
+                return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 def _needs_clob_bind(val: Any) -> bool:
     """JSON text, or any string past VARCHAR2's 4000 bytes: bind as CLOB.
 
@@ -1112,32 +1158,21 @@ class OracleConnection(DatabaseConnection):
             _convert_vector_bind_params(query, params)
 
             self._apply_clob_input_sizes(cursor, query, params)
-            if ignore_dup or ignore_duplicate:
-                try:
-                    await cursor.execute(query, params)
-                except Exception as e:
-                    if "ORA-00001" in str(e):
-                        # Expected control flow, not an error -- stay quiet.
-                        return "INSERT 0 0"
-                    # Anything else is a genuine failure and should be logged.
-                    logger.error(
-                        "Oracle execute failed. Query: %s\nParams keys: %s\nError: %s",
-                        query[:500],
-                        list(params.keys()) if params else None,
-                        e,
-                    )
-                    raise
-            else:
-                try:
-                    await cursor.execute(query, params)
-                except Exception as e:
-                    logger.error(
-                        "Oracle execute failed. Query: %s\nParams keys: %s\nError: %s",
-                        query[:500],
-                        list(params.keys()) if params else None,
-                        e,
-                    )
-                    raise
+            duplicate_is_ok = ignore_dup or ignore_duplicate
+            try:
+                await cursor.execute(query, params)
+            except Exception as e:
+                if duplicate_is_ok and _is_duplicate_key(e):
+                    # Expected control flow the caller asked us to absorb, not a
+                    # failure -- stay quiet.
+                    return "INSERT 0 0"
+                logger.error(
+                    "Oracle execute failed. Query: %s\nParams keys: %s\nError: %s",
+                    query[:500],
+                    list(params.keys()) if params else None,
+                    e,
+                )
+                raise
             # Return PG-compatible status string
             cmd = orig_query.strip().split()[0].upper() if orig_query.strip() else "OK"
             rowcount = cursor.rowcount
@@ -1170,7 +1205,7 @@ class OracleConnection(DatabaseConnection):
                     try:
                         await cursor.execute(query, params)
                     except Exception as e:
-                        if "ORA-00001" not in str(e):
+                        if not _is_duplicate_key(e):
                             raise
             else:
                 # Convert tuples to dicts for named binding (:1, :2, ...)
@@ -1246,7 +1281,7 @@ class OracleConnection(DatabaseConnection):
                 try:
                     await cursor.execute(query, params)
                 except Exception as e:
-                    if "ORA-00001" in str(e):
+                    if _is_duplicate_key(e):
                         return []
                     raise
                 # INSERT succeeded but RETURNING was stripped — return empty
@@ -1290,7 +1325,7 @@ class OracleConnection(DatabaseConnection):
                 try:
                     await cursor.execute(query, params)
                 except Exception as e:
-                    if "ORA-00001" in str(e):
+                    if _is_duplicate_key(e):
                         return None
                     raise
                 # INSERT succeeded but RETURNING was stripped
@@ -1331,7 +1366,7 @@ class OracleConnection(DatabaseConnection):
                 try:
                     await cursor.execute(query, params)
                 except Exception as e:
-                    if "ORA-00001" in str(e):
+                    if _is_duplicate_key(e):
                         return None
                     raise
                 # INSERT succeeded (no dup). RETURNING was stripped, so we can't
