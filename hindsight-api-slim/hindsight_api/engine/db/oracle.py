@@ -196,16 +196,36 @@ def _convert_vector_bind_params(
 
     python-oracledb expects FLOAT32 VECTOR binds as array.array("f").
     Hindsight's PostgreSQL-oriented code supplies embeddings as Python lists,
-    while _convert_arg() normally serializes lists to JSON. For SQL using
-    VECTOR_DISTANCE(), restore numeric vector parameters as float32 arrays.
+    while _convert_arg() normally serializes lists to JSON. Restore numeric
+    vector parameters as float32 arrays.
+
+    Two spellings identify a vector bind, and both must be handled:
+
+    1. ``VECTOR_DISTANCE(col, :N, COSINE)`` -- Oracle form, produced by the
+       pgvector ``<=>`` rewrite. Present only *after* rewriting.
+    2. ``$N::vector`` -- the PostgreSQL cast used by INSERT statements such as
+       consolidation's insert_observation. ``_rewrite_pg_to_oracle`` strips the
+       cast, so this form is present only *before* rewriting.
+
+    Callers therefore invoke this twice: once with the rewritten query and once
+    with the original. Missing the second form is not a subtle bug: an
+    unconverted 2048-float embedding stays a JSON string of roughly 43,000
+    characters, which Oracle rejects against the VECTOR column with
+    "ORA-01461: The value at bind position N exceeded the maximum VARCHAR2
+    length" -- the exact failure that broke consolidation.
     """
     if not params:
         return
 
-    vector_keys = re.findall(
-        r"VECTOR_DISTANCE\s*\([^,]+,\s*:(\w+)\s*,",
-        query,
-        flags=re.IGNORECASE,
+    vector_keys = set(
+        re.findall(
+            r"VECTOR_DISTANCE\s*\([^,]+,\s*:(\w+)\s*,",
+            query,
+            flags=re.IGNORECASE,
+        )
+    )
+    vector_keys.update(
+        re.findall(r"\$(\d+)\s*::\s*vector\b", query, flags=re.IGNORECASE)
     )
 
     for key in set(vector_keys):
@@ -1156,6 +1176,9 @@ class OracleConnection(DatabaseConnection):
             query, params = self._expand_any_lists(query, params)
 
             _convert_vector_bind_params(query, params)
+            # The rewritten query has lost any "::vector" cast, so vector binds
+            # declared that way are visible only in the original SQL.
+            _convert_vector_bind_params(orig_query, params)
 
             self._apply_clob_input_sizes(cursor, query, params)
             duplicate_is_ok = ignore_dup or ignore_duplicate
@@ -1268,6 +1291,7 @@ class OracleConnection(DatabaseConnection):
         return f"INSERT 0 {n_rows}"
 
     async def fetch(self, query: str, *args: Any, timeout: float | None = None) -> list[ResultRow]:
+        orig_query = query
         query, ignore_dup, ret_cols = _rewrite_pg_to_oracle(query)
         cursor = self._conn.cursor()
         try:
@@ -1275,6 +1299,9 @@ class OracleConnection(DatabaseConnection):
             query, params = self._expand_any_lists(query, params)
 
             _convert_vector_bind_params(query, params)
+            # The rewritten query has lost any "::vector" cast, so vector binds
+            # declared that way are visible only in the original SQL.
+            _convert_vector_bind_params(orig_query, params)
 
             self._apply_clob_input_sizes(cursor, query, params)
             if ignore_dup:
@@ -1312,6 +1339,7 @@ class OracleConnection(DatabaseConnection):
             cursor.close()
 
     async def fetchrow(self, query: str, *args: Any, timeout: float | None = None) -> ResultRow | None:
+        orig_query = query
         query, ignore_dup, ret_cols = _rewrite_pg_to_oracle(query)
         cursor = self._conn.cursor()
         try:
@@ -1319,6 +1347,9 @@ class OracleConnection(DatabaseConnection):
             query, params = self._expand_any_lists(query, params)
 
             _convert_vector_bind_params(query, params)
+            # The rewritten query has lost any "::vector" cast, so vector binds
+            # declared that way are visible only in the original SQL.
+            _convert_vector_bind_params(orig_query, params)
 
             self._apply_clob_input_sizes(cursor, query, params)
             if ignore_dup:
