@@ -78,7 +78,17 @@ ORACLEDB_VERSION=26.0.1'
         DSN_QUOTED=$(python3 /tmp/build_dsn.py)
         DATABASE_URL="oracle+oracledb://HINDSIGHT_TEST:${KJS_TEST_ODB_PASSWORD}@/?dsn=${DSN_QUOTED}"
 
-        # Start container with real test database for health check
+        # Start container with real test database for health check.
+        # The image ships NO local ML models (INCLUDE_LOCAL_MODELS=false), so
+        # every provider must be named explicitly -- the built-in defaults are
+        # "local" for embeddings and reranker, which aborts startup with
+        # "sentence-transformers is not installed".
+        #
+        # Env var names are not uniform here, which is worth knowing:
+        #   LLM       -> HINDSIGHT_API_LLM_API_KEY (generic; there is no
+        #                *_LLM_OPENROUTER_API_KEY, and omitting it raises
+        #                "LLM API key is required" before startup)
+        #   embeddings/reranker -> the provider-specific *_OPENROUTER_API_KEY
         docker run -d --name hindsight-test \
           -e HINDSIGHT_API_DATABASE_BACKEND=oracle \
           -e HINDSIGHT_API_VECTOR_EXTENSION=oracle \
@@ -86,21 +96,32 @@ ORACLEDB_VERSION=26.0.1'
           -e HINDSIGHT_API_DATABASE_URL="$DATABASE_URL" \
           -e HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP=false \
           -e HINDSIGHT_API_WORKER_ENABLED=false \
+          -e HINDSIGHT_ENABLE_CP=false \
+          -e HINDSIGHT_API_LLM_PROVIDER=openrouter \
+          -e HINDSIGHT_API_LLM_API_KEY="$KJS_TEST_LLM_API_KEY" \
+          -e HINDSIGHT_API_EMBEDDINGS_PROVIDER=openrouter \
+          -e HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY="$KJS_TEST_LLM_API_KEY" \
+          -e HINDSIGHT_API_RERANKER_PROVIDER=openrouter \
+          -e HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY="$KJS_TEST_LLM_API_KEY" \
           -p 8888:8888 \
-          ghcr.io/karljsamuel/hindsight:oracle-latest
+          ${{ steps.meta.outputs.tags }}
 
-        # Wait for startup (max 60s)
-        for i in {1..30}; do
+        # Wait for startup (max 120s)
+        for i in {1..60}; do
           if curl -sf http://localhost:8888/health >/dev/null 2>&1; then
             echo "Health endpoint responded"
             break
           fi
+          if ! docker ps --format '{{.Names}}' | grep -q '^hindsight-test$'; then
+            echo "Container died"
+            docker logs hindsight-test
+            exit 1
+          fi
           sleep 2
         done
 
-        # Check process is running
-        if ! docker ps | grep -q hindsight-test; then
-          echo "Container died"
+        if ! curl -sf http://localhost:8888/health >/dev/null 2>&1; then
+          echo "Health endpoint never responded"
           docker logs hindsight-test
           exit 1
         fi
@@ -109,20 +130,12 @@ ORACLEDB_VERSION=26.0.1'
 
         # Cleanup
         docker stop hindsight-test && docker rm hindsight-test
-    - name: Push image to GHCR (only on merge to main)
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: docker/standalone/Dockerfile.oracle
-        target: oracle-full
-        platforms: ${{ matrix.platform }}
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        build-args: 'INCLUDE_LOCAL_MODELS=false
-PRELOAD_ML_MODELS=false
-ORACLEDB_VERSION=26.0.1'
+
+    # NOTE: no push step here on purpose. Publishing is publish-image.yml's job,
+    # and a per-arch push to the shared :oracle-latest tag from this workflow
+    # would race that job and can leave the tag single-arch. This workflow only
+    # builds and smoke-tests, on native amd64 (ubuntu-26.04) and arm64
+    # (ubuntu-26.04-arm) runners.
   upstream-sync:
     name: KJS Upstream Sync
     runs-on: ubuntu-26.04

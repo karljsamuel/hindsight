@@ -1,6 +1,24 @@
 # KJS Publish GHCR Image Workflow - Runs ONLY on commits to main
 # NOT manually triggerable - only triggered by push to main
-# Publishes multi-arch image with tags: latest, DDMMYYYY
+#
+# Publishing shape:
+#   Each architecture is BUILT ON ITS OWN NATIVE RUNNER (no QEMU emulation):
+#     linux/amd64 -> ubuntu-26.04
+#     linux/arm64 -> ubuntu-26.04-arm
+#   Each pushes an arch-suffixed tag:
+#     :oracle-latest-amd64        :oracle-<DDMMYYYY>-amd64
+#     :oracle-latest-arm64        :oracle-<DDMMYYYY>-arm64
+#   A third job joins those per-arch manifests into the multi-arch tags that
+#   humans actually pull:
+#     :oracle-latest               :oracle-<DDMMYYYY>
+#   Those combined tags are what `image: ghcr.io/karljsamuel/hindsight:oracle-latest`
+#   in docker-compose resolves, on both amd64 and arm64 hosts.
+#
+# Why the arch suffix matters: a single build-and-push job per architecture that
+# pushed the SAME unsuffixed tag made the two matrix jobs race, and whichever
+# finished last silently overwrote the other's architecture -- the published tag
+# was single-arch despite the job name. Suffixing removes the collision; the
+# combine job then does the only step allowed to write the shared tag.
 
 name: KJS Publish GHCR Image
 
@@ -20,14 +38,17 @@ permissions:
   packages: write
 
 jobs:
-  publish-image:
-    name: KJS Publish Multi-arch Image
+  build-arch:
+    name: KJS Build ${{ matrix.arch }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
+            arch: amd64
             runner: ubuntu-26.04
           - platform: linux/arm64
+            arch: arm64
             runner: ubuntu-26.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
@@ -44,23 +65,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate tags (latest + DDMMYYYY)
+      - name: Compute arch-suffixed tags
         id: tags
         run: |
           DATE_TAG=$(date -u +'%d%m%Y')
-          echo "tags=ghcr.io/karljsamuel/hindsight:oracle-latest,ghcr.io/karljsamuel/hindsight:oracle-${DATE_TAG}" >> $GITHUB_OUTPUT
+          REPO=ghcr.io/karljsamuel/hindsight
           echo "date_tag=${DATE_TAG}" >> $GITHUB_OUTPUT
+          echo "tags=${REPO}:oracle-latest-${{ matrix.arch }},${REPO}:oracle-${DATE_TAG}-${{ matrix.arch }}" >> $GITHUB_OUTPUT
 
-      - name: Extract metadata
+      - name: Extract labels
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/karljsamuel/hindsight
-          tags: |
-            type=raw,value=oracle-latest
-            type=raw,value=oracle-${{ steps.tags.outputs.date_tag }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.tags.outputs.date_tag }}
 
-      - name: Build and push multi-arch image
+      # No local ML models. Embeddings and reranking both resolve to OpenRouter
+      # at runtime, so torch/sentence-transformers are deliberately absent --
+      # several GB per architecture and unused by any deployment here.
+      - name: Build and push arch image
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -68,19 +92,63 @@ jobs:
           target: oracle-full
           platforms: ${{ matrix.platform }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          provenance: false
+          tags: ${{ steps.tags.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             INCLUDE_LOCAL_MODELS=false
             PRELOAD_ML_MODELS=false
             ORACLEDB_VERSION=26.0.1
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+  combine-manifest:
+    name: KJS Combine multi-arch manifest
+    needs: [build-arch]
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch manifest
+        run: |
+          DATE_TAG=$(date -u +'%d%m%Y')
+          REPO=ghcr.io/karljsamuel/hindsight
+          docker buildx imagetools create \
+            --tag "${REPO}:oracle-latest" \
+            "${REPO}:oracle-latest-amd64" \
+            "${REPO}:oracle-latest-arm64"
+          docker buildx imagetools create \
+            --tag "${REPO}:oracle-${DATE_TAG}" \
+            "${REPO}:oracle-${DATE_TAG}-amd64" \
+            "${REPO}:oracle-${DATE_TAG}-arm64"
+
+      - name: Verify combined manifest has both architectures
+        run: |
+          REPO=ghcr.io/karljsamuel/hindsight
+          DATE_TAG=$(date -u +'%d%m%Y')
+          rc=0
+          for ref in "${REPO}:oracle-latest" "${REPO}:oracle-${DATE_TAG}"; do
+            echo "=== ${ref} ==="
+            archs=$(docker buildx imagetools inspect "${ref}" --raw \
+              | grep -o '"architecture":"[a-z0-9]*"' | sort -u)
+            echo "${archs}"
+            for want in amd64 arm64; do
+              echo "${archs}" | grep -q "\"${want}\"" || { echo "MISSING ${want} in ${ref}"; rc=1; }
+            done
+          done
+          exit $rc
 
       - name: Output published tags
-        if: matrix.platform == 'linux/amd64'
         run: |
-          echo "=== Published Image Tags ==="
-          echo "ghcr.io/karljsamuel/hindsight:oracle-latest"
-          echo "ghcr.io/karljsamuel/hindsight:oracle-${{ steps.tags.outputs.date_tag }}"
+          DATE_TAG=$(date -u +'%d%m%Y')
+          REPO=ghcr.io/karljsamuel/hindsight
+          echo "=== Published Image Tags (multi-arch) ==="
+          echo "${REPO}:oracle-latest"
+          echo "${REPO}:oracle-${DATE_TAG}"
+          echo "Per-arch: oracle-latest-amd64, oracle-latest-arm64"
           echo "Platforms: linux/amd64, linux/arm64"
