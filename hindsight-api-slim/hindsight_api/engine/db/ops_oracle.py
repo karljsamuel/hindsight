@@ -117,16 +117,21 @@ class OracleOps(DataAccessOps):
         rows_data = []
         for i in range(len(fact_texts)):
             tags_value = json.loads(tags_list[i]) if tags_list[i] else []
+            # Same sentinel hazard as entities: an extracted date can be
+            # datetime.min (0001-01-01), which is truthy and would be stored
+            # verbatim. memory_units carries four such columns and all four read
+            # path, so one bad value anywhere kills recall for the bank. None
+            # means "unknown", which the column default covers.
             rows_data.append(
                 (
                     unit_ids[i],
                     bank_id,
                     fact_texts[i],
                     embeddings[i],
-                    event_dates[i],
-                    occurred_starts[i],
-                    occurred_ends[i],
-                    mentioned_ats[i],
+                    safe_entity_event_date(event_dates[i]),
+                    safe_entity_event_date(occurred_starts[i]),
+                    safe_entity_event_date(occurred_ends[i]),
+                    safe_entity_event_date(mentioned_ats[i]),
                     contexts[i],
                     fact_types[i],
                     metadata_jsons[i],

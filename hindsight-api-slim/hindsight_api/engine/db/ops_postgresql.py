@@ -219,10 +219,14 @@ class PostgreSQLOps(DataAccessOps):
             bank_id,
             fact_texts,
             embeddings,
-            event_dates,
-            occurred_starts,
-            occurred_ends,
-            mentioned_ats,
+            # Same sentinel hazard as entities: an extracted date can be
+            # datetime.min, which is truthy and would be stored verbatim.
+            # Keep both backends writing the same data so a value Oracle cannot
+            # read back never gets written in the first place.
+            [safe_entity_event_date(d) for d in event_dates],
+            [safe_entity_event_date(d) for d in occurred_starts],
+            [safe_entity_event_date(d) for d in occurred_ends],
+            [safe_entity_event_date(d) for d in mentioned_ats],
             contexts,
             fact_types,
             metadata_jsons,
