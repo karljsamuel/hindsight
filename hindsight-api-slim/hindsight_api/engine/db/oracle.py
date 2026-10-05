@@ -984,6 +984,19 @@ class OracleConnection(DatabaseConnection):
         expand_re = re.compile(r"/\*EXPAND:(\d+)\*/")
         keys_to_remove: set[str] = set()
 
+        # PostgreSQL orders by an array's position:
+        #     ORDER BY array_position($1::uuid[], id)
+        # Oracle's array_position is a JSON function, so passing the expanded list
+        # to it raises ORA-00932 (CHAR is incompatible with expected data type
+        # JSON). The same ordering is expressible over the per-element binds this
+        # function already creates, so translate it into a CASE that maps each
+        # value to its index. Recorded here rather than in the rewriter because
+        # the bind names do not exist until expansion runs.
+        array_pos_re = re.compile(
+            r"array_position\(\s*:(\d+)\s*,\s*([A-Za-z_][\w.]*)\s*\)", re.IGNORECASE
+        )
+        expanded_lists: dict[str, list[str]] = {}
+
         def _replace(m):
             param_key = m.group(1)
             val = params.get(param_key)
@@ -1015,9 +1028,23 @@ class OracleConnection(DatabaseConnection):
                 params[k] = item
                 expanded_keys.append(f":{k}")
             keys_to_remove.add(param_key)
+            expanded_lists[param_key] = expanded_keys
             return ", ".join(expanded_keys)
 
         query = expand_re.sub(_replace, query)
+
+        # Translate array_position over an expanded list into a positional CASE.
+        def _replace_array_pos(m):
+            param_key, column = m.group(1), m.group(2)
+            expanded_keys = expanded_lists.get(param_key)
+            if expanded_keys is None:
+                return m.group(0)
+            arms = " ".join(
+                f"WHEN {bind} THEN {idx}" for idx, bind in enumerate(expanded_keys)
+            )
+            return f"CASE {column} {arms} ELSE {len(expanded_keys)} END"
+
+        query = array_pos_re.sub(_replace_array_pos, query)
 
         # Expand LIKE ANY: col /*LIKE_ANY:N:col*/ → (col LIKE :p0 OR col LIKE :p1 ...)
         like_any_re = re.compile(r"(\w+)\s*/\*LIKE_ANY:(\d+):(\w+)\*/")
