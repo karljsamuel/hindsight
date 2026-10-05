@@ -89,14 +89,14 @@ _RETURNING_RE = re.compile(r"\bRETURNING\s+(?!(?:CLOB|BLOB|VARCHAR2|JSON)\b)(.+)
 _ANY_RE = re.compile(r"=\s*ANY\s*\(\s*:(\d+)\s*\)", re.IGNORECASE)
 _NOT_ALL_RE = re.compile(r"!=\s*ALL\s*\(\s*:(\d+)\s*\)", re.IGNORECASE)
 # LIKE ANY / NOT LIKE ALL — capture the column name before the operator
-_LIKE_ANY_RE = re.compile(r"(\w+)\s+LIKE\s+ANY\s*\(\s*:(\d+)\s*\)", re.IGNORECASE)
-_NOT_LIKE_ALL_RE = re.compile(r"(\w+)\s+NOT\s+LIKE\s+ALL\s*\(\s*:(\d+)\s*\)", re.IGNORECASE)
+_LIKE_ANY_RE = re.compile(r"([A-Za-z_][\w.]*)\s+LIKE\s+ANY\s*\(\s*:(\d+)\s*\)", re.IGNORECASE)
+_NOT_LIKE_ALL_RE = re.compile(r"([A-Za-z_][\w.]*)\s+NOT\s+LIKE\s+ALL\s*\(\s*:(\d+)\s*\)", re.IGNORECASE)
 
 _JSON_ARROW_TEXT_RE = re.compile(r'("?\w+"?)\s*->>\s*\'(\w+)\'')  # handles both col and "col"
 # Reserved-word columns ("trigger") are already quoted by the time this runs, so the
 # column group must accept the quoted form too — same shape as the arrow regex above.
 _JSON_HAS_KEY_RE = re.compile(r"(\"?\w+\"?)\s*\?\s*'(\w+)'")
-_JSONB_CONTAINS_RE = re.compile(r"(\w+)\s*@>\s*:(\d+)")
+_JSONB_CONTAINS_RE = re.compile(r"([A-Za-z_][\w.]*)\s*@>\s*:(\d+)")
 
 # ---------------------------------------------------------------------------
 # Argument conversion helpers
@@ -676,7 +676,7 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
         param = m.group(2)
         return f"EXISTS (SELECT 1 FROM JSON_TABLE({param}, '$[*]' COLUMNS (val VARCHAR2(256) PATH '$')) jt WHERE JSON_EXISTS({col}, '$[*]?(@ == $v)' PASSING jt.val AS \"v\"))"
 
-    query = re.sub(r"(\w+)\s*&&\s*(:\w+)", _rewrite_array_overlap, query)
+    query = re.sub(r"([A-Za-z_][\w.]*)\s*&&\s*(:\w+)", _rewrite_array_overlap, query)
 
     # PG array containment: tags @> :N → Oracle: all elements from param exist in col
     # (Override the JSONB contains regex which doesn't work for array containment)
@@ -700,7 +700,7 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
 
     # ILIKE → UPPER(...) LIKE UPPER(...)
     query = re.sub(
-        r"(\w+)\s+ILIKE\s+(:\w+)",
+        r"([A-Za-z_][\w.]*)\s+ILIKE\s+(:\w+)",
         r"UPPER(\1) LIKE UPPER(\2)",
         query,
         flags=re.IGNORECASE,
@@ -1119,7 +1119,7 @@ class OracleConnection(DatabaseConnection):
         query = array_pos_re.sub(_replace_array_pos, query)
 
         # Expand LIKE ANY: col /*LIKE_ANY:N:col*/ → (col LIKE :p0 OR col LIKE :p1 ...)
-        like_any_re = re.compile(r"(\w+)\s*/\*LIKE_ANY:(\d+):(\w+)\*/")
+        like_any_re = re.compile(r"([A-Za-z_][\w.]*)\s*/\*LIKE_ANY:(\d+):([A-Za-z_][\w.]*)\*/")
 
         def _replace_like_any(m):
             _col = m.group(1)  # redundant column ref before marker
@@ -1141,7 +1141,7 @@ class OracleConnection(DatabaseConnection):
         query = like_any_re.sub(_replace_like_any, query)
 
         # Expand NOT LIKE ALL: col /*NOT_LIKE_ALL:N:col*/ → (col NOT LIKE :p0 AND ...)
-        not_like_all_re = re.compile(r"(\w+)\s*/\*NOT_LIKE_ALL:(\d+):(\w+)\*/")
+        not_like_all_re = re.compile(r"([A-Za-z_][\w.]*)\s*/\*NOT_LIKE_ALL:(\d+):([A-Za-z_][\w.]*)\*/")
 
         def _replace_not_like_all(m):
             _col = m.group(1)
