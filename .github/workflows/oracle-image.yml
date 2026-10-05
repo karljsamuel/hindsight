@@ -89,17 +89,20 @@ ORACLEDB_VERSION=26.0.1'
         #                *_LLM_OPENROUTER_API_KEY, and omitting it raises
         #                "LLM API key is required" before startup)
         #   embeddings/reranker -> the provider-specific *_OPENROUTER_API_KEY
-        # Reference the single tag the build above actually loaded, NOT
-        # ${{ steps.meta.outputs.tags }}. metadata-action declares three tag
-        # rules, so that output is a newline-delimited list; substituted
-        # unquoted into a `run:` block bash word-splits it into three
-        # arguments, making the second one the container COMMAND and
-        # overriding the image entrypoint. The health loop below then catches
-        # the dead container and fails the job. This exact substitution was
-        # reverted once already by commit babfb81b6 -- keep it that way.
-        # `docker rmi -f ${{ steps.meta.outputs.tags }}` in the cleanup step is
-        # fine unquoted, since rmi accepts several images and tolerates
-        # missing ones.
+        # Reference the single tag the build above actually loaded, NOT the
+        # metadata action's multi-tag output. NOTE: do not write that output
+        # name using GitHub expression syntax in this comment -- Actions
+        # expands expressions before bash sees the script, so the expansion
+        # would turn the remaining comment lines into bare commands that the
+        # shell tries to execute (exit 127). Refer to it in prose instead.
+        #
+        # The tag list is newline-delimited and unquoted, so substituting it
+        # here word-splits into several arguments, making the second one the
+        # container COMMAND and overriding the image entrypoint. The health
+        # loop below then catches the dead container and fails the job. This
+        # substitution was reverted once already by commit babfb81b6 -- keep
+        # it that way. The `docker rmi -f` cleanup step is fine unquoted, since
+        # rmi accepts several images and tolerates missing ones.
         docker run -d --name hindsight-test \
           -e HINDSIGHT_API_DATABASE_BACKEND=oracle \
           -e HINDSIGHT_API_VECTOR_EXTENSION=oracle \
