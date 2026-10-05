@@ -11,7 +11,11 @@ on:
       - 'hindsight-api-slim/hindsight_api/**'
       - 'hindsight-control-plane/**'
       - 'smoketest.sh'
-      - '.github/workflows/pr-validation.yml'
+      # Any workflow change, not just this one. The previous list named only
+      # pr-validation.yml, so a PR touching nothing but another workflow file
+      # triggered no validation at all -- which is how the docker-run tag
+      # regression in oracle-image.yml merged with a fully green PR pipeline.
+      - '.github/workflows/**'
 
 concurrency:
   group: kjs-oracle-smoke-test
