@@ -89,6 +89,17 @@ ORACLEDB_VERSION=26.0.1'
         #                *_LLM_OPENROUTER_API_KEY, and omitting it raises
         #                "LLM API key is required" before startup)
         #   embeddings/reranker -> the provider-specific *_OPENROUTER_API_KEY
+        # Reference the single tag the build above actually loaded, NOT
+        # ${{ steps.meta.outputs.tags }}. metadata-action declares three tag
+        # rules, so that output is a newline-delimited list; substituted
+        # unquoted into a `run:` block bash word-splits it into three
+        # arguments, making the second one the container COMMAND and
+        # overriding the image entrypoint. The health loop below then catches
+        # the dead container and fails the job. This exact substitution was
+        # reverted once already by commit babfb81b6 -- keep it that way.
+        # `docker rmi -f ${{ steps.meta.outputs.tags }}` in the cleanup step is
+        # fine unquoted, since rmi accepts several images and tolerates
+        # missing ones.
         docker run -d --name hindsight-test \
           -e HINDSIGHT_API_DATABASE_BACKEND=oracle \
           -e HINDSIGHT_API_VECTOR_EXTENSION=oracle \
@@ -104,7 +115,7 @@ ORACLEDB_VERSION=26.0.1'
           -e HINDSIGHT_API_RERANKER_PROVIDER=openrouter \
           -e HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY="$KJS_TEST_LLM_API_KEY" \
           -p 8888:8888 \
-          ${{ steps.meta.outputs.tags }}
+          ghcr.io/karljsamuel/hindsight:oracle-latest
 
         # Wait for startup (max 120s)
         for i in {1..60}; do
