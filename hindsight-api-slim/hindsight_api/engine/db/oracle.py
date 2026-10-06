@@ -1383,10 +1383,22 @@ class OracleConnection(DatabaseConnection):
                 # row would otherwise pin a later long row to VARCHAR2 and Oracle
                 # rejects it with ORA-01461.
                 if column_types:
-                    for i, ct in enumerate(column_types):
-                        if ct == "clob[]" and i < (n_cols if n_cols is not None else len(column_types)):
-                            clob_keys.add(str(i + 1))
-                if clob_keys:
+                    oracledb = _import_oracledb()
+                    input_sizes: dict[str, Any] = {}
+                    limit = n_cols if n_cols is not None else len(column_types)
+                    for i, ct in enumerate(column_types[:limit]):
+                        if ct == "clob[]":
+                            input_sizes[str(i + 1)] = oracledb.DB_TYPE_CLOB
+                        elif ct == "timestamptz[]":
+                            # Oracle infers NULL as VARCHAR2 for an array bind.
+                            # A NULL first row can pin the whole executemany
+                            # column to CHAR, making a later timestamp fail.
+                            input_sizes[str(i + 1)] = oracledb.DB_TYPE_TIMESTAMP_TZ
+                    for key in clob_keys:
+                        input_sizes.setdefault(key, oracledb.DB_TYPE_CLOB)
+                    if input_sizes:
+                        cursor.setinputsizes(**input_sizes)
+                elif clob_keys:
                     cursor.setinputsizes(**dict.fromkeys(clob_keys, _import_oracledb().DB_TYPE_CLOB))
                 try:
                     await cursor.executemany(query, converted_dicts)

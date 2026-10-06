@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ....config import get_config
+from ...db.ops import safe_entity_event_date
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ...consolidation.consolidator import _TemporalBounds
@@ -125,10 +126,10 @@ async def fold_sources_into_observation(
         source_memory_ids,
         uuid.UUID(observation_id),
         expected_text,
-        bounds.event_date,
-        bounds.occurred_start,
-        bounds.occurred_end,
-        bounds.mentioned_at,
+        safe_entity_event_date(bounds.event_date),
+        safe_entity_event_date(bounds.occurred_start),
+        safe_entity_event_date(bounds.occurred_end),
+        safe_entity_event_date(bounds.mentioned_at),
     )
     return folded is not None
 
@@ -250,10 +251,10 @@ async def rewrite_observation(
         source_memory_ids,
         len(source_memory_ids),
         uuid.UUID(observation_id),
-        bounds.event_date,
-        bounds.occurred_start,
-        bounds.occurred_end,
-        bounds.mentioned_at,
+        safe_entity_event_date(bounds.event_date),
+        safe_entity_event_date(bounds.occurred_start),
+        safe_entity_event_date(bounds.occurred_end),
+        safe_entity_event_date(bounds.mentioned_at),
         tags,
     )
     return updated_rows != 0
@@ -324,10 +325,10 @@ async def insert_observation(
         embedding,
         source_memory_ids,
         tags,
-        event_date,
-        occurred_start,
-        occurred_end,
-        mentioned_at,
+        safe_entity_event_date(event_date) or datetime.now(UTC),
+        safe_entity_event_date(occurred_start),
+        safe_entity_event_date(occurred_end),
+        safe_entity_event_date(mentioned_at),
     )
 
     # Populate observation_sources junction table (Oracle only — PG uses native array ops).

@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from ...db.ops import nullable_year1_timestamp_sql
 from ...search.tags import TagsMatch, build_tag_filter_clause, tag_filter_active
 from ..base import BankContentCounts, MemoryLocation, StoredMemory, TypedMemoryScope
 from .curation import visible_entity_stats_sql
@@ -393,7 +394,7 @@ async def entity_graph(
         SELECT ec.entity_id_1,
                ec.entity_id_2,
                ec.cooccurrence_count,
-               ec.last_cooccurred,
+               {nullable_year1_timestamp_sql('ec.last_cooccurred')} AS last_cooccurred,
                e1.canonical_name AS name_1,
                e1.mention_count  AS mention_count_1,
                e2.canonical_name AS name_2,
@@ -496,7 +497,10 @@ async def get_entity_detail(
         # Inner join on the stats: no matching memory, no row.
         entity_row = await conn.fetchrow(
             f"""
-            SELECT e.id, e.canonical_name, s.mention_count, s.first_seen, s.last_seen, e.metadata
+            SELECT e.id, e.canonical_name, s.mention_count,
+                   {nullable_year1_timestamp_sql('s.first_seen')} AS first_seen,
+                   {nullable_year1_timestamp_sql('s.last_seen')} AS last_seen,
+                   e.metadata
             FROM {fq_table("entities")} e
             JOIN ({visible_entity_stats_sql(fq_table, built.sql)}) s ON s.entity_id = e.id
             WHERE e.bank_id = $1 AND e.id = ${len(built.params) + 2}
@@ -508,7 +512,10 @@ async def get_entity_detail(
     else:
         entity_row = await conn.fetchrow(
             f"""
-            SELECT id, canonical_name, mention_count, first_seen, last_seen, metadata
+            SELECT id, canonical_name, mention_count,
+                   {nullable_year1_timestamp_sql('first_seen')} AS first_seen,
+                   {nullable_year1_timestamp_sql('last_seen')} AS last_seen,
+                   metadata
             FROM {fq_table("entities")}
             WHERE bank_id = $1 AND id = $2
             """,

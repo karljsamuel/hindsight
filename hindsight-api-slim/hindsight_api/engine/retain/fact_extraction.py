@@ -1835,6 +1835,8 @@ def _build_user_message(
 
     if event_date is not None:
         event_date = parse_datetime_flexible(event_date)
+
+    if event_date is not None:
         event_date_str = f"{event_date.strftime('%A, %B %d, %Y')} ({event_date.isoformat()})"
     else:
         event_date_str = "Unknown"
@@ -3559,14 +3561,23 @@ def _collapse_to_verbatim(facts: list[ExtractedFactType], chunks: list[ChunkMeta
     return result
 
 
-def _parse_datetime(date_str: str):
-    """Parse ISO datetime string."""
+def _parse_datetime(date_str: str) -> datetime | None:
+    """Parse an ISO datetime string, refusing a year-0001 sentinel.
+
+    Returns None for an unparseable string (as before) and also for a year-0001
+    date: that value round-trips through parse fine but Oracle cannot read it
+    back, so it must never reach a timestamp column. Callers already treat None
+    as "no date known".
+    """
     from dateutil import parser as date_parser
 
     try:
-        return date_parser.isoparse(date_str)
+        parsed = date_parser.isoparse(date_str)
     except Exception:
         return None
+    if parsed.year < 2:
+        return None
+    return parsed
 
 
 def _convert_causal_relations(
@@ -3612,13 +3623,18 @@ def _add_temporal_offsets(facts: list[ExtractedFactType], contents: list[RetainC
         # Use absolute position across all facts to ensure uniqueness across different contents
         offset = timedelta(seconds=i * SECONDS_PER_FACT)
 
-        # Apply offset to all temporal fields (handle both datetime objects and ISO strings)
+        # Apply offset to all temporal fields (handle both datetime objects and ISO strings).
+        # The parser refuses year-0001 dates and returns None; drop the field rather
+        # than stamping a sentinel onto the fact.
         if fact.occurred_start:
-            fact.occurred_start = parse_datetime_flexible(fact.occurred_start) + offset
+            parsed_start = parse_datetime_flexible(fact.occurred_start)
+            fact.occurred_start = parsed_start + offset if parsed_start is not None else None
         if fact.occurred_end:
-            fact.occurred_end = parse_datetime_flexible(fact.occurred_end) + offset
+            parsed_end = parse_datetime_flexible(fact.occurred_end)
+            fact.occurred_end = parsed_end + offset if parsed_end is not None else None
         if fact.mentioned_at:
-            fact.mentioned_at = parse_datetime_flexible(fact.mentioned_at) + offset
+            parsed_mentioned = parse_datetime_flexible(fact.mentioned_at)
+            fact.mentioned_at = parsed_mentioned + offset if parsed_mentioned is not None else None
 
 
 def _inject_label_tags(facts: list[ExtractedFactType], config) -> None:

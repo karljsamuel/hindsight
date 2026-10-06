@@ -1,58 +1,20 @@
-"""Remove sentinel entity timestamps that break Oracle timestamp decoding.
+"""Repair Python-incompatible year-0001 timestamps after entity resolution.
 
-A per-entity ``event_date`` extracted by the LLM can be ``datetime.min``
-(0001-01-01). Because ``datetime.min`` is truthy it slipped past the
-``event_date or now()`` guard in ``bulk_insert_entities`` and was written
-straight into the NOT NULL ``first_seen`` / ``last_seen`` columns.
+LLM date extraction can return ``datetime.min`` (0001-01-01). It is truthy,
+so every fallback of the form ``event_date or now()`` lets it through. Oracle
+stores it, but python-oracledb cannot convert the year back: Julian-day
+arithmetic lands on -1, outside Python's datetime range. A single entity row
+then kills entity resolution/recall for its bank.
 
-Both databases accept the value. Oracle cannot *use* it: any statement that has
-to materialise it fails with
+The writer now rejects only year 0001 via ``safe_entity_event_date``; valid
+historical dates (including pre-1970) are preserved. This migration repairs
+sentinels that were written by older builds.
 
-    ORA-01843: An invalid month was specified
-
-(usually surfaced as ORA-12801 through a parallel query worker), and
-python-oracledb fails to read it back the same way --
-
-    ValueError: year -1 is out of range
-
-One bad row is enough to abort every entity read for the bank, so recall,
-``resolve_entities`` and therefore all of consolidation and ``batch_retain``
-fail together.
-
-The writer side is fixed by ``safe_entity_event_date`` (see engine/db/ops.py).
-This revision clears the rows that were already written.
-
-Oracle: DELETE, not UPDATE
---------------------------
-An UPDATE of the timestamp column is impossible on these rows -- the old value
-must be materialised to build the update. Verified on the affected schema:
-
-    UPDATE entities SET first_seen = <epoch>
-        WHERE TO_CHAR(first_seen,'YYYY') = '0001'      -> ORA-12801
-    UPDATE entities SET first_seen = <epoch> WHERE ROWNUM = 1
-                                                        -> ORA-01843
-    BEGIN FOR r IN (...) LOOP UPDATE ... END LOOP; END; -> ORA-01843
-    DELETE FROM entities WHERE TO_CHAR(first_seen,'YYYY') = '0001'
-                                                        -> OK, 9 rows
-
-Deleting is also the semantically right call. Every affected row is an orphan:
-mention_count 0 and no ``unit_entities`` rows -- junk left by a sentinel that
-never became a real mention. The mention_count guard makes that explicit, so a
-deployment where a sentinel *did* become referenced keeps the row rather than
-silently dropping a live entity.
-
-The predicate uses TO_CHAR deliberately: rendering the year to text never
-materialises the value, so it avoids the conversion fault. Comparisons against a
-typed literal do hit it, which is why
-``WHERE first_seen < TIMESTAMP WITH TIME ZONE '...'`` cannot be used at all
-(ORA-03048) and the CAST form still fails (ORA-12801). ``EXTRACT(YEAR ...)``
-also fails, and silently matches nothing.
-
-PostgreSQL: UPDATE, not DELETE
-------------------------------
-PostgreSQL represents 0001-01-01 fine, so there the value is repairable and an
-UPDATE preserves the entity even when it is referenced. Same predicate,
-deliberately different repair -- the backends genuinely differ here.
+PostgreSQL can UPDATE the values to the epoch. Oracle cannot UPDATE a corrupt
+timestamp at all (ORA-01843, typically wrapped as ORA-12801), so its migration
+deletes only orphan entity rows (mention_count 0 and no unit_entities refs) and
+its derived co-occurrence rows. Referenced entity timestamps are guarded on the
+read path, and will be replaced with the next real mention date where possible.
 
 Revision ID: s4t5u6v7w8x9
 Revises: e5b1c7d3a902
@@ -70,11 +32,6 @@ down_revision: str | Sequence[str] | None = "e5b1c7d3a902"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-# A row carrying the sentinel is an orphan by construction: the sentinel was
-# written by an extraction that never became a real mention. Refuse to touch
-# anything with a mention, so a referenced entity can never be dropped here.
-_UNREFERENCED = "mention_count <= 0"
-
 
 def _pg_schema_prefix() -> str:
     """Schema-qualifier for PostgreSQL multi-tenant migration runs."""
@@ -84,14 +41,21 @@ def _pg_schema_prefix() -> str:
 
 def _pg_upgrade() -> None:
     schema = _pg_schema_prefix()
-    op.execute(
-        f"UPDATE {schema}entities SET first_seen = TIMESTAMPTZ '1970-01-01 00:00:00+00' "
-        f"WHERE TO_CHAR(first_seen, 'YYYY') = '0001' AND {_UNREFERENCED}"
-    )
-    op.execute(
-        f"UPDATE {schema}entities SET last_seen = TIMESTAMPTZ '1970-01-01 00:00:00+00' "
-        f"WHERE TO_CHAR(last_seen, 'YYYY') = '0001' AND {_UNREFERENCED}"
-    )
+    # PostgreSQL can represent year 0001, so preserve entities and memory rows
+    # while replacing only the broken sentinel with the neutral epoch floor.
+    for table, col in (
+        ("entities", "first_seen"),
+        ("entities", "last_seen"),
+        ("entity_cooccurrences", "last_cooccurred"),
+        ("memory_units", "event_date"),
+        ("memory_units", "occurred_start"),
+        ("memory_units", "occurred_end"),
+        ("memory_units", "mentioned_at"),
+    ):
+        op.execute(
+            f"UPDATE {schema}{table} SET {col} = TIMESTAMPTZ '1970-01-01 00:00:00+00' "
+            f"WHERE TO_CHAR({col}, 'YYYY') = '0001'"
+        )
 
 
 def _pg_downgrade() -> None:
@@ -101,13 +65,27 @@ def _pg_downgrade() -> None:
 
 
 def _oracle_upgrade() -> None:
-    # Oracle migrations run with CURRENT_SCHEMA set to each tenant, so the table
-    # name intentionally stays unqualified here.
+    # Oracle migrations run with CURRENT_SCHEMA set to each tenant, so table names
+    # intentionally stay unqualified here.
+    #
+    # Oracle cannot UPDATE a year-0001 timestamp at all: evaluating the old value
+    # in the update fails with ORA-01843 (usually wrapped as ORA-12801). Delete
+    # only sentinel entity rows that are genuine orphans. Keep any entity with a
+    # mention or unit_entities posting; entity reads project year 0001 to NULL,
+    # and its writer replaces the date on the next mention.
     op.execute(
         "DELETE FROM entities "
-        "WHERE TO_CHAR(first_seen, 'YYYY') = '0001' "
-        "AND TO_CHAR(last_seen, 'YYYY') = '0001' "
-        f"AND {_UNREFERENCED}"
+        "WHERE (TO_CHAR(first_seen, 'YYYY') = '0001' "
+        "OR TO_CHAR(last_seen, 'YYYY') = '0001') "
+        "AND mention_count <= 0 "
+        "AND NOT EXISTS (SELECT 1 FROM unit_entities ue WHERE ue.entity_id = entities.id)"
+    )
+
+    # Co-occurrence timestamps are derived cache/recency data; they can be
+    # regenerated from unit_entities and do not own any content.
+    op.execute(
+        "DELETE FROM entity_cooccurrences "
+        "WHERE TO_CHAR(last_cooccurred, 'YYYY') = '0001'"
     )
 
 

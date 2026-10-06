@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator, Callable
 from datetime import datetime
 from typing import Any
 
+from ...db.ops import safe_entity_event_date
 from ...causal_links import CAUSAL_LINK_TYPES
 from ...chunk_ids import build_chunk_id, parse_chunk_id
 from ...metadata_utils import as_string_metadata
@@ -572,14 +573,18 @@ async def import_observations(
                         bank_id,
                     )
                 if obs.event_date is not None:
-                    # insert_facts_batch derives event_date for normal writes;
-                    # transfer restores the source value carried by the archive.
-                    await conn.execute(
-                        f"UPDATE {fq_table('memory_units')} SET event_date = $1 WHERE id = $2 AND bank_id = $3",
-                        obs.event_date,
-                        observation_uuid,
-                        bank_id,
-                    )
+                    # Restore only a representable archive date. An older or
+                    # hand-edited archive can carry datetime.min, and Oracle cannot
+                    # read that year back; the base insert has already supplied a
+                    # safe event_date (or column default), so keep it instead.
+                    restored_event_date = safe_entity_event_date(obs.event_date)
+                    if restored_event_date is not None:
+                        await conn.execute(
+                            f"UPDATE {fq_table('memory_units')} SET event_date = $1 WHERE id = $2 AND bank_id = $3",
+                            restored_event_date,
+                            observation_uuid,
+                            bank_id,
+                        )
                 source_uuids = [uuid.UUID(s) for s in sources]
                 all_source_ids.update(source_uuids)
                 await _link_observation_sources(

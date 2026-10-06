@@ -11879,9 +11879,13 @@ class MemoryEngine(MemoryEngineInterface):
 
         def _parse_edit_date(value: str | None) -> datetime | None:
             # "" clears to NULL; an ISO date/datetime parses (UTC if naive).
+            # A year-0001 date is refused: it parses but Oracle cannot read it back,
+            # and the edit path would write it straight into occurred_start/end.
             if not value:
                 return None
             dt = datetime.fromisoformat(value)
+            if dt.year < 2:
+                return None
             return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
         doing_edit = any(

@@ -381,23 +381,39 @@ def _count_delta_content_tokens(delta_contents: list["RetainContent"]) -> int:
     return total
 
 
-def parse_datetime_flexible(value: Any) -> datetime:
+def parse_datetime_flexible(value: Any) -> datetime | None:
     """
     Parse a datetime value that could be either a datetime object or an ISO string.
 
     This handles datetime values from both direct Python calls and deserialized JSON
     (where datetime objects are serialized as ISO strings).
 
+    A year-0001 date is refused and returns None. Such a value parses cleanly but
+    Oracle cannot read it back -- python-oracledb's Julian-day conversion lands
+    outside Python's representable datetime range -- so a single one poisons every
+    later read for its bank. Year 0001 is sentinel-shaped (a degenerate parse, or
+    an LLM emitting "0001" literally), never a real event date, so the boundary
+    treats it as "no date known" rather than letting it reach storage.
+
     Args:
         value: Either a datetime object or an ISO format string
 
     Returns:
-        datetime object (timezone-aware)
+        timezone-aware datetime, or None when the value is a year-0001 sentinel
 
     Raises:
         TypeError: If value is neither datetime nor string
         ValueError: If string is not a valid ISO datetime
     """
+    parsed = _parse_datetime_flexible_inner(value)
+    if parsed is not None and parsed.year < 2:
+        # Returned as "unknown" so callers apply their own no-date fallback.
+        # Never propagated: see the docstring for why it cannot be stored.
+        return None
+    return parsed
+
+
+def _parse_datetime_flexible_inner(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         # Ensure timezone-aware
         if value.tzinfo is None:

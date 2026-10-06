@@ -8,7 +8,7 @@ columns can't appear in GROUP BY).
 import json
 import uuid as uuid_mod
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 
 from .base import DatabaseConnection
 from .ops import (
@@ -128,7 +128,7 @@ class OracleOps(DataAccessOps):
                     bank_id,
                     fact_texts[i],
                     embeddings[i],
-                    safe_entity_event_date(event_dates[i]),
+                    safe_entity_event_date(event_dates[i]) or datetime.now(UTC),
                     safe_entity_event_date(occurred_starts[i]),
                     safe_entity_event_date(occurred_ends[i]),
                     safe_entity_event_date(mentioned_ats[i]),
@@ -147,7 +147,7 @@ class OracleOps(DataAccessOps):
                     attachment_ids_list[i] or "[]",
                 )
             )
-        await conn.executemany(
+        await cast(Any, conn).executemany(
             f"""
             INSERT INTO {table} (id, bank_id, text, embedding, event_date, occurred_start,
                 occurred_end, mentioned_at, context, fact_type, metadata, chunk_id, document_id,
@@ -155,6 +155,13 @@ class OracleOps(DataAccessOps):
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             """,
             rows_data,
+            # positions 5-8: event_date, occurred_start/end, mentioned_at
+            column_types=(
+                ["text[]"] * 4
+                + ["timestamptz[]"] * 4
+                + ["text[]"] * 9
+            ),
+            n_cols=17,
         )
         return unit_ids
 
