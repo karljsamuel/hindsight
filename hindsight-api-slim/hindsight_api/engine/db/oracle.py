@@ -140,6 +140,88 @@ _JSONB_CONTAINS_RE = re.compile(r"([A-Za-z_][\w.]*)\s*@>\s*:(\d+)")
 
 _UUID_STR_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 
+# INSERT INTO <table> (<col list>) VALUES  -- the column list is flat, so [^()]
+# is enough; the VALUES expression list is scanned separately for balance.
+_INSERT_COLS_VALUES_RE = re.compile(
+    r"\bINSERT\s+INTO\s+[A-Za-z_][\w.\"]*\s*\(([^()]*)\)\s*VALUES\s*",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _matching_paren_end(sql: str, open_idx: int) -> int | None:
+    """Index just past the ')' matching the '(' at `open_idx`, or None."""
+    depth = 0
+    for i in range(open_idx, len(sql)):
+        ch = sql[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return None
+
+
+def _uuid_bind_indices(query: str) -> set[int] | None:
+    """1-based bind indices that provably target a UUID (RAW(16)) column.
+
+    Returns None when the statement cannot be analysed confidently, which means
+    "keep the existing behaviour" -- so this is strictly additive and cannot
+    regress a statement it does not understand.
+
+    Why this is needed: a UUID written as a string must be converted to bytes
+    for a RAW(16) column, because Oracle will not implicitly convert the dashed
+    form. The same conversion applied to a VARCHAR2 column is a hard failure
+    (ORA-00932: expression is of data type CHAR, incompatible with expected
+    data type JSON/RAW). Deciding by value alone cannot tell the two apart --
+    `operation_id` is RAW(16) while `bank_id` is VARCHAR2(256) in every table,
+    and both accept UUID-shaped text. The target column decides it.
+    """
+    found: set[int] = set()
+
+    def is_uuid_col(name: str) -> bool:
+        c = name.strip().strip('"').lower()
+        return c in _UUID_COL_EXACT or c.endswith(_UUID_COL_SUFFIXES)
+
+    # INSERT INTO t (c1, c2, ...) VALUES (:1, :2, ...)
+    m = _INSERT_COLS_VALUES_RE.search(query)
+    if m:
+        end = _matching_paren_end(query, m.end())
+        if end is not None:
+            cols = [c.strip() for c in _split_respecting_parens(m.group(1))]
+            exprs = _split_respecting_parens(query[m.end() + 1 : end - 1])
+            if cols and len(cols) == len(exprs):
+                for col, expr in zip(cols, exprs):
+                    if not is_uuid_col(col):
+                        continue
+                    for b in re.finditer(r":(\d+)\b", expr):
+                        found.add(int(b.group(1)))
+
+    # col = :N  /  col != :N  /  col <> :N  /  col IS NOT DISTINCT FROM :N
+    for m2 in re.finditer(
+        r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:<>|!=|<=>|=)\s*:(\d+)\b", query
+    ):
+        if is_uuid_col(m2.group(1)):
+            found.add(int(m2.group(2)))
+
+    # :N = col
+    for m3 in re.finditer(
+        r":(\d+)\s*(?:<>|!=|<=>|=)\s*([A-Za-z_][A-Za-z0-9_]*)\b", query
+    ):
+        if is_uuid_col(m3.group(2)):
+            found.add(int(m3.group(1)))
+
+    # col != ALL(:N)  /  col = ANY(:N)  -- array comparisons on UUID columns
+    for m4 in re.finditer(
+        r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:<>|!=|=)\s*(?:ALL|ANY)\s*\(\s*:(\d+)\b",
+        query,
+        re.IGNORECASE,
+    ):
+        if is_uuid_col(m4.group(1)):
+            found.add(int(m4.group(2)))
+
+    return found
+
 
 def _convert_arg(value: Any) -> Any:
     """Convert a single Python value to an Oracle-compatible bind value.
@@ -171,9 +253,32 @@ def _convert_arg(value: Any) -> Any:
     return value
 
 
-def _convert_args(args: tuple[Any, ...]) -> tuple[Any, ...]:
+def _convert_arg_for_bind(value: Any, index: int, uuid_binds: set[int] | None) -> Any:
+    """_convert_arg, but a UUID-shaped *string* becomes bytes only when bind
+    `index` is known to target a UUID column.
+
+    `uuid_binds is None` means the statement was not analysed, so the previous
+    unconditional behaviour is kept. A `uuid.UUID` object is always converted:
+    it can only have come from a RAW column, since that is how those read back.
+    """
+    if (
+        uuid_binds is not None
+        and isinstance(value, str)
+        and _UUID_STR_RE.match(value)
+        and index not in uuid_binds
+    ):
+        # Targets a VARCHAR2 column (bank_id, document_id, chunk_id, ...).
+        # Leave it as text; converting would bind RAW bytes to VARCHAR2.
+        return value
+    return _convert_arg(value)
+
+
+def _convert_args(args: tuple[Any, ...], query: str | None = None) -> tuple[Any, ...]:
     """Convert a tuple of Python values to Oracle-compatible bind values."""
-    return tuple(_convert_arg(a) for a in args)
+    uuid_binds = _uuid_bind_indices(query) if query else None
+    return tuple(
+        _convert_arg_for_bind(a, i + 1, uuid_binds) for i, a in enumerate(args)
+    )
 
 
 # Oracle's numeric server error code for "unique constraint violated"
@@ -289,18 +394,48 @@ def _convert_vector_bind_params(
             params[key] = array.array("f", (float(x) for x in value))
 
 
-def _convert_args_list(args_list: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+def _convert_args_list(
+    args_list: list[tuple[Any, ...]], query: str | None = None
+) -> list[tuple[Any, ...]]:
     """Convert a list of tuples for executemany."""
-    return [_convert_args(row) for row in args_list]
+    return [_convert_args(row, query) for row in args_list]
 
 
 # ---------------------------------------------------------------------------
 # Row conversion helpers (Oracle → Python)
 # ---------------------------------------------------------------------------
 
-# Column names that are known to contain UUIDs stored as RAW(16)
-_UUID_COL_SUFFIXES = ("_id", "_uuid")
-_UUID_COL_EXACT = {"id", "internal_id"}
+# Column names that are known to contain UUIDs stored as RAW(16). Taken from
+# the live schema via ALL_TAB_COLUMNS rather than from a suffix rule.
+#
+# The previous rule -- exact {"id", "internal_id"} or any name ending in "_id"
+# -- also matched 32 columns that are NOT RAW: every BANK_ID is VARCHAR2(256),
+# DOCUMENTS.ID is VARCHAR2(512), CHUNK_ID/DOCUMENT_ID are VARCHAR2(1024),
+# SERIALIZATION_KEY is VARCHAR2(16000), and OBSERVATION_HISTORY.ID and
+# MENTAL_MODEL_HISTORY.ID are NUMBER(22). Any plain 32-character hex string in
+# those columns was therefore silently converted into a uuid.UUID on read.
+#
+# Measured against the schema, the old rule had 32 false positives and 0 false
+# negatives, so narrowing it can only remove wrong conversions.
+#
+# Residual: `id` is RAW(16) in six tables (AUDIT_LOG, DIRECTIVES, ENTITIES,
+# INVALIDATED_MEMORY_UNITS, MEMORY_UNITS, WEBHOOKS) but VARCHAR2 or NUMBER in
+# five others (DOCUMENTS, KNOWLEDGE_PAGES, MENTAL_MODELS, OBSERVATION_HISTORY,
+# MENTAL_MODEL_HISTORY). A bare column name cannot distinguish them; doing so
+# needs the source table, which this helper is not given. `id` stays in the set
+# because dropping it would stop genuine RAW ids from converting at all.
+_UUID_COL_SUFFIXES = ("_uuid",)
+_UUID_COL_EXACT = {
+    "id",
+    "internal_id",
+    "operation_id",
+    "entity_id",
+    "unit_id",
+    "observation_id",
+    "source_id",
+    "from_unit_id",
+    "to_unit_id",
+}
 
 # Columns that store JSON arrays/objects as CLOB in Oracle and need deserialization
 _JSON_COL_NAMES = {
@@ -1047,7 +1182,11 @@ class OracleConnection(DatabaseConnection):
     # -- helpers ----------------------------------------------------------
 
     def _make_bind_params(
-        self, cursor: Any, args: tuple[Any, ...], returning_cols: list[str] | None
+        self,
+        cursor: Any,
+        args: tuple[Any, ...],
+        returning_cols: list[str] | None,
+        query: str | None = None,
     ) -> dict[str, Any] | None:
         """Build bind params as a dict (named binding).
 
@@ -1060,7 +1199,7 @@ class OracleConnection(DatabaseConnection):
         that would otherwise bind as VARCHAR2.
         """
         oracledb = _import_oracledb()
-        converted = _convert_args(args) if args else ()
+        converted = _convert_args(args, query) if args else ()
 
         if not converted and returning_cols is None:
             return None
@@ -1400,7 +1539,7 @@ class OracleConnection(DatabaseConnection):
         query, ignore_dup, ret_cols = _rewrite_pg_to_oracle(query)
         cursor = self._conn.cursor()
         try:
-            params = self._make_bind_params(cursor, args, ret_cols)
+            params = self._make_bind_params(cursor, args, ret_cols, query)
             query, params = self._expand_any_lists(query, params)
 
             _convert_vector_bind_params(query, params)
@@ -1445,7 +1584,7 @@ class OracleConnection(DatabaseConnection):
         n_cols: int | None = None,
     ) -> None:
         query, ignore_dup, _ = _rewrite_pg_to_oracle(query)
-        converted = _convert_args_list(args)
+        converted = _convert_args_list(args, query)
         cursor = self._conn.cursor()
         try:
             if ignore_dup:
@@ -1535,7 +1674,7 @@ class OracleConnection(DatabaseConnection):
         query, ignore_dup, ret_cols = _rewrite_pg_to_oracle(query)
         cursor = self._conn.cursor()
         try:
-            params = self._make_bind_params(cursor, args, ret_cols)
+            params = self._make_bind_params(cursor, args, ret_cols, query)
             query, params = self._expand_any_lists(query, params)
 
             _convert_vector_bind_params(query, params)
@@ -1583,7 +1722,7 @@ class OracleConnection(DatabaseConnection):
         query, ignore_dup, ret_cols = _rewrite_pg_to_oracle(query)
         cursor = self._conn.cursor()
         try:
-            params = self._make_bind_params(cursor, args, ret_cols)
+            params = self._make_bind_params(cursor, args, ret_cols, query)
             query, params = self._expand_any_lists(query, params)
 
             _convert_vector_bind_params(query, params)
@@ -1630,7 +1769,7 @@ class OracleConnection(DatabaseConnection):
         query, ignore_dup, ret_cols = _rewrite_pg_to_oracle(query)
         cursor = self._conn.cursor()
         try:
-            params = self._make_bind_params(cursor, args, ret_cols)
+            params = self._make_bind_params(cursor, args, ret_cols, query)
             query, params = self._expand_any_lists(query, params)
             self._apply_clob_input_sizes(cursor, query, params)
             if ignore_dup:
