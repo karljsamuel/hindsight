@@ -198,6 +198,63 @@ assert index_type_keyword('oracle') == 'hnsw'
 print('✅ Oracle vector index config correct')
 "
 
+# Test UUID bind-type resolution
+#
+# Asserts the contract directly, because a behavioural smoke run cannot see it:
+# both amd64 and arm64 build+smoke passed while a defect sat here. Deciding a
+# bind's type from the value alone bound RAW bytes to VARCHAR2 columns
+# (ORA-00932), and reading a qualified `documents.id` as the bare name `id`
+# reintroduced exactly that.
+echo "Testing UUID bind-type resolution..."
+docker exec "$CONTAINER_NAME" python3 -c "
+import sys
+from hindsight_api.engine.db import oracle as ora
+
+UID = '3f2504e0-4f89-41d3-9a0c-0305e82c3301'
+failures = []
+
+def check(label, got, want):
+    if got != want:
+        failures.append('%s: got %r, want %r' % (label, got, want))
+
+# id is RAW(16) in six tables but VARCHAR2/NUMBER in five, so a qualified
+# reference must resolve its table rather than fall back to the bare name.
+check('qualified documents.id',
+      ora._uuid_bind_indices('SELECT 1 FROM documents d WHERE d.id = :1'), set())
+check('qualified documents.id, full name',
+      ora._uuid_bind_indices('SELECT 1 FROM documents WHERE documents.id = :1'), set())
+check('qualified memory_units.id',
+      ora._uuid_bind_indices('SELECT 1 FROM memory_units m WHERE m.id = :1'), {1})
+check('INSERT documents (id, ...)',
+      ora._uuid_bind_indices('INSERT INTO documents (id, bank_id) VALUES (:1, :2)'), set())
+check('INSERT memory_units (id, ...)',
+      ora._uuid_bind_indices('INSERT INTO memory_units (id, bank_id) VALUES (:1, :2)'), {1})
+check('unknown table id declines',
+      ora._uuid_bind_indices('INSERT INTO nope (id, bank_id) VALUES (:1, :2)'), set())
+
+# Columns that are RAW everywhere need no table.
+check('operation_id',
+      ora._uuid_bind_indices('SELECT 1 FROM async_operations ao WHERE ao.operation_id = :1'), {1})
+check('bank_id is never a UUID',
+      ora._uuid_bind_indices('SELECT 1 FROM banks WHERE bank_id = :1'), set())
+check('document_id is never a UUID',
+      ora._uuid_bind_indices('SELECT 1 FROM memory_units m WHERE m.document_id = :1'), set())
+
+# The values that actually reach the driver.
+v = ora._convert_args((UID,), 'SELECT 1 FROM documents d WHERE d.id = :1')[0]
+check('VARCHAR2 target binds text', isinstance(v, str), True)
+v = ora._convert_args((UID,), 'SELECT 1 FROM memory_units m WHERE m.id = :1')[0]
+check('RAW target binds bytes', isinstance(v, bytes), True)
+v = ora._convert_args((UID,), 'SELECT 1 FROM banks WHERE bank_id = :1')[0]
+check('bank_id binds text', isinstance(v, str), True)
+
+if failures:
+    for f in failures:
+        print('❌ FAILED ' + f)
+    sys.exit(1)
+print('✅ UUID bind types resolve per column')
+"
+
 # Test migration functions
 echo "Testing migration functions..."
 docker exec "$CONTAINER_NAME" python3 -c "

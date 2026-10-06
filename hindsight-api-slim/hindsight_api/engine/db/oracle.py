@@ -142,8 +142,9 @@ _UUID_STR_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 
 # INSERT INTO <table> (<col list>) VALUES  -- the column list is flat, so [^()]
 # is enough; the VALUES expression list is scanned separately for balance.
+# The table is captured because `id` cannot be classified without it.
 _INSERT_COLS_VALUES_RE = re.compile(
-    r"\bINSERT\s+INTO\s+[A-Za-z_][\w.\"]*\s*\(([^()]*)\)\s*VALUES\s*",
+    r"\bINSERT\s+INTO\s+([A-Za-z_][\w.\"]*)\s*\(([^()]*)\)\s*VALUES\s*",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -162,6 +163,68 @@ def _matching_paren_end(sql: str, open_idx: int) -> int | None:
     return None
 
 
+# Tables whose `id` column is RAW(16). Elsewhere `id` is VARCHAR2 (DOCUMENTS,
+# KNOWLEDGE_PAGES, MENTAL_MODELS) or NUMBER (OBSERVATION_HISTORY,
+# MENTAL_MODEL_HISTORY), so the bare name cannot classify a bind. Derived from
+# the live schema via ALL_TAB_COLUMNS.
+_RAW_ID_TABLES = frozenset({
+    "audit_log",
+    "directives",
+    "entities",
+    "invalidated_memory_units",
+    "memory_units",
+    "webhooks",
+})
+
+# Column names whose Oracle type is not implied by the name alone.
+_AMBIGUOUS_UUID_COLS = frozenset({"id"})
+
+# Words that may follow a table name without being an alias. Without this,
+# `FROM memory_units WHERE ...` would read WHERE as an alias.
+_NOT_AN_ALIAS = frozenset({
+    "where", "group", "order", "having", "set", "values", "on", "using", "left",
+    "right", "inner", "outer", "full", "cross", "join", "fetch", "for", "limit",
+    "offset", "union", "and", "or", "not", "as", "select", "from", "returning",
+    "when", "then", "else", "end", "connect", "start", "partition", "model",
+    "sample", "pivot", "unpivot", "by", "asc", "desc", "nulls",
+})
+
+_FROM_ALIAS_RE = re.compile(
+    r"\b(?:FROM|JOIN)\s+([A-Za-z_][\w$#.]*)(?:\s+(?:AS\s+)?([A-Za-z_][\w$#]*))?",
+    re.IGNORECASE,
+)
+
+# Bind-to-column shapes, with an optional table/alias qualifier. The qualifier
+# is captured rather than ignored: reading `documents.id` as the bare name `id`
+# is what bound RAW bytes to DOCUMENTS.ID, a VARCHAR2(512) column.
+_QUALIFIED_COL = r"(?:([A-Za-z_][\w$#]*)\.)?([A-Za-z_][\w$#]*)"
+_COL_EQ_BIND_RE = re.compile(rf"{_QUALIFIED_COL}\s*(?:<>|!=|<=>|=)\s*:(\d+)\b")
+_BIND_EQ_COL_RE = re.compile(rf":(\d+)\s*(?:<>|!=|<=>|=)\s*{_QUALIFIED_COL}\b")
+_COL_ARRAY_BIND_RE = re.compile(
+    rf"{_QUALIFIED_COL}\s*(?:<>|!=|=)\s*(?:ALL|ANY)\s*\(\s*:(\d+)\b",
+    re.IGNORECASE,
+)
+
+
+def _table_aliases(query: str) -> dict[str, str]:
+    """Map alias -> table for resolving `alias.col`, plus each table -> itself.
+
+    Only the FROM/JOIN forms this codebase emits are handled. A qualifier that
+    cannot be resolved is left unresolved rather than guessed, and the caller
+    then declines to coerce.
+    """
+    out: dict[str, str] = {}
+    for m in _FROM_ALIAS_RE.finditer(query):
+        table = m.group(1).strip('"').lower()
+        if "." in table:
+            table = table.rsplit(".", 1)[-1]
+        out[table] = table
+        alias = (m.group(2) or "").strip('"').lower()
+        if alias and alias not in _NOT_AN_ALIAS:
+            out[alias] = table
+    return out
+
+
 def _uuid_bind_indices(query: str) -> set[int] | None:
     """1-based bind indices that provably target a UUID (RAW(16)) column.
 
@@ -177,48 +240,57 @@ def _uuid_bind_indices(query: str) -> set[int] | None:
     `operation_id` is RAW(16) while `bank_id` is VARCHAR2(256) in every table,
     and both accept UUID-shaped text. The target column decides it.
     """
+    aliases = _table_aliases(query)
     found: set[int] = set()
 
-    def is_uuid_col(name: str) -> bool:
-        c = name.strip().strip('"').lower()
+    def is_uuid_col(
+        col: str, qualifier: str | None = None, table: str | None = None
+    ) -> bool:
+        c = col.strip().strip('"').lower()
+        if c in _AMBIGUOUS_UUID_COLS:
+            # `id` carries no type information, so the owning table decides.
+            # Take the INSERT target if known, else the explicit qualifier,
+            # resolving an alias to its table.
+            owner = table
+            if owner is None and qualifier:
+                q = qualifier.strip('"').lower()
+                owner = aliases.get(q, q)
+            if owner is None:
+                # Unqualified outside an INSERT: a statement's own bare `id`
+                # is its table's key, which is RAW for every RAW-id table.
+                return True
+            return owner.rsplit(".", 1)[-1] in _RAW_ID_TABLES
         return c in _UUID_COL_EXACT or c.endswith(_UUID_COL_SUFFIXES)
 
     # INSERT INTO t (c1, c2, ...) VALUES (:1, :2, ...)
     m = _INSERT_COLS_VALUES_RE.search(query)
     if m:
+        insert_table = m.group(1).strip('"').lower()
         end = _matching_paren_end(query, m.end())
         if end is not None:
-            cols = [c.strip() for c in _split_respecting_parens(m.group(1))]
+            cols = [c.strip() for c in _split_respecting_parens(m.group(2))]
             exprs = _split_respecting_parens(query[m.end() + 1 : end - 1])
             if cols and len(cols) == len(exprs):
                 for col, expr in zip(cols, exprs):
-                    if not is_uuid_col(col):
+                    if not is_uuid_col(col, table=insert_table):
                         continue
                     for b in re.finditer(r":(\d+)\b", expr):
                         found.add(int(b.group(1)))
 
-    # col = :N  /  col != :N  /  col <> :N  /  col IS NOT DISTINCT FROM :N
-    for m2 in re.finditer(
-        r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:<>|!=|<=>|=)\s*:(\d+)\b", query
-    ):
-        if is_uuid_col(m2.group(1)):
-            found.add(int(m2.group(2)))
+    # col = :N  /  t.col = :N  /  col != :N  /  col <> :N
+    for m2 in _COL_EQ_BIND_RE.finditer(query):
+        if is_uuid_col(m2.group(2), m2.group(1)):
+            found.add(int(m2.group(3)))
 
-    # :N = col
-    for m3 in re.finditer(
-        r":(\d+)\s*(?:<>|!=|<=>|=)\s*([A-Za-z_][A-Za-z0-9_]*)\b", query
-    ):
-        if is_uuid_col(m3.group(2)):
+    # :N = col  /  :N = t.col
+    for m3 in _BIND_EQ_COL_RE.finditer(query):
+        if is_uuid_col(m3.group(3), m3.group(2)):
             found.add(int(m3.group(1)))
 
-    # col != ALL(:N)  /  col = ANY(:N)  -- array comparisons on UUID columns
-    for m4 in re.finditer(
-        r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:<>|!=|=)\s*(?:ALL|ANY)\s*\(\s*:(\d+)\b",
-        query,
-        re.IGNORECASE,
-    ):
-        if is_uuid_col(m4.group(1)):
-            found.add(int(m4.group(2)))
+    # col != ALL(:N)  /  t.col = ANY(:N)  -- array comparisons on UUID columns
+    for m4 in _COL_ARRAY_BIND_RE.finditer(query):
+        if is_uuid_col(m4.group(2), m4.group(1)):
+            found.add(int(m4.group(3)))
 
     return found
 
