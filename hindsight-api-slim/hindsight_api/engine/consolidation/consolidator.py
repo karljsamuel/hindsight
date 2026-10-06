@@ -38,6 +38,7 @@ from ...config import get_config
 from ...metrics import get_metrics_collector
 from ...worker.stage import set_stage
 from ..db import DatabaseBackend
+from ..db.ops import safe_entity_event_date
 from ..db_utils import acquire_with_retry
 from ..llm_interface import OutputTooLongError, ProviderRateLimitResetError
 from ..llm_trace import (
@@ -846,10 +847,10 @@ def _aggregate_source_fields(source_mems: list[dict[str, Any]], tags: list[str] 
     """
     effective_tags = tags if tags is not None else (source_mems[0].get("tags") or [] if source_mems else [])
     return _SourceAggregation(
-        event_date=_min_date(m.get("event_date") for m in source_mems),
-        occurred_start=_min_date(m.get("occurred_start") for m in source_mems),
-        occurred_end=_max_date(m.get("occurred_end") for m in source_mems),
-        mentioned_at=_max_date(m.get("mentioned_at") for m in source_mems),
+        event_date=_min_date(safe_entity_event_date(m.get("event_date")) for m in source_mems),
+        occurred_start=_min_date(safe_entity_event_date(m.get("occurred_start")) for m in source_mems),
+        occurred_end=_max_date(safe_entity_event_date(m.get("occurred_end")) for m in source_mems),
+        mentioned_at=_max_date(safe_entity_event_date(m.get("mentioned_at")) for m in source_mems),
         tags=effective_tags,
     )
 
@@ -3387,10 +3388,10 @@ async def _apply_create_observation(
     connection, let alone one holding an open transaction.
     """
     now = datetime.now(timezone.utc)
-    obs_event_date = event_date or now
-    obs_occurred_start = occurred_start
-    obs_occurred_end = occurred_end
-    obs_mentioned_at = mentioned_at or now
+    obs_event_date = safe_entity_event_date(event_date) or now
+    obs_occurred_start = safe_entity_event_date(occurred_start)
+    obs_occurred_end = safe_entity_event_date(occurred_end)
+    obs_mentioned_at = safe_entity_event_date(mentioned_at) or now
     obs_tags = tags or []
     observation_id = uuid.uuid4()
 

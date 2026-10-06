@@ -8,7 +8,7 @@ columns can't appear in GROUP BY).
 import json
 import uuid as uuid_mod
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 
 from .base import DatabaseConnection
 from .ops import (
@@ -20,6 +20,7 @@ from .ops import (
     bank_serialization_sql,
     key_serialization_sql,
     memory_unit_columns,
+    safe_entity_event_date,
 )
 from .result import DictResultRow as ResultRow
 
@@ -116,16 +117,21 @@ class OracleOps(DataAccessOps):
         rows_data = []
         for i in range(len(fact_texts)):
             tags_value = json.loads(tags_list[i]) if tags_list[i] else []
+            # Same sentinel hazard as entities: an extracted date can be
+            # datetime.min (0001-01-01), which is truthy and would be stored
+            # verbatim. memory_units carries four such columns and all four read
+            # path, so one bad value anywhere kills recall for the bank. None
+            # means "unknown", which the column default covers.
             rows_data.append(
                 (
                     unit_ids[i],
                     bank_id,
                     fact_texts[i],
                     embeddings[i],
-                    event_dates[i],
-                    occurred_starts[i],
-                    occurred_ends[i],
-                    mentioned_ats[i],
+                    safe_entity_event_date(event_dates[i]) or datetime.now(UTC),
+                    safe_entity_event_date(occurred_starts[i]),
+                    safe_entity_event_date(occurred_ends[i]),
+                    safe_entity_event_date(mentioned_ats[i]),
                     contexts[i],
                     fact_types[i],
                     metadata_jsons[i],
@@ -141,7 +147,7 @@ class OracleOps(DataAccessOps):
                     attachment_ids_list[i] or "[]",
                 )
             )
-        await conn.executemany(
+        await cast(Any, conn).executemany(
             f"""
             INSERT INTO {table} (id, bank_id, text, embedding, event_date, occurred_start,
                 occurred_end, mentioned_at, context, fact_type, metadata, chunk_id, document_id,
@@ -149,6 +155,13 @@ class OracleOps(DataAccessOps):
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             """,
             rows_data,
+            # positions 5-8: event_date, occurred_start/end, mentioned_at
+            column_types=(
+                ["text[]"] * 4
+                + ["timestamptz[]"] * 4
+                + ["text[]"] * 9
+            ),
+            n_cols=17,
         )
         return unit_ids
 
@@ -217,7 +230,11 @@ class OracleOps(DataAccessOps):
         # so INSERT (ignoring dups) then SELECT all IDs at the end.
         id_by_name: dict[str, str] = {}
         for name, event_date, kind in zip(entity_names, entity_dates, entity_kinds):
-            ts = event_date if event_date else datetime.now(UTC)
+            # safe_entity_event_date: a per-entity event_date can be datetime.min,
+            # which is truthy and would bypass the `else now()` guard and be
+            # stored as 0001-01-01 -- unreadable back through python-oracledb.
+            # None falls through to the column default.
+            ts = safe_entity_event_date(event_date) or datetime.now(UTC)
             await conn.execute(
                 f"""
                 INSERT INTO {table} (bank_id, canonical_name, first_seen, last_seen, mention_count, entity_kind)

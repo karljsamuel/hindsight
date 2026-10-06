@@ -60,9 +60,19 @@ jobs:
           # *exclude* paths -- an added ignore rule cannot disclose a secret,
           # it prevents one. Blocking it would leave local .env files and
           # scratch scripts merely untracked rather than ignored.
+          #
+          # hindsight-api-slim/tests/ is allowed on the same reasoning: it is a
+          # tracked sibling of hindsight_api/ (already allowed in full) and a
+          # test module cannot disclose a secret any more than the module it
+          # covers. It was omitted rather than excluded, which blocked three
+          # regression tests for defects that fail silently -- claims taking the
+          # newest work instead of the oldest, date_trunc('quarter') returning a
+          # day bucket, and year-0001 timestamps. Coverage for those is worth
+          # more than the rule it was never written to enforce.
           ALLOWED_PREFIXES=(
             "docker/standalone/Dockerfile.oracle"
             "hindsight-api-slim/hindsight_api/"
+            "hindsight-api-slim/tests/"
             "hindsight-control-plane/"
             "smoketest.sh"
             ".github/workflows/"

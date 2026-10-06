@@ -5,7 +5,7 @@ efficient batch operations.
 """
 
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime
 
 from .base import DatabaseConnection
 from .ops import (
@@ -18,6 +18,7 @@ from .ops import (
     bank_serialization_sql,
     key_serialization_sql,
     memory_unit_columns,
+    safe_entity_event_date,
 )
 from .result import ResultRow
 
@@ -218,10 +219,14 @@ class PostgreSQLOps(DataAccessOps):
             bank_id,
             fact_texts,
             embeddings,
-            event_dates,
-            occurred_starts,
-            occurred_ends,
-            mentioned_ats,
+            # Same sentinel hazard as entities: an extracted date can be
+            # datetime.min, which is truthy and would be stored verbatim.
+            # Keep both backends writing the same data so a value Oracle cannot
+            # read back never gets written in the first place.
+            [safe_entity_event_date(d) or datetime.now(UTC) for d in event_dates],
+            [safe_entity_event_date(d) for d in occurred_starts],
+            [safe_entity_event_date(d) for d in occurred_ends],
+            [safe_entity_event_date(d) for d in mentioned_ats],
             contexts,
             fact_types,
             metadata_jsons,
@@ -362,6 +367,11 @@ class PostgreSQLOps(DataAccessOps):
         # ``str.lower()``, which agrees with the index for ASCII but not for every
         # locale (see the Turkish-İ note in entity_resolver) — ordering in SQL makes
         # the database's own collation the single arbiter for all writers.
+        # safe_entity_event_date: a per-entity event_date can be datetime.min,
+        # which is truthy and would slip past COALESCE's NULL check and be
+        # stored as 0001-01-01. Harmless-ish on PostgreSQL, but Oracle cannot
+        # read that value back, so keep the two backends writing the same data.
+        entity_dates = [safe_entity_event_date(d) for d in entity_dates]
         inserted_rows = await conn.fetch(
             f"""
             INSERT INTO {table} (bank_id, canonical_name, first_seen, last_seen, mention_count, entity_kind)

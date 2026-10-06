@@ -19,6 +19,7 @@ from difflib import SequenceMatcher
 from functools import lru_cache
 from typing import Any, Final, cast
 
+from ...db.ops import nullable_year1_timestamp_sql, safe_entity_event_date
 from ...db_utils import acquire_with_retry
 from ...retain.entity_labels import (
     build_labels_lookup as _build_labels_lookup_from_config,
@@ -547,8 +548,11 @@ class EntityResolver:
                 for s in stats:
                     entry = agg[s.entity_id]
                     entry.count += 1
-                    if s.event_date is not None:
-                        entry.max_date = s.event_date if entry.max_date is None else max(entry.max_date, s.event_date)
+                    # Sanitize defensively even though the source now sanitizes;
+                    # pending stats can also arrive through recovery paths.
+                    event_date = safe_entity_event_date(s.event_date)
+                    if event_date is not None:
+                        entry.max_date = event_date if entry.max_date is None else max(entry.max_date, event_date)
 
                 # Sort by entity_id so all concurrent workers acquire row locks in
                 # the same order — prevents circular lock dependencies (deadlocks).
@@ -557,7 +561,7 @@ class EntityResolver:
                     f"""
                     UPDATE {fq_table("entities")} SET
                         mention_count = mention_count + $2,
-                        last_seen     = GREATEST(last_seen, $3)
+                        last_seen     = GREATEST(last_seen, COALESCE($3, last_seen))
                     WHERE id = $1::uuid
                     """,
                     rows,
@@ -572,7 +576,10 @@ class EntityResolver:
                 for c in cooccurrences:
                     pair = (c.entity_id_1, c.entity_id_2)
                     prev_count, prev_date = coo_agg.get(pair, (0, None))
-                    coo_agg[pair] = (prev_count + 1, _later_date(prev_date, c.event_date))
+                    coo_agg[pair] = (
+                        prev_count + 1,
+                        _later_date(prev_date, safe_entity_event_date(c.event_date)),
+                    )
 
                 now = datetime.now(UTC)
                 # Sort by (entity_id_1, entity_id_2) for consistent lock ordering.
@@ -586,7 +593,10 @@ class EntityResolver:
                         cooccurrence_count = {fq_table("entity_cooccurrences")}.cooccurrence_count + EXCLUDED.cooccurrence_count,
                         last_cooccurred    = GREATEST({fq_table("entity_cooccurrences")}.last_cooccurred, EXCLUDED.last_cooccurred)
                     """,
-                    sorted((e1, e2, count, event_date or now) for (e1, e2), (count, event_date) in coo_agg.items()),
+                    sorted(
+                        (e1, e2, count, safe_entity_event_date(event_date) or now)
+                        for (e1, e2), (count, event_date) in coo_agg.items()
+                    ),
                 )
 
     @staticmethod
@@ -736,15 +746,41 @@ class EntityResolver:
         labels_cfg=None,
     ) -> list[ResolvedEntity]:
         """Original strategy: load all bank entities then match in Python."""
-        # Query ALL candidates for this bank
-        all_entities = await conn.fetch(
-            f"""
-            SELECT canonical_name, id, metadata, last_seen, mention_count
-            FROM {fq_table("entities")}
-            WHERE bank_id = $1
-            """,
-            bank_id,
-        )
+        # Query ALL candidates for this bank.
+        #
+        # Oracle stores 0001-01-01 happily in last_seen, but python-oracledb
+        # cannot convert it back: the Julian-day arithmetic lands on year -1,
+        # which Python's datetime cannot represent, so a single bad row raises
+        # ValueError and kills the entire retain. Fall back to a query without
+        # last_seen rather than losing the batch -- last_seen only feeds recency
+        # scoring, so dropping it degrades ranking slightly instead of aborting
+        # ingest. The column type is deliberately unchanged: callers do datetime
+        # arithmetic on it.
+        try:
+            all_entities = await conn.fetch(
+                f"""
+                SELECT canonical_name, id, metadata, {nullable_year1_timestamp_sql('last_seen')} AS last_seen, mention_count
+                FROM {fq_table("entities")}
+                WHERE bank_id = $1
+                """,
+                bank_id,
+            )
+        except ValueError as exc:
+            logger.warning(
+                "entity candidate fetch failed on timestamp conversion "
+                "(%s); retrying without last_seen. Recency scoring will be "
+                "degraded for this batch. Run the sentinel-timestamp data "
+                "migration to repair the affected rows.",
+                exc,
+            )
+            all_entities = await conn.fetch(
+                f"""
+                SELECT canonical_name, id, metadata, NULL AS last_seen, mention_count
+                FROM {fq_table("entities")}
+                WHERE bank_id = $1
+                """,
+                bank_id,
+            )
 
         # Build entity ID to name mapping for co-occurrence lookups
         entity_id_to_name = {row["id"]: row["canonical_name"].lower() for row in all_entities}
@@ -836,7 +872,7 @@ class EntityResolver:
             rows.extend(
                 await conn.fetch(
                     f"""
-                    SELECT e.id, e.canonical_name, e.metadata, e.last_seen, e.mention_count,
+                    SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql('e.last_seen')} AS last_seen, e.mention_count,
                            q.query_text
                     FROM unnest($2::text[]) AS q(query_text)
                     JOIN {fq_table("entities")} e ON (
@@ -877,7 +913,7 @@ class EntityResolver:
                            q.query_text
                     FROM unnest($2::text[]) AS q(query_text)
                     CROSS JOIN LATERAL (
-                        SELECT e.id, e.canonical_name, e.metadata, e.last_seen, e.mention_count
+                        SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql('e.last_seen')} AS last_seen, e.mention_count
                         FROM {fq_table("entities")} e
                         WHERE e.bank_id = $1
                           AND e.entity_kind != 'label'
@@ -977,7 +1013,7 @@ class EntityResolver:
                 rows.extend(
                     await conn.fetch(
                         f"""
-                        SELECT e.id, e.canonical_name, e.metadata, e.last_seen, e.mention_count,
+                        SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql('e.last_seen')} AS last_seen, e.mention_count,
                                q.query_text
                         FROM JSON_TABLE($2, '$[*]' COLUMNS (query_text VARCHAR2(4000) PATH '$')) q
                         JOIN {entities_table} e ON (
@@ -1000,7 +1036,7 @@ class EntityResolver:
                         f"""
                         SELECT id, canonical_name, metadata, last_seen, mention_count, query_text
                         FROM (
-                            SELECT e.id, e.canonical_name, e.metadata, e.last_seen, e.mention_count,
+                            SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql('e.last_seen')} AS last_seen, e.mention_count,
                                    q.query_text,
                                    ROW_NUMBER() OVER (
                                        PARTITION BY q.query_text
@@ -1173,8 +1209,14 @@ class EntityResolver:
             entity_text = entity_data["text"]
             entity_text_lower = entity_text.lower()
             nearby_entities = entity_data.get("nearby_entities", [])
-            # Use per-entity date if available, otherwise fall back to batch-level date
-            entity_event_date = entity_data.get("event_date", unit_event_date)
+            # Use a validated per-entity date if present, otherwise the batch-level date.
+            # Sanitize here, at the source, before cluster min/max selection and before
+            # the date fans out to entity stats / co-occurrence rows. Sanitizing only
+            # at the final entity INSERT is too late: datetime.min is truthy and can
+            # already have poisoned those downstream paths.
+            entity_event_date = safe_entity_event_date(
+                entity_data.get("event_date", unit_event_date)
+            )
 
             # Per mention, not per batch: retain resolves the caller's entities and the
             # extractor's in one pass, and only the caller's are meant literally (#3479).
@@ -1373,6 +1415,7 @@ class EntityResolver:
                 event_date: datetime | None
                 is_label: bool
                 indices: list[int] = field(default_factory=list)
+                mention_dates: list[datetime | None] = field(default_factory=list)
 
             groups: dict[str, _NameGroup] = {}
             for e in entities_to_create:
@@ -1391,6 +1434,7 @@ class EntityResolver:
                     # Keep the earliest event_date across the cluster ("first seen").
                     group.event_date = e.event_date
                 group.indices.append(e.idx)
+                group.mention_dates.append(e.event_date)
 
             # Sort by lowercase name for deterministic ordering.
             sorted_groups = sorted(groups.items())
@@ -1452,11 +1496,15 @@ class EntityResolver:
                 if entity_id:
                     canonical_name = canonical_by_name.get(name_lower, g.name)
                     kind = "label" if g.is_label else "regular"
-                    for original_idx in g.indices:
+                    for original_idx, mention_date in zip(g.indices, g.mention_dates):
                         resolved[original_idx] = ResolvedEntity(
                             entity_id=entity_id, canonical_name=canonical_name, entity_kind=kind
                         )
-                        pending.append(_EntityStat(entity_id=str(entity_id), event_date=g.event_date))
+                        # last_seen tracks each mention's actual date. `g.event_date`
+                        # is the cluster minimum, used only for first_seen on INSERT;
+                        # stamping every mention with that minimum makes new entities
+                        # look as old as their first sighting forever.
+                        pending.append(_EntityStat(entity_id=str(entity_id), event_date=mention_date))
 
         # Accumulate into the resolver's pending list; the orchestrator flushes
         # these with await entity_resolver.flush_pending_stats() after the transaction.

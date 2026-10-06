@@ -24,6 +24,42 @@ from typing import Any
 from .base import DatabaseConnection
 from .result import ResultRow
 
+# Earliest timestamp the Python/Oracle boundary can safely round-trip.
+#
+# Oracle stores 0001-01-01, but python-oracledb's Julian-day conversion lands on
+# year -1 and Python's datetime cannot represent it. Reject year 0001 (the actual
+# sentinel); do NOT floor at 1970, because real historical event dates are valid
+# and discarding them would silently corrupt first_seen semantics.
+ENTITY_EVENT_MIN_YEAR = 2
+
+
+def safe_entity_event_date(value: datetime | None) -> datetime | None:
+    """Return `value` unless it is the unrepresentable year-0001 sentinel.
+
+    `datetime.min` is truthy, so it bypasses ordinary `value or fallback`
+    guards. None means "unknown", which callers turn into the column default.
+    Checking `.year` instead of comparing datetimes also avoids aware/naive
+    datetime comparison errors.
+    """
+    if value is None or not isinstance(value, datetime):
+        return None
+    if value.year < ENTITY_EVENT_MIN_YEAR:
+        return None
+    return value
+
+
+def nullable_year1_timestamp_sql(column: str) -> str:
+    """SQL projection that hides an Oracle-unreadable year-0001 timestamp.
+
+    Oracle can render the corrupt sentinel through TO_CHAR even when its driver
+    cannot decode the timestamp. CASE returns a typed NULL for that one year;
+    normal rows retain their TIMESTAMP WITH TIME ZONE type. TO_CHAR is also
+    supported by PostgreSQL, so shared read queries can use the projection.
+
+    `column` must be a code-owned SQL expression, never caller input.
+    """
+    return f"CASE WHEN TO_CHAR({column}, 'YYYY') = '0001' THEN NULL ELSE {column} END"
+
 
 class ChunkIdOwnedByAnotherBank(Exception):
     """A chunk upsert hit a ``chunks`` row that belongs to a different bank.
