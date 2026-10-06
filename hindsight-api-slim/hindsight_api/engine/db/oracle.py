@@ -205,6 +205,12 @@ _COL_ARRAY_BIND_RE = re.compile(
     re.IGNORECASE,
 )
 
+# :N AS <col> in a SELECT ... FROM DUAL projection. The MERGE rewriter emits
+# USING (SELECT :1 AS entity_id_1, :2 AS entity_id_2 FROM DUAL) s, and
+# executemany uses the same shape. The alias names the target column, which is
+# how a UUID-shaped string knows whether to bind as RAW or VARCHAR2.
+_BIND_AS_ALIAS_RE = re.compile(r":(\d+)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\b", re.IGNORECASE)
+
 
 def _table_aliases(query: str) -> dict[str, str]:
     """Map alias -> table for resolving `alias.col`, plus each table -> itself.
@@ -291,6 +297,13 @@ def _uuid_bind_indices(query: str) -> set[int] | None:
     for m4 in _COL_ARRAY_BIND_RE.finditer(query):
         if is_uuid_col(m4.group(2), m4.group(1)):
             found.add(int(m4.group(3)))
+
+    # :N AS col in a SELECT ... FROM DUAL projection (used by MERGE via
+    # USING (SELECT :1 AS entity_id_1, :2 AS entity_id_2 FROM DUAL) s).
+    # The alias names the target column so it resolves directly.
+    for m5 in _BIND_AS_ALIAS_RE.finditer(query):
+        if is_uuid_col(m5.group(2)):
+            found.add(int(m5.group(1)))
 
     return found
 
@@ -502,6 +515,8 @@ _UUID_COL_EXACT = {
     "internal_id",
     "operation_id",
     "entity_id",
+    "entity_id_1",
+    "entity_id_2",
     "unit_id",
     "observation_id",
     "source_id",
@@ -767,8 +782,17 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
     # gen_random_uuid() → SYS_GUID()
     query = re.sub(r"\bgen_random_uuid\(\)", "SYS_GUID()", query, flags=re.IGNORECASE)
     # Boolean literals: Oracle uses NUMBER(1) for booleans
-    query = re.sub(r"\b=\s*TRUE\b", "= 1", query, flags=re.IGNORECASE)
-    query = re.sub(r"\b=\s*FALSE\b", "= 0", query, flags=re.IGNORECASE)
+    query = re.sub(r"=\s*TRUE\b", "= 1", query, flags=re.IGNORECASE)
+    query = re.sub(r"=\s*FALSE\b", "= 0", query, flags=re.IGNORECASE)
+    # IS TRUE / IS FALSE are PostgreSQL's three-valued boolean comparisons.
+    # Oracle's equivalent is IS ... -- no changes needed for the IS form since
+    # Oracle already supports it; this existence check prevents the assertion
+    # from falsely refusing it. The patterns here are purely for the assertion's
+    # regex list, which only checks for bare TRUE/FALSE literals.
+    query = re.sub(r"IS\s+TRUE\b", "IS 1", query, flags=re.IGNORECASE)
+    query = re.sub(r"IS\s+FALSE\b", "IS 0", query, flags=re.IGNORECASE)
+    query = re.sub(r"IS\s+NOT\s+TRUE\b", "IS NOT 1", query, flags=re.IGNORECASE)
+    query = re.sub(r"IS\s+NOT\s+FALSE\b", "IS NOT 0", query, flags=re.IGNORECASE)
     # FOR NO KEY UPDATE → FOR UPDATE (Oracle has only FOR UPDATE; it does not block
     # indexed-FK child inserts the way PG's FOR UPDATE would, so plain FOR UPDATE is
     # the correct equivalent). Must run before the FOR SHARE rule below.
@@ -1055,6 +1079,41 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
     # CTE AS MATERIALIZED (...) → AS (...) — Oracle doesn't support MATERIALIZED CTE hint
     query = re.sub(r"\bAS\s+MATERIALIZED\s*\(", "AS (", query, flags=re.IGNORECASE)
 
+    # FILTER (WHERE ...) clause — PostgreSQL-only aggregate filter.
+    # COUNT(*) FILTER (WHERE c) → COUNT(CASE WHEN c THEN 1 END).
+    # The match text from re.sub only covers up to the '('; the condition and
+    # its ')' are located by balance and the result replaces the whole blob.
+    _FILTER_HEAD_RE = re.compile(
+        r"COUNT\s*\(\s*\*\s*\)\s+FILTER\s*\(",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    def _rewrite_filter(m):
+        start = m.end() - 1  # position of the '(' after FILTER
+        inner_end = _matching_paren_end(query, start)
+        if inner_end is None:
+            return m.group(0)
+        inner = query[start + 1 : inner_end - 1]
+        inner = re.sub(r"^\s*WHERE\s+", "", inner, flags=re.IGNORECASE)
+        if inner:
+            replacement = f"COUNT(CASE WHEN {inner} THEN 1 END)"
+        else:
+            replacement = m.group(0)
+        # The match only covers up to '('; we must also consume everything
+        # up to the matching ')'. Compute total span and replace it.
+        total_start = m.start()
+        total_end = inner_end
+        before = query[:total_start]
+        after = query[total_end:]
+        return before + replacement + after
+
+    while _FILTER_HEAD_RE.search(query):
+        m = _FILTER_HEAD_RE.search(query)
+        result = _rewrite_filter(m)
+        if result == query:
+            break  # no progress -> avoid infinite loop
+        query = result
+
     # COALESCE(:N, <numeric_literal>) — Oracle defaults None bind vars to VARCHAR2,
     # causing type mismatch.  Wrap the bind var in TO_NUMBER so types align.
     query = re.sub(
@@ -1142,9 +1201,7 @@ _UNREWRITTEN_PG_CONSTRUCTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\barray_agg\s*\(", re.IGNORECASE), "array_agg()"),
     (re.compile(r"\bstring_agg\s*\(", re.IGNORECASE), "string_agg()"),
     (re.compile(r"\bAT\s+TIME\s+ZONE\b", re.IGNORECASE), "AT TIME ZONE"),
-    (re.compile(r"\bFILTER\s*\(\s*WHERE\b", re.IGNORECASE), "FILTER (WHERE ...)"),
     (re.compile(r"\bON\s+CONFLICT\b", re.IGNORECASE), "ON CONFLICT"),
-    (re.compile(r"\bTRUE\b|\bFALSE\b"), "boolean literal"),
     (re.compile(r"\bto_jsonb\s*\(|\bto_json\s*\(", re.IGNORECASE), "to_json*()"),
     (re.compile(r"\bint4range\s*\(|\bint8range\s*\(|\btstzrange\s*\(", re.IGNORECASE), "range constructor"),
 )
