@@ -7,6 +7,7 @@ import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import cast
+from uuid import UUID
 
 import numpy as np
 
@@ -855,6 +856,51 @@ def compute_semantic_links_within_batch(
     return links
 
 
+async def _filter_links_to_existing_units(
+    conn, links: list[tuple]
+) -> list[tuple]:
+    """Keep only links whose endpoints still exist after a delta retain's deletes.
+
+    Phase 1 computes ANN links before Phase 2 removes changed/removed chunks.
+    A pre-computed link can therefore target a memory unit that Phase 2 has
+    deleted by the time links are inserted. Check in bounded batches inside the
+    write transaction so the FK check cannot fail on that stale target.
+    """
+    if not links:
+        return []
+
+    def canonical_id(value: object) -> str:
+        if isinstance(value, UUID):
+            return str(value)
+        if isinstance(value, (bytes, bytearray, memoryview)) and len(value) == 16:
+            return str(UUID(bytes=bytes(value)))
+        return str(UUID(str(value)))
+
+    unit_ids = sorted({canonical_id(link[pos]) for link in links for pos in (0, 1)})
+    existing_ids: set[str] = set()
+    # Oracle limits an IN list to 1000 expressions; keep a margin and use
+    # portable asyncpg-style placeholders, which OracleConnection rewrites.
+    batch_size = 900
+    for offset in range(0, len(unit_ids), batch_size):
+        batch = unit_ids[offset : offset + batch_size]
+        placeholders = ", ".join(f"${i + 1}" for i in range(len(batch)))
+        query = f"SELECT id FROM {fq_table('memory_units')} WHERE id IN ({placeholders})"
+        # Bind UUID values as UUID objects: Oracle maps those to RAW(16), and
+        # asyncpg accepts UUID objects for uuid columns as well.
+        rows = await conn.fetch(query, *(UUID(unit_id) for unit_id in batch))
+        existing_ids.update(canonical_id(row["id"]) for row in rows)
+
+    valid_links = [
+        link for link in links if canonical_id(link[0]) in existing_ids and canonical_id(link[1]) in existing_ids
+    ]
+    if len(valid_links) != len(links):
+        logger.warning(
+            "Filtered out %d semantic links referencing memory_units rows deleted during delta retain",
+            len(links) - len(valid_links),
+        )
+    return valid_links
+
+
 async def create_semantic_links_batch(
     conn,
     bank_id: str,
@@ -909,12 +955,16 @@ async def create_semantic_links_batch(
             f"      [8.1] Within-batch semantic: {len(within_batch_links)} links in {time_mod.time() - batch_start:.3f}s",
         )
 
-        # Add pre-computed ANN links from Phase 1
+        # Phase 1 ANN links were computed before delta Phase 2 deletes changed
+        # chunks. Their to_unit_id may therefore refer to a memory_unit removed
+        # in the write transaction. Within-batch links only reference the new
+        # units inserted moments ago and need no existence check.
         if pre_computed_ann_links:
-            all_links.extend(pre_computed_ann_links)
+            valid_ann_links = await _filter_links_to_existing_units(conn, pre_computed_ann_links)
+            all_links.extend(valid_ann_links)
             _log(
                 log_buffer,
-                f"      [8.2] Pre-computed ANN: {len(pre_computed_ann_links)} links",
+                f"      [8.2] Pre-computed ANN: {len(valid_ann_links)}/{len(pre_computed_ann_links)} valid links",
             )
 
         if all_links:
