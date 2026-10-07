@@ -332,7 +332,7 @@ async def test_semantic_ann_link_to_deleted_delta_target_is_filtered(monkeypatch
     class FakeConn:
         async def fetch(self, _query, *unit_ids):
             existing = {new_unit, existing_unit}
-            return [(unit_id,) for unit_id in unit_ids if unit_id in existing]
+            return [{"id": unit_id} for unit_id in unit_ids if unit_id in existing]
 
     class CapturingOps:
         inserted_links = None
@@ -370,13 +370,47 @@ async def test_existing_unit_check_batches_below_oracle_in_limit():
 
         async def fetch(self, _query, *unit_ids):
             self.batch_sizes.append(len(unit_ids))
-            return [(unit_id,) for unit_id in unit_ids]
+            return [{"id": unit_id} for unit_id in unit_ids]
 
     conn = FakeConn()
     filtered = await link_utils._filter_links_to_existing_units(conn, links)
 
     assert conn.batch_sizes == [900, 2]
     assert filtered == links
+
+
+@pytest.mark.asyncio
+async def test_existing_unit_check_accepts_raw_16_byte_ids():
+    """Oracle RAW(16) values may arrive as bytes; compare canonically to UUID binds."""
+    existing_id = uuid.uuid4()
+    stale_id = uuid.uuid4()
+    links = [(existing_id.bytes, stale_id.bytes, "semantic", 0.8, None)]
+
+    class FakeConn:
+        async def fetch(self, _query, *unit_ids):
+            assert set(unit_ids) == {existing_id, stale_id}
+            return [{"id": existing_id}]
+
+    filtered = await link_utils._filter_links_to_existing_units(FakeConn(), links)
+
+    assert filtered == []
+
+
+@pytest.mark.asyncio
+async def test_existing_unit_check_reads_keyed_oracle_result_rows():
+    """Oracle ResultRow supports row['id'], not positional row[0]."""
+    existing_id = uuid.uuid4()
+    stale_id = uuid.uuid4()
+    valid_link = (existing_id, existing_id, "semantic", 0.9, None)
+    stale_link = (existing_id, stale_id, "semantic", 0.8, None)
+
+    class FakeConn:
+        async def fetch(self, _query, *_unit_ids):
+            return [{"id": existing_id}]
+
+    filtered = await link_utils._filter_links_to_existing_units(FakeConn(), [valid_link, stale_link])
+
+    assert filtered == [valid_link]
 
 
 def test_phase1_ann_ids_only_remap_source_not_existing_target():

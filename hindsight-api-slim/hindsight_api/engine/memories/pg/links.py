@@ -869,7 +869,14 @@ async def _filter_links_to_existing_units(
     if not links:
         return []
 
-    unit_ids = sorted({str(link[pos]) for link in links for pos in (0, 1)})
+    def canonical_id(value: object) -> str:
+        if isinstance(value, UUID):
+            return str(value)
+        if isinstance(value, (bytes, bytearray, memoryview)) and len(value) == 16:
+            return str(UUID(bytes=bytes(value)))
+        return str(UUID(str(value)))
+
+    unit_ids = sorted({canonical_id(link[pos]) for link in links for pos in (0, 1)})
     existing_ids: set[str] = set()
     # Oracle limits an IN list to 1000 expressions; keep a margin and use
     # portable asyncpg-style placeholders, which OracleConnection rewrites.
@@ -881,9 +888,11 @@ async def _filter_links_to_existing_units(
         # Bind UUID values as UUID objects: Oracle maps those to RAW(16), and
         # asyncpg accepts UUID objects for uuid columns as well.
         rows = await conn.fetch(query, *(UUID(unit_id) for unit_id in batch))
-        existing_ids.update(str(row[0]) for row in rows)
+        existing_ids.update(canonical_id(row["id"]) for row in rows)
 
-    valid_links = [link for link in links if str(link[0]) in existing_ids and str(link[1]) in existing_ids]
+    valid_links = [
+        link for link in links if canonical_id(link[0]) in existing_ids and canonical_id(link[1]) in existing_ids
+    ]
     if len(valid_links) != len(links):
         logger.warning(
             "Filtered out %d semantic links referencing memory_units rows deleted during delta retain",
