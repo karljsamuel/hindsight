@@ -8,6 +8,7 @@ extracted facts and the generated embeddings caused
 from __future__ import annotations
 
 import asyncio
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from types import SimpleNamespace
@@ -313,3 +314,81 @@ class TestSemanticLinkThresholdPropagation:
         )
 
         assert captured_thresholds == [0.84]
+
+
+@pytest.mark.asyncio
+async def test_semantic_ann_link_to_deleted_delta_target_is_filtered(monkeypatch):
+    """A Phase 1 ANN target can be deleted by delta Phase 2 before link insert.
+
+    Keep the valid within-batch/current target, but discard a stale ANN edge so
+    Oracle's FK_ML_TO does not reject the entire retain transaction.
+    """
+    new_unit = uuid.uuid4()
+    existing_unit = uuid.uuid4()
+    deleted_unit = uuid.uuid4()
+    valid_link = (new_unit, existing_unit, "semantic", 0.9, None)
+    stale_link = (new_unit, deleted_unit, "semantic", 0.8, None)
+
+    class FakeConn:
+        async def fetch(self, _query, *unit_ids):
+            existing = {new_unit, existing_unit}
+            return [(unit_id,) for unit_id in unit_ids if unit_id in existing]
+
+    class CapturingOps:
+        inserted_links = None
+
+        async def bulk_insert_links(self, _conn, _table, links, *_args):
+            self.inserted_links = list(links)
+
+    ops = CapturingOps()
+    monkeypatch.setattr(link_utils, "compute_semantic_links_within_batch", lambda *_a, **_kw: [])
+
+    inserted = await link_utils.create_semantic_links_batch(
+        conn=FakeConn(),
+        bank_id="bank",
+        unit_ids=["new-unit"],
+        embeddings=[[0.1]],
+        threshold=0.7,
+        pre_computed_ann_links=[valid_link, stale_link],
+        ops=ops,
+    )
+
+    assert inserted == 1
+    assert ops.inserted_links == [valid_link]
+
+
+@pytest.mark.asyncio
+async def test_existing_unit_check_batches_below_oracle_in_limit():
+    """The endpoint check must stay under Oracle's 1000-expression IN limit."""
+    links = [
+        (uuid.uuid4(), uuid.uuid4(), "semantic", 0.8, None)
+        for _ in range(451)
+    ]
+
+    class FakeConn:
+        batch_sizes = []
+
+        async def fetch(self, _query, *unit_ids):
+            self.batch_sizes.append(len(unit_ids))
+            return [(unit_id,) for unit_id in unit_ids]
+
+    conn = FakeConn()
+    filtered = await link_utils._filter_links_to_existing_units(conn, links)
+
+    assert conn.batch_sizes == [900, 2]
+    assert filtered == links
+
+
+def test_phase1_ann_ids_only_remap_source_not_existing_target():
+    """ANN target is a pre-existing ID and must remain available for filtering."""
+    from hindsight_api.engine.retain.orchestrator import _remap_phase1_results
+
+    source = str(uuid.uuid4())
+    target = str(uuid.uuid4())
+    _entity_to_unit, _unit_to_entity_ids, remapped = _remap_phase1_results(
+        [], [], {}, [("0", target, "semantic", 0.9, None)], [source]
+    )
+
+    assert remapped == [(source, target, "semantic", 0.9, None)]
+    assert remapped[0][1] == target
+    assert remapped[0][1] != source
