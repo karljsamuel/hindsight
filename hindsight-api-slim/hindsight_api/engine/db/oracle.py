@@ -19,6 +19,7 @@ import json
 import logging
 import re
 import uuid as _uuid_mod
+import array
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, NamedTuple, cast
@@ -41,6 +42,16 @@ from .base import DatabaseBackend, DatabaseConnection
 from .result import DictResultRow as ResultRow
 
 logger = logging.getLogger(__name__)
+
+
+class OracleRewriteError(RuntimeError):
+    """A PostgreSQL statement could not be fully translated for Oracle.
+
+    Raised by `assert_fully_rewritten` when a construct the rewriter does not
+    handle survives into the final statement. Failing here -- before the
+    statement reaches Oracle -- turns what would be an opaque ORA-00900 in
+    production into a local error naming the construct.
+    """
 
 
 class RewriteResult(NamedTuple):
@@ -71,24 +82,60 @@ _ON_CONFLICT_DO_UPDATE_RE = re.compile(
     r"\bON\s+CONFLICT\s*\((?:[^()]*|\([^()]*\))*\)\s*DO\s+UPDATE\s+SET\b", re.IGNORECASE
 )
 
-# A PG RETURNING clause. "RETURNING <type>" (e.g. JSON_MERGEPATCH(..., :1 RETURNING CLOB))
-# is an Oracle JSON-function returning clause, not a statement-level RETURNING.
-_RETURNING_RE = re.compile(r"\bRETURNING\s+(?!(?:CLOB|BLOB|VARCHAR2|JSON)\b)(.+)", re.IGNORECASE | re.DOTALL)
+def _find_statement_returning(sql: str) -> tuple[int, str] | None:
+    """Locate a statement-level RETURNING clause: (start_index, column_list), or None.
+
+    Only a RETURNING at paren depth 0 counts. Oracle JSON functions carry their
+    own `RETURNING <type>` inside their parentheses -- JSON_VALUE(x, '$.size()'
+    RETURNING NUMBER), JSON_MERGEPATCH(x, :1 RETURNING CLOB) -- and treating the
+    first one found anywhere as the statement clause rewrote it in place:
+
+        ... = JSON_VALUE(:3, '$.size()' RETURNING NUMBER) RETURNING id INTO :ret_0
+        returning_cols = ['NUMBER) RETURNING id']
+
+    That is invalid SQL plus an output bind for a non-existent column. A
+    depth-0 rule is exact, unlike a lookahead over known type names, which had
+    to enumerate every type Oracle can return (it listed CLOB/BLOB/VARCHAR2/
+    JSON and missed NUMBER, which this rewriter itself emits).
+    """
+    depth = 0
+    in_str = False
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch == "'":
+            in_str = not in_str
+            i += 1
+            continue
+        if not in_str:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif depth == 0 and sql[i : i + 9].upper() == "RETURNING":
+                before_ok = i == 0 or not (sql[i - 1].isalnum() or sql[i - 1] == "_")
+                after = i + 9
+                after_ok = after >= n or not (sql[after].isalnum() or sql[after] == "_")
+                if before_ok and after_ok:
+                    return i, sql[after:].strip()
+        i += 1
+    return None
 
 _ANY_RE = re.compile(r"=\s*ANY\s*\(\s*:(\d+)\s*\)", re.IGNORECASE)
 _NOT_ALL_RE = re.compile(r"!=\s*ALL\s*\(\s*:(\d+)\s*\)", re.IGNORECASE)
 # LIKE ANY / NOT LIKE ALL — capture the column name before the operator
-_LIKE_ANY_RE = re.compile(r"(\w+)\s+LIKE\s+ANY\s*\(\s*:(\d+)\s*\)", re.IGNORECASE)
-_NOT_LIKE_ALL_RE = re.compile(r"(\w+)\s+NOT\s+LIKE\s+ALL\s*\(\s*:(\d+)\s*\)", re.IGNORECASE)
-# array_position(:N, col) — PostgreSQL idiom for "keep the input list order"
-_ARRAY_POSITION_RE = re.compile(r"\barray_position\s*\(\s*:(\d+)\s*,\s*([\w.]+)\s*\)", re.IGNORECASE)
+_LIKE_ANY_RE = re.compile(r"([A-Za-z_][\w.]*)\s+LIKE\s+ANY\s*\(\s*:(\d+)\s*\)", re.IGNORECASE)
+_NOT_LIKE_ALL_RE = re.compile(r"([A-Za-z_][\w.]*)\s+NOT\s+LIKE\s+ALL\s*\(\s*:(\d+)\s*\)", re.IGNORECASE)
 
 _JSON_ARROW_TEXT_RE = re.compile(r'("?\w+"?)\s*->>\s*\'(\w+)\'')  # handles both col and "col"
 # Reserved-word columns ("trigger") are already quoted by the time this runs, so the
 # column group must accept the quoted form too — same shape as the arrow regex above.
 _JSON_HAS_KEY_RE = re.compile(r"(\"?\w+\"?)\s*\?\s*'(\w+)'")
-_JSONB_CONTAINS_RE = re.compile(r"(\w+)\s*@>\s*:(\d+)")
+# result_metadata::jsonb @> :N is special-cased before the generic rewrite below,
+# because that one emits JSON_EXISTS(col, '$' PASSING :N AS cond) and the '$' path
+# never references the bind, so Oracle evaluates it false for every row.
 _RESULT_METADATA_CONTAINS_RE = re.compile(r"((?:\w+\.)?result_metadata)\s*@>\s*:(\d+)", re.IGNORECASE)
+_JSONB_CONTAINS_RE = re.compile(r"([A-Za-z_][\w.]*)\s*@>\s*:(\d+)")
 
 # ---------------------------------------------------------------------------
 # Argument conversion helpers
@@ -96,6 +143,173 @@ _RESULT_METADATA_CONTAINS_RE = re.compile(r"((?:\w+\.)?result_metadata)\s*@>\s*:
 
 
 _UUID_STR_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+# INSERT INTO <table> (<col list>) VALUES  -- the column list is flat, so [^()]
+# is enough; the VALUES expression list is scanned separately for balance.
+# The table is captured because `id` cannot be classified without it.
+_INSERT_COLS_VALUES_RE = re.compile(
+    r"\bINSERT\s+INTO\s+([A-Za-z_][\w.\"]*)\s*\(([^()]*)\)\s*VALUES\s*",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _matching_paren_end(sql: str, open_idx: int) -> int | None:
+    """Index just past the ')' matching the '(' at `open_idx`, or None."""
+    depth = 0
+    for i in range(open_idx, len(sql)):
+        ch = sql[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return None
+
+
+# Tables whose `id` column is RAW(16). Elsewhere `id` is VARCHAR2 (DOCUMENTS,
+# KNOWLEDGE_PAGES, MENTAL_MODELS) or NUMBER (OBSERVATION_HISTORY,
+# MENTAL_MODEL_HISTORY), so the bare name cannot classify a bind. Derived from
+# the live schema via ALL_TAB_COLUMNS.
+_RAW_ID_TABLES = frozenset({
+    "audit_log",
+    "directives",
+    "entities",
+    "invalidated_memory_units",
+    "memory_units",
+    "webhooks",
+})
+
+# Column names whose Oracle type is not implied by the name alone.
+_AMBIGUOUS_UUID_COLS = frozenset({"id"})
+
+# Words that may follow a table name without being an alias. Without this,
+# `FROM memory_units WHERE ...` would read WHERE as an alias.
+_NOT_AN_ALIAS = frozenset({
+    "where", "group", "order", "having", "set", "values", "on", "using", "left",
+    "right", "inner", "outer", "full", "cross", "join", "fetch", "for", "limit",
+    "offset", "union", "and", "or", "not", "as", "select", "from", "returning",
+    "when", "then", "else", "end", "connect", "start", "partition", "model",
+    "sample", "pivot", "unpivot", "by", "asc", "desc", "nulls",
+})
+
+_FROM_ALIAS_RE = re.compile(
+    r"\b(?:FROM|JOIN)\s+([A-Za-z_][\w$#.]*)(?:\s+(?:AS\s+)?([A-Za-z_][\w$#]*))?",
+    re.IGNORECASE,
+)
+
+# Bind-to-column shapes, with an optional table/alias qualifier. The qualifier
+# is captured rather than ignored: reading `documents.id` as the bare name `id`
+# is what bound RAW bytes to DOCUMENTS.ID, a VARCHAR2(512) column.
+_QUALIFIED_COL = r"(?:([A-Za-z_][\w$#]*)\.)?([A-Za-z_][\w$#]*)"
+_COL_EQ_BIND_RE = re.compile(rf"{_QUALIFIED_COL}\s*(?:<>|!=|<=>|=)\s*:(\d+)\b")
+_BIND_EQ_COL_RE = re.compile(rf":(\d+)\s*(?:<>|!=|<=>|=)\s*{_QUALIFIED_COL}\b")
+_COL_ARRAY_BIND_RE = re.compile(
+    rf"{_QUALIFIED_COL}\s*(?:<>|!=|=)\s*(?:ALL|ANY)\s*\(\s*:(\d+)\b",
+    re.IGNORECASE,
+)
+
+# :N AS <col> in a SELECT ... FROM DUAL projection. The MERGE rewriter emits
+# USING (SELECT :1 AS entity_id_1, :2 AS entity_id_2 FROM DUAL) s, and
+# executemany uses the same shape. The alias names the target column, which is
+# how a UUID-shaped string knows whether to bind as RAW or VARCHAR2.
+_BIND_AS_ALIAS_RE = re.compile(r":(\d+)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)\b", re.IGNORECASE)
+
+
+def _table_aliases(query: str) -> dict[str, str]:
+    """Map alias -> table for resolving `alias.col`, plus each table -> itself.
+
+    Only the FROM/JOIN forms this codebase emits are handled. A qualifier that
+    cannot be resolved is left unresolved rather than guessed, and the caller
+    then declines to coerce.
+    """
+    out: dict[str, str] = {}
+    for m in _FROM_ALIAS_RE.finditer(query):
+        table = m.group(1).strip('"').lower()
+        if "." in table:
+            table = table.rsplit(".", 1)[-1]
+        out[table] = table
+        alias = (m.group(2) or "").strip('"').lower()
+        if alias and alias not in _NOT_AN_ALIAS:
+            out[alias] = table
+    return out
+
+
+def _uuid_bind_indices(query: str) -> set[int] | None:
+    """1-based bind indices that provably target a UUID (RAW(16)) column.
+
+    Returns None when the statement cannot be analysed confidently, which means
+    "keep the existing behaviour" -- so this is strictly additive and cannot
+    regress a statement it does not understand.
+
+    Why this is needed: a UUID written as a string must be converted to bytes
+    for a RAW(16) column, because Oracle will not implicitly convert the dashed
+    form. The same conversion applied to a VARCHAR2 column is a hard failure
+    (ORA-00932: expression is of data type CHAR, incompatible with expected
+    data type JSON/RAW). Deciding by value alone cannot tell the two apart --
+    `operation_id` is RAW(16) while `bank_id` is VARCHAR2(256) in every table,
+    and both accept UUID-shaped text. The target column decides it.
+    """
+    aliases = _table_aliases(query)
+    found: set[int] = set()
+
+    def is_uuid_col(
+        col: str, qualifier: str | None = None, table: str | None = None
+    ) -> bool:
+        c = col.strip().strip('"').lower()
+        if c in _AMBIGUOUS_UUID_COLS:
+            # `id` carries no type information, so the owning table decides.
+            # Take the INSERT target if known, else the explicit qualifier,
+            # resolving an alias to its table.
+            owner = table
+            if owner is None and qualifier:
+                q = qualifier.strip('"').lower()
+                owner = aliases.get(q, q)
+            if owner is None:
+                # Unqualified outside an INSERT: a statement's own bare `id`
+                # is its table's key, which is RAW for every RAW-id table.
+                return True
+            return owner.rsplit(".", 1)[-1] in _RAW_ID_TABLES
+        return c in _UUID_COL_EXACT or c.endswith(_UUID_COL_SUFFIXES)
+
+    # INSERT INTO t (c1, c2, ...) VALUES (:1, :2, ...)
+    m = _INSERT_COLS_VALUES_RE.search(query)
+    if m:
+        insert_table = m.group(1).strip('"').lower()
+        end = _matching_paren_end(query, m.end())
+        if end is not None:
+            cols = [c.strip() for c in _split_respecting_parens(m.group(2))]
+            exprs = _split_respecting_parens(query[m.end() + 1 : end - 1])
+            if cols and len(cols) == len(exprs):
+                for col, expr in zip(cols, exprs):
+                    if not is_uuid_col(col, table=insert_table):
+                        continue
+                    for b in re.finditer(r":(\d+)\b", expr):
+                        found.add(int(b.group(1)))
+
+    # col = :N  /  t.col = :N  /  col != :N  /  col <> :N
+    for m2 in _COL_EQ_BIND_RE.finditer(query):
+        if is_uuid_col(m2.group(2), m2.group(1)):
+            found.add(int(m2.group(3)))
+
+    # :N = col  /  :N = t.col
+    for m3 in _BIND_EQ_COL_RE.finditer(query):
+        if is_uuid_col(m3.group(3), m3.group(2)):
+            found.add(int(m3.group(1)))
+
+    # col != ALL(:N)  /  t.col = ANY(:N)  -- array comparisons on UUID columns
+    for m4 in _COL_ARRAY_BIND_RE.finditer(query):
+        if is_uuid_col(m4.group(2), m4.group(1)):
+            found.add(int(m4.group(3)))
+
+    # :N AS col in a SELECT ... FROM DUAL projection (used by MERGE via
+    # USING (SELECT :1 AS entity_id_1, :2 AS entity_id_2 FROM DUAL) s).
+    # The alias names the target column so it resolves directly.
+    for m5 in _BIND_AS_ALIAS_RE.finditer(query):
+        if is_uuid_col(m5.group(2)):
+            found.add(int(m5.group(1)))
+
+    return found
 
 
 def _convert_arg(value: Any) -> Any:
@@ -128,9 +342,78 @@ def _convert_arg(value: Any) -> Any:
     return value
 
 
-def _convert_args(args: tuple[Any, ...]) -> tuple[Any, ...]:
+def _convert_arg_for_bind(value: Any, index: int, uuid_binds: set[int] | None) -> Any:
+    """_convert_arg, but a UUID-shaped *string* becomes bytes only when bind
+    `index` is known to target a UUID column.
+
+    `uuid_binds is None` means the statement was not analysed, so the previous
+    unconditional behaviour is kept. A `uuid.UUID` object is always converted:
+    it can only have come from a RAW column, since that is how those read back.
+    """
+    if (
+        uuid_binds is not None
+        and isinstance(value, str)
+        and _UUID_STR_RE.match(value)
+        and index not in uuid_binds
+    ):
+        # Targets a VARCHAR2 column (bank_id, document_id, chunk_id, ...).
+        # Leave it as text; converting would bind RAW bytes to VARCHAR2.
+        return value
+    return _convert_arg(value)
+
+
+def _convert_args(args: tuple[Any, ...], query: str | None = None) -> tuple[Any, ...]:
     """Convert a tuple of Python values to Oracle-compatible bind values."""
-    return tuple(_convert_arg(a) for a in args)
+    uuid_binds = _uuid_bind_indices(query) if query else None
+    return tuple(
+        _convert_arg_for_bind(a, i + 1, uuid_binds) for i, a in enumerate(args)
+    )
+
+
+# Oracle's numeric server error code for "unique constraint violated"
+# (ORA-00001). python-oracledb has no named constant for it -- its `errors`
+# module holds only driver-level ERR_* codes -- so the number is used directly.
+_ORACLE_DUPLICATE_KEY = 1
+
+
+def _code_is_duplicate(code: Any) -> bool:
+    """True if a driver-supplied error code means a unique-constraint violation.
+
+    Accepts both representations: python-oracledb puts the numeric server
+    error on `args[0].code`, while some drivers expose the "ORA-00001" string
+    form.
+    """
+    if code is None:
+        return False
+    if isinstance(code, int):
+        return code == _ORACLE_DUPLICATE_KEY
+    return str(code) == "ORA-00001"
+
+
+def _is_duplicate_key(exc: BaseException) -> bool:
+    """True if `exc` is an Oracle unique-constraint violation (ORA-00001).
+
+    Reads the error code rather than matching message text: wording is not a
+    contract, and a reworded or localized message would silently turn
+    `ignore_duplicate` into a no-op and put the ERROR log straight back.
+
+    python-oracledb's DatabaseError has **no** `.code` attribute in thin mode --
+    the server error number lives on the `_Error` object in `args[0]`, as a
+    plain int. Walking both `cause` and `context` as well as nested args
+    covers the ways oracledb surfaces the error depending on how it was
+    raised.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if _code_is_duplicate(getattr(cur, "code", None)):
+            return True
+        for arg in getattr(cur, "args", ()) or ():
+            if _code_is_duplicate(getattr(arg, "code", None)):
+                return True
+        cur = cur.__cause__ or cur.__context__
+    return False
 
 
 def _needs_clob_bind(val: Any) -> bool:
@@ -142,6 +425,62 @@ def _needs_clob_bind(val: Any) -> bool:
     if not isinstance(val, str) or not val:
         return False
     return val[0] in ("{", "[") or (len(val) > 1000 and len(val.encode()) > 4000)
+
+
+def _convert_vector_bind_params(
+    query: str,
+    params: dict[str, Any] | None,
+) -> None:
+    """Convert VECTOR bind parameters to float32 array.array values.
+
+    python-oracledb expects FLOAT32 VECTOR binds as array.array("f").
+    Hindsight's PostgreSQL-oriented code supplies embeddings as Python lists,
+    while _convert_arg() normally serializes lists to JSON. Restore numeric
+    vector parameters as float32 arrays.
+
+    Two spellings identify a vector bind, and both must be handled:
+
+    1. ``VECTOR_DISTANCE(col, :N, COSINE)`` -- Oracle form, produced by the
+       pgvector ``<=>`` rewrite. Present only *after* rewriting.
+    2. ``$N::vector`` -- the PostgreSQL cast used by INSERT statements such as
+       consolidation's insert_observation. ``_rewrite_pg_to_oracle`` strips the
+       cast, so this form is present only *before* rewriting.
+
+    Callers therefore invoke this twice: once with the rewritten query and once
+    with the original. Missing the second form is not a subtle bug: an
+    unconverted 2048-float embedding stays a JSON string of roughly 43,000
+    characters, which Oracle rejects against the VECTOR column with
+    "ORA-01461: The value at bind position N exceeded the maximum VARCHAR2
+    length" -- the exact failure that broke consolidation.
+    """
+    if not params:
+        return
+
+    vector_keys = set(
+        re.findall(
+            r"VECTOR_DISTANCE\s*\([^,]+,\s*:(\w+)\s*,",
+            query,
+            flags=re.IGNORECASE,
+        )
+    )
+    vector_keys.update(
+        re.findall(r"\$(\d+)\s*::\s*vector\b", query, flags=re.IGNORECASE)
+    )
+
+    for key in set(vector_keys):
+        value = params.get(key)
+
+        if value is None:
+            continue
+
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        if isinstance(value, (list, tuple)):
+            params[key] = array.array("f", (float(x) for x in value))
 
 
 def _needs_clob_lob(val: Any) -> bool:
@@ -163,17 +502,48 @@ def _needs_blob_bind(val: Any) -> bool:
 
 
 def _convert_args_list(args_list: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+
     """Convert a list of tuples for executemany."""
-    return [_convert_args(row) for row in args_list]
+    return [_convert_args(row, query) for row in args_list]
 
 
 # ---------------------------------------------------------------------------
 # Row conversion helpers (Oracle → Python)
 # ---------------------------------------------------------------------------
 
-# Column names that are known to contain UUIDs stored as RAW(16)
-_UUID_COL_SUFFIXES = ("_id", "_uuid")
-_UUID_COL_EXACT = {"id", "internal_id"}
+# Column names that are known to contain UUIDs stored as RAW(16). Taken from
+# the live schema via ALL_TAB_COLUMNS rather than from a suffix rule.
+#
+# The previous rule -- exact {"id", "internal_id"} or any name ending in "_id"
+# -- also matched 32 columns that are NOT RAW: every BANK_ID is VARCHAR2(256),
+# DOCUMENTS.ID is VARCHAR2(512), CHUNK_ID/DOCUMENT_ID are VARCHAR2(1024),
+# SERIALIZATION_KEY is VARCHAR2(16000), and OBSERVATION_HISTORY.ID and
+# MENTAL_MODEL_HISTORY.ID are NUMBER(22). Any plain 32-character hex string in
+# those columns was therefore silently converted into a uuid.UUID on read.
+#
+# Measured against the schema, the old rule had 32 false positives and 0 false
+# negatives, so narrowing it can only remove wrong conversions.
+#
+# Residual: `id` is RAW(16) in six tables (AUDIT_LOG, DIRECTIVES, ENTITIES,
+# INVALIDATED_MEMORY_UNITS, MEMORY_UNITS, WEBHOOKS) but VARCHAR2 or NUMBER in
+# five others (DOCUMENTS, KNOWLEDGE_PAGES, MENTAL_MODELS, OBSERVATION_HISTORY,
+# MENTAL_MODEL_HISTORY). A bare column name cannot distinguish them; doing so
+# needs the source table, which this helper is not given. `id` stays in the set
+# because dropping it would stop genuine RAW ids from converting at all.
+_UUID_COL_SUFFIXES = ("_uuid",)
+_UUID_COL_EXACT = {
+    "id",
+    "internal_id",
+    "operation_id",
+    "entity_id",
+    "entity_id_1",
+    "entity_id_2",
+    "unit_id",
+    "observation_id",
+    "source_id",
+    "from_unit_id",
+    "to_unit_id",
+}
 
 # Columns that store JSON arrays/objects as CLOB in Oracle and need deserialization
 _JSON_COL_NAMES = {
@@ -445,8 +815,17 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
     # gen_random_uuid() → SYS_GUID()
     query = re.sub(r"\bgen_random_uuid\(\)", "SYS_GUID()", query, flags=re.IGNORECASE)
     # Boolean literals: Oracle uses NUMBER(1) for booleans
-    query = re.sub(r"\b=\s*TRUE\b", "= 1", query, flags=re.IGNORECASE)
-    query = re.sub(r"\b=\s*FALSE\b", "= 0", query, flags=re.IGNORECASE)
+    query = re.sub(r"=\s*TRUE\b", "= 1", query, flags=re.IGNORECASE)
+    query = re.sub(r"=\s*FALSE\b", "= 0", query, flags=re.IGNORECASE)
+    # IS TRUE / IS FALSE are PostgreSQL's three-valued boolean comparisons.
+    # Oracle's equivalent is IS ... -- no changes needed for the IS form since
+    # Oracle already supports it; this existence check prevents the assertion
+    # from falsely refusing it. The patterns here are purely for the assertion's
+    # regex list, which only checks for bare TRUE/FALSE literals.
+    query = re.sub(r"IS\s+TRUE\b", "IS 1", query, flags=re.IGNORECASE)
+    query = re.sub(r"IS\s+FALSE\b", "IS 0", query, flags=re.IGNORECASE)
+    query = re.sub(r"IS\s+NOT\s+TRUE\b", "IS NOT 1", query, flags=re.IGNORECASE)
+    query = re.sub(r"IS\s+NOT\s+FALSE\b", "IS NOT 0", query, flags=re.IGNORECASE)
     # FOR NO KEY UPDATE → FOR UPDATE (Oracle has only FOR UPDATE; it does not block
     # indexed-FK child inserts the way PG's FOR UPDATE would, so plain FOR UPDATE is
     # the correct equivalent). Must run before the FOR SHARE rule below.
@@ -459,19 +838,82 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
     query = re.sub(r'(?<!")\btrigger\b(?!")', '"trigger"', query)
 
     # date_trunc('interval', expr) → TRUNC(expr, 'fmt')
-    # The second capture group is a balanced expression (not just a column name)
-    # to handle e.g. date_trunc('hour', created_at AT TIME ZONE 'UTC').
-    _DATE_TRUNC_MAP = {"day": "DD", "hour": "HH24", "month": "MM", "week": "IW", "year": "YYYY", "minute": "MI"}
+    #
+    # Parsed by scanning for the matching close paren rather than by regex. The
+    # regex this replaces captured `(.+?)\s*\)`, which stops at the FIRST close
+    # paren, so any nested call was cut mid-expression and produced unbalanced
+    # SQL -- e.g. date_trunc('day', GREATEST(a, LEAST(b, c))) became
+    # `CAST(GREATEST(a, LEAST(b, c AS DATE), 'DD'))`.
+    #
+    # Unknown intervals are refused rather than defaulted. The old code fell
+    # back to 'DD' through dict.get(interval, "DD"), so date_trunc('quarter', x)
+    # silently returned a DAY bucket: a wrong answer from a caller-supplied
+    # parameter, with no error anywhere.
+    _DATE_TRUNC_FMT = {
+        "year": "YYYY",
+        "quarter": "Q",
+        "month": "MM",
+        "week": "IW",
+        "day": "DD",
+        "hour": "HH24",
+        "minute": "MI",
+        "second": "SS",
+    }
 
-    def _rewrite_date_trunc(m):
-        interval = m.group(1).lower()
-        expr = m.group(2).strip()
-        # Strip AT TIME ZONE — Oracle timestamps are already in the session timezone.
-        expr = re.sub(r"\s+AT\s+TIME\s+ZONE\s+'[^']*'", "", expr, flags=re.IGNORECASE)
-        fmt = _DATE_TRUNC_MAP.get(interval, "DD")
-        return f"TRUNC(CAST({expr} AS DATE), '{fmt}')"
+    def _extract_call_inner(sql: str, open_idx: int) -> tuple[str, int] | None:
+        """Inner text and index after the close paren of the call opening at `open_idx`."""
+        depth = 0
+        for i in range(open_idx, len(sql)):
+            ch = sql[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return sql[open_idx + 1 : i], i + 1
+        return None
 
-    query = re.sub(r"date_trunc\(\s*'(\w+)'\s*,\s*(.+?)\s*\)", _rewrite_date_trunc, query, flags=re.IGNORECASE)
+    def _rewrite_date_trunc_calls(sql: str) -> str:
+        call_re = re.compile(r"date_trunc\s*\(", re.IGNORECASE)
+        pieces: list[str] = []
+        pos = 0
+        while True:
+            m = call_re.search(sql, pos)
+            if m is None:
+                pieces.append(sql[pos:])
+                return "".join(pieces)
+            open_idx = m.end() - 1
+            # Keep text up to the START of the call, not up to its paren, or the
+            # literal "date_trunc" would be left in front of the replacement.
+            pieces.append(sql[pos : m.start()])
+            extracted = _extract_call_inner(sql, open_idx)
+            if extracted is None:
+                # Unbalanced input: leave the remainder untouched so the
+                # fail-closed assertion reports it rather than us guessing.
+                pieces.append(sql[open_idx:])
+                return "".join(pieces)
+            inner, after = extracted
+            args = _split_respecting_parens(inner)
+            if len(args) < 2:
+                pieces.append(sql[open_idx:after])
+                pos = after
+                continue
+            interval = args[0].strip().strip("'\"").lower()
+            fmt = _DATE_TRUNC_FMT.get(interval)
+            if fmt is None:
+                raise OracleRewriteError(
+                    f"date_trunc interval {interval!r} has no Oracle TRUNC format. "
+                    f"Known intervals: {sorted(_DATE_TRUNC_FMT)}. Refusing rather "
+                    f"than emitting a mismatched bucket. Statement: {sql[:400]!r}"
+                )
+            expr = ", ".join(args[1:]).strip()
+            # Oracle timestamps already carry the session zone; a trailing
+            # AT TIME ZONE inside the call is redundant and not valid Oracle.
+            expr = re.sub(r"\s+AT\s+TIME\s+ZONE\s+'[^']*'", "", expr, flags=re.IGNORECASE)
+            pieces.append(f"TRUNC(CAST({expr} AS DATE), '{fmt}')")
+            pos = after
+
+    query = _rewrite_date_trunc_calls(query)
 
     # interval 'N units' → NUMTODSINTERVAL(N, 'UNIT')
     # Handles PG interval literals like interval '7 days', interval '1 hour', etc.
@@ -511,7 +953,52 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
     query = _RESULT_METADATA_CONTAINS_RE.sub(
         r"JSON_VALUE(\1, '$.parent_operation_id') = JSON_VALUE(:\2, '$.parent_operation_id')", query
     )
-    query = _JSONB_CONTAINS_RE.sub(r"JSON_EXISTS(\1, '$' PASSING :\2 AS cond)", query)
+
+
+
+    def _rewrite_jsonb_contains(m: re.Match) -> str:
+        col, param_num = m.group(1), m.group(2)
+        # _JSONB_CONTAINS_RE captures only the numeric part of :N.
+        param = f":{param_num}"
+        # Oracle stores PG text[] tag columns as JSON arrays in CLOB. Handle
+        # array containment here, before the generic JSON-object rewrite below;
+        # relying on the later JSON_EXISTS repair only worked for an unqualified
+        # bare name and was semantically wrong for aliases (mu.tags).
+        leaf = col.rsplit(".", 1)[-1].strip('"').lower()
+        if leaf == "tags":
+            return (
+                f"(SELECT COUNT(*) FROM JSON_TABLE({param}, '$[*]' "
+                "COLUMNS (val VARCHAR2(256) PATH '$')) jt "
+                f"WHERE JSON_EXISTS({col}, '$[*]?(@ == $v)' "
+                'PASSING jt.val AS "v")) = '
+                f"JSON_VALUE({param}, '$.size()' RETURNING NUMBER)"
+            )
+        return f"JSON_EXISTS({col}, '$' PASSING {param} AS cond)"
+
+    query = _JSONB_CONTAINS_RE.sub(_rewrite_jsonb_contains, query)
+
+    # PG array contained-by: tags <@ :N means every element in the column is in
+    # the supplied JSON array. Oracle has no JSON-array subset operator, so
+    # count the column's elements that occur in the parameter and compare with
+    # the column's array size. Restrict the rewrite to the known text[] storage
+    # column; JSON-object contained-by is not equivalent to this operation.
+    def _rewrite_tags_contained_by(m: re.Match) -> str:
+        col, param = m.group(1), m.group(2)
+        return (
+            f"(SELECT COUNT(*) FROM JSON_TABLE({col}, '$[*]' "
+            "COLUMNS (val VARCHAR2(256) PATH '$')) jt "
+            f"WHERE JSON_EXISTS({param}, '$[*]?(@ == $v)' "
+            'PASSING jt.val AS "v")) = '
+            f"JSON_VALUE({col}, '$.size()' RETURNING NUMBER)"
+        )
+
+    query = re.sub(
+        r"([A-Za-z_][\w.]*\.tags|tags)\s*<@\s*(:\w+)",
+        _rewrite_tags_contained_by,
+        query,
+        flags=re.IGNORECASE,
+    )
+
 
     # pgvector distance operator: col <=> :N → VECTOR_DISTANCE(col, :N, COSINE)
     # Use [\w.]+ to capture table-qualified columns like mu.embedding
@@ -524,64 +1011,49 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
     # LIMIT/OFFSET rewriting: PG uses "LIMIT N OFFSET M" or "LIMIT N" or "OFFSET M LIMIT N"
     # Oracle uses "OFFSET M ROWS FETCH FIRST N ROWS ONLY" (OFFSET before FETCH FIRST)
     #
-    # IMPORTANT: Oracle does NOT allow FETCH FIRST with FOR UPDATE (ORA-02014 — treats
-    # the row-limiting clause as an inline view). When FOR UPDATE is present, we must use
-    # ROWNUM in the WHERE clause instead. This is safe because FOR UPDATE + LIMIT queries
-    # in the poller are simple single-table SELECTs with no OFFSET.
-    has_for_update = bool(re.search(r"\bFOR\s+UPDATE\b", query, re.IGNORECASE))
-
-    if has_for_update:
-        # FOR UPDATE path: use ROWNUM instead of FETCH FIRST.
-        # Extract and remove LIMIT clause, inject ROWNUM into WHERE.
-        limit_val = None
-        limit_match = re.search(r"\bLIMIT\s+(\d+|:\w+)\b", query, re.IGNORECASE)
-        if limit_match:
-            limit_val = limit_match.group(1)
-            query = re.sub(r"\bLIMIT\s+(\d+|:\w+)\b", "", query, flags=re.IGNORECASE)
-
-        # Remove OFFSET if present (not expected with FOR UPDATE, but be safe)
-        query = re.sub(r"\bOFFSET\s+(\d+|:\w+)\b(?!\s+ROWS)", "", query, flags=re.IGNORECASE)
-
-        # Inject ROWNUM constraint into WHERE clause
-        if limit_val is not None:
-            # Insert ROWNUM <= N right after WHERE
-            query = re.sub(
-                r"\bWHERE\b",
-                f"WHERE ROWNUM <= {limit_val} AND",
-                query,
-                count=1,
-                flags=re.IGNORECASE,
-            )
-    else:
-        # No FOR UPDATE: use standard FETCH FIRST / OFFSET ROWS syntax
-        # First handle "LIMIT N OFFSET M" → "OFFSET M ROWS FETCH FIRST N ROWS ONLY"
-        query = re.sub(
-            r"\bLIMIT\s+(\d+|:\w+)\s+OFFSET\s+(\d+|:\w+)\b",
-            r"OFFSET \2 ROWS FETCH FIRST \1 ROWS ONLY",
-            query,
-            flags=re.IGNORECASE,
-        )
-        # Handle "OFFSET M LIMIT N" → "OFFSET M ROWS FETCH FIRST N ROWS ONLY"
-        query = re.sub(
-            r"\bOFFSET\s+(\d+|:\w+)\s+LIMIT\s+(\d+|:\w+)\b",
-            r"OFFSET \1 ROWS FETCH FIRST \2 ROWS ONLY",
-            query,
-            flags=re.IGNORECASE,
-        )
-        # Handle standalone "LIMIT N" (no OFFSET)
-        query = re.sub(
-            r"\bLIMIT\s+(\d+|:\w+)\b",
-            r"FETCH FIRST \1 ROWS ONLY",
-            query,
-            flags=re.IGNORECASE,
-        )
-        # Handle standalone "OFFSET N" (no LIMIT, less common)
-        query = re.sub(
-            r"\bOFFSET\s+(\d+|:\w+)\b(?!\s+ROWS)",
-            r"OFFSET \1 ROWS",
-            query,
-            flags=re.IGNORECASE,
-        )
+    # FOR UPDATE is handled by the same FETCH FIRST syntax. This previously used
+    # `WHERE ROWNUM <= n` for FOR UPDATE queries, on the belief that Oracle
+    # rejects FETCH FIRST with FOR UPDATE (ORA-02014). That is not true here:
+    # measured on the real claim shape on 26ai, FOR UPDATE SKIP LOCKED with
+    # ORDER BY ... FETCH FIRST works, while the ROWNUM form is silently wrong.
+    #
+    # Oracle applies ROWNUM during the scan, BEFORE ORDER BY, so
+    # `WHERE ROWNUM <= n ... ORDER BY created_at` takes an arbitrary n rows and
+    # only then sorts them. Measured against rows whose scan order is the
+    # reverse of created_at order, the claim returned the n NEWEST pending
+    # operations instead of the n OLDEST -- silently, with no error, breaking
+    # the oldest-first fairness of every claim query (11 call sites in
+    # ops_oracle.py) and the "oldest claimable peer" argument that
+    # bank_serialization_sql depends on.
+    #
+    # Handle "LIMIT N OFFSET M" → "OFFSET M ROWS FETCH FIRST N ROWS ONLY"
+    query = re.sub(
+        r"\bLIMIT\s+(\d+|:\w+)\s+OFFSET\s+(\d+|:\w+)\b",
+        r"OFFSET \2 ROWS FETCH FIRST \1 ROWS ONLY",
+        query,
+        flags=re.IGNORECASE,
+    )
+    # Handle "OFFSET M LIMIT N" → "OFFSET M ROWS FETCH FIRST N ROWS ONLY"
+    query = re.sub(
+        r"\bOFFSET\s+(\d+|:\w+)\s+LIMIT\s+(\d+|:\w+)\b",
+        r"OFFSET \1 ROWS FETCH FIRST \2 ROWS ONLY",
+        query,
+        flags=re.IGNORECASE,
+    )
+    # Handle standalone "LIMIT N" (no OFFSET)
+    query = re.sub(
+        r"\bLIMIT\s+(\d+|:\w+)\b",
+        r"FETCH FIRST \1 ROWS ONLY",
+        query,
+        flags=re.IGNORECASE,
+    )
+    # Handle standalone "OFFSET N" (no LIMIT, less common)
+    query = re.sub(
+        r"\bOFFSET\s+(\d+|:\w+)\b(?!\s+ROWS)",
+        r"OFFSET \1 ROWS",
+        query,
+        flags=re.IGNORECASE,
+    )
 
     # PG non-empty array check: tags != '{}' → Oracle: NOT (DBMS_LOB empty check)
     query = re.sub(
@@ -608,7 +1080,7 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
         param = m.group(2)
         return f"EXISTS (SELECT 1 FROM JSON_TABLE({param}, '$[*]' COLUMNS (val VARCHAR2(256) PATH '$')) jt WHERE JSON_EXISTS({col}, '$[*]?(@ == $v)' PASSING jt.val AS \"v\"))"
 
-    query = re.sub(r"(\w+)\s*&&\s*(:\w+)", _rewrite_array_overlap, query)
+    query = re.sub(r"([A-Za-z_][\w.]*)\s*&&\s*(:\w+)", _rewrite_array_overlap, query)
 
     # PG array containment: tags @> :N → Oracle: all elements from param exist in col
     # (Override the JSONB contains regex which doesn't work for array containment)
@@ -632,7 +1104,7 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
 
     # ILIKE → UPPER(...) LIKE UPPER(...)
     query = re.sub(
-        r"(\w+)\s+ILIKE\s+(:\w+)",
+        r"([A-Za-z_][\w.]*)\s+ILIKE\s+(:\w+)",
         r"UPPER(\1) LIKE UPPER(\2)",
         query,
         flags=re.IGNORECASE,
@@ -660,6 +1132,41 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
     # CTE AS MATERIALIZED (...) → AS (...) — Oracle doesn't support MATERIALIZED CTE hint
     query = re.sub(r"\bAS\s+MATERIALIZED\s*\(", "AS (", query, flags=re.IGNORECASE)
 
+    # FILTER (WHERE ...) clause — PostgreSQL-only aggregate filter.
+    # COUNT(*) FILTER (WHERE c) → COUNT(CASE WHEN c THEN 1 END).
+    # The match text from re.sub only covers up to the '('; the condition and
+    # its ')' are located by balance and the result replaces the whole blob.
+    _FILTER_HEAD_RE = re.compile(
+        r"COUNT\s*\(\s*\*\s*\)\s+FILTER\s*\(",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    def _rewrite_filter(m):
+        start = m.end() - 1  # position of the '(' after FILTER
+        inner_end = _matching_paren_end(query, start)
+        if inner_end is None:
+            return m.group(0)
+        inner = query[start + 1 : inner_end - 1]
+        inner = re.sub(r"^\s*WHERE\s+", "", inner, flags=re.IGNORECASE)
+        if inner:
+            replacement = f"COUNT(CASE WHEN {inner} THEN 1 END)"
+        else:
+            replacement = m.group(0)
+        # The match only covers up to '('; we must also consume everything
+        # up to the matching ')'. Compute total span and replace it.
+        total_start = m.start()
+        total_end = inner_end
+        before = query[:total_start]
+        after = query[total_end:]
+        return before + replacement + after
+
+    while _FILTER_HEAD_RE.search(query):
+        m = _FILTER_HEAD_RE.search(query)
+        result = _rewrite_filter(m)
+        if result == query:
+            break  # no progress -> avoid infinite loop
+        query = result
+
     # COALESCE(:N, <numeric_literal>) — Oracle defaults None bind vars to VARCHAR2,
     # causing type mismatch.  Wrap the bind var in TO_NUMBER so types align.
     query = re.sub(
@@ -681,7 +1188,9 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
         query = _ON_CONFLICT_DO_NOTHING_RE.sub("", query)
         ignore_dup = True
         # Also strip any RETURNING clause (can't return from a dup-suppressed insert)
-        query = _RETURNING_RE.sub("", query)
+        found_returning = _find_statement_returning(query)
+        if found_returning is not None:
+            query = query[: found_returning[0]].rstrip()
         query = query.strip()
 
     # ON CONFLICT ... DO UPDATE SET → rewrite to MERGE INTO
@@ -697,14 +1206,76 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
     # have RETURNING rewritten, even if they contain the word in a string literal
     # or CTE alias.
     if not ignore_dup and re.match(r"\s*(INSERT|UPDATE|DELETE)\b", query, re.IGNORECASE):
-        m = _RETURNING_RE.search(query)
-        if m:
-            ret_cols_str = m.group(1).strip()
-            returning_cols = [c.strip() for c in ret_cols_str.split(",") if c.strip()]
+        found_returning = _find_statement_returning(query)
+        if found_returning is not None:
+            start, ret_cols_str = found_returning
+            # Split respecting parens: a returned expression may contain commas,
+            # e.g. RETURNING (a || b), count(*).
+            returning_cols = [c.strip() for c in _split_respecting_parens(ret_cols_str) if c.strip()]
             into_vars = ", ".join(f":ret_{i}" for i in range(len(returning_cols)))
-            query = query[: m.start()] + f"RETURNING {ret_cols_str} INTO {into_vars}" + query[m.end() :]
+            query = query[:start] + f"RETURNING {ret_cols_str} INTO {into_vars}"
+
+    # Fail closed: anything still PostgreSQL at this point would be sent to
+    # Oracle verbatim and rejected there as an opaque syntax error, usually in
+    # production and often only for particular input shapes. Naming it here
+    # makes it reproducible locally and points straight at the missing rewrite.
+    assert_fully_rewritten(query)
 
     return RewriteResult(query, ignore_dup, returning_cols)
+
+
+# PostgreSQL constructs with no Oracle equivalent that this rewriter does not
+# translate. If one survives into the rewritten statement it is sent to Oracle
+# verbatim and fails there as an opaque syntax error (ORA-00900/00903/00907),
+# usually in production and often only for some shapes of input.
+#
+# This list is the safety net that turns that class of bug from "mysterious
+# runtime failure" into "loud, local, naming the construct". It has already
+# caught real defects: `jsonb_set` and `<@` were both reaching Oracle
+# untranslated because nothing checked. Add an entry when adding a rewrite --
+# and delete entries as they gain proper handling.
+#
+# Each entry is (compiled pattern, human name). Patterns are matched against
+# SQL text with string literals still present, so a literal containing e.g.
+# "LIMIT " would false-positive; keep patterns specific enough to avoid that.
+_UNREWRITTEN_PG_CONSTRUCTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?<![\w.<>=!])&&(?!\s*=)"), "&& array overlap"),
+    (re.compile(r"(?<![\w.])@>(?![\w.])"), "@> jsonb contains"),
+    (re.compile(r"(?<![\w.])<@(?![\w.])"), "<@ jsonb contained-by"),
+    (re.compile(r"::"), ":: cast"),
+    (re.compile(r"\bILIKE\b", re.IGNORECASE), "ILIKE"),
+    (re.compile(r"\bDISTINCT\s+ON\b", re.IGNORECASE), "DISTINCT ON"),
+    (re.compile(r"\bLIMIT\s+\$?\d", re.IGNORECASE), "LIMIT"),
+    (re.compile(r"\bSIMILAR\s+TO\b", re.IGNORECASE), "SIMILAR TO"),
+    (re.compile(r"\bdate_trunc\s*\(", re.IGNORECASE), "date_trunc()"),
+    (re.compile(r"\bjsonb_", re.IGNORECASE), "jsonb_* function"),
+    (re.compile(r"\bunnest\s*\(", re.IGNORECASE), "unnest()"),
+    (re.compile(r"\bgenerate_series\s*\(", re.IGNORECASE), "generate_series()"),
+    (re.compile(r"\barray_agg\s*\(", re.IGNORECASE), "array_agg()"),
+    (re.compile(r"\bstring_agg\s*\(", re.IGNORECASE), "string_agg()"),
+    (re.compile(r"\bAT\s+TIME\s+ZONE\b", re.IGNORECASE), "AT TIME ZONE"),
+    (re.compile(r"\bON\s+CONFLICT\b", re.IGNORECASE), "ON CONFLICT"),
+    (re.compile(r"\bto_jsonb\s*\(|\bto_json\s*\(", re.IGNORECASE), "to_json*()"),
+    (re.compile(r"\bint4range\s*\(|\bint8range\s*\(|\btstzrange\s*\(", re.IGNORECASE), "range constructor"),
+)
+
+
+def assert_fully_rewritten(query: str) -> None:
+    """Raise if `query` still contains a PostgreSQL construct we do not translate.
+
+    Called at the end of `_rewrite_pg_to_oracle`. The rewriter is an ordered
+    pipeline of regex substitutions with no parser, so anything it does not
+    anticipate reaches Oracle verbatim and surfaces there as a syntax error far
+    from its cause. Failing here instead names the construct immediately.
+    """
+    for pattern, name in _UNREWRITTEN_PG_CONSTRUCTS:
+        if pattern.search(query):
+            raise OracleRewriteError(
+                f"Untranslated PostgreSQL construct reached Oracle: {name!r} "
+                f"(pattern {pattern.pattern!r}). The rewriter does not handle "
+                f"it, so Oracle would reject the statement with a syntax error. "
+                f"Statement: {query[:400]!r}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -733,7 +1304,7 @@ def _oracle_connect_params(dsn: str) -> dict[str, Any]:
     }
     descriptor = parse_qs(parsed.query).get("dsn")
     if descriptor and descriptor[0]:
-        params["dsn"] = descriptor[0]
+        params["dsn"] = unquote(descriptor[0])
     else:
         host = parsed.hostname or "localhost"
         port = parsed.port or 1521
@@ -793,7 +1364,11 @@ class OracleConnection(DatabaseConnection):
     # -- helpers ----------------------------------------------------------
 
     def _make_bind_params(
-        self, cursor: Any, args: tuple[Any, ...], returning_cols: list[str] | None
+        self,
+        cursor: Any,
+        args: tuple[Any, ...],
+        returning_cols: list[str] | None,
+        query: str | None = None,
     ) -> dict[str, Any] | None:
         """Build bind params as a dict (named binding).
 
@@ -806,7 +1381,7 @@ class OracleConnection(DatabaseConnection):
         that would otherwise bind as VARCHAR2.
         """
         oracledb = _import_oracledb()
-        converted = _convert_args(args) if args else ()
+        converted = _convert_args(args, query) if args else ()
 
         if not converted and returning_cols is None:
             return None
@@ -952,6 +1527,19 @@ class OracleConnection(DatabaseConnection):
         expand_re = re.compile(r"/\*EXPAND:(\d+)\*/")
         keys_to_remove: set[str] = set()
 
+        # PostgreSQL orders by an array's position:
+        #     ORDER BY array_position($1::uuid[], id)
+        # Oracle's array_position is a JSON function, so passing the expanded list
+        # to it raises ORA-00932 (CHAR is incompatible with expected data type
+        # JSON). The same ordering is expressible over the per-element binds this
+        # function already creates, so translate it into a CASE that maps each
+        # value to its index. Recorded here rather than in the rewriter because
+        # the bind names do not exist until expansion runs.
+        array_pos_re = re.compile(
+            r"array_position\(\s*:(\d+)\s*,\s*([A-Za-z_][\w.]*)\s*\)", re.IGNORECASE
+        )
+        expanded_lists: dict[str, list[str]] = {}
+
         def _replace(m):
             param_key = m.group(1)
             val = params.get(param_key)
@@ -983,12 +1571,26 @@ class OracleConnection(DatabaseConnection):
                 params[k] = item
                 expanded_keys.append(f":{k}")
             keys_to_remove.add(param_key)
+            expanded_lists[param_key] = expanded_keys
             return ", ".join(expanded_keys)
 
         query = expand_re.sub(_replace, query)
 
+        # Translate array_position over an expanded list into a positional CASE.
+        def _replace_array_pos(m):
+            param_key, column = m.group(1), m.group(2)
+            expanded_keys = expanded_lists.get(param_key)
+            if expanded_keys is None:
+                return m.group(0)
+            arms = " ".join(
+                f"WHEN {bind} THEN {idx}" for idx, bind in enumerate(expanded_keys)
+            )
+            return f"CASE {column} {arms} ELSE {len(expanded_keys)} END"
+
+        query = array_pos_re.sub(_replace_array_pos, query)
+
         # Expand LIKE ANY: col /*LIKE_ANY:N:col*/ → (col LIKE :p0 OR col LIKE :p1 ...)
-        like_any_re = re.compile(r"(\w+)\s*/\*LIKE_ANY:(\d+):(\w+)\*/")
+        like_any_re = re.compile(r"([A-Za-z_][\w.]*)\s*/\*LIKE_ANY:(\d+):([A-Za-z_][\w.]*)\*/")
 
         def _replace_like_any(m):
             _col = m.group(1)  # redundant column ref before marker
@@ -1010,7 +1612,7 @@ class OracleConnection(DatabaseConnection):
         query = like_any_re.sub(_replace_like_any, query)
 
         # Expand NOT LIKE ALL: col /*NOT_LIKE_ALL:N:col*/ → (col NOT LIKE :p0 AND ...)
-        not_like_all_re = re.compile(r"(\w+)\s*/\*NOT_LIKE_ALL:(\d+):(\w+)\*/")
+        not_like_all_re = re.compile(r"([A-Za-z_][\w.]*)\s*/\*NOT_LIKE_ALL:(\d+):([A-Za-z_][\w.]*)\*/")
 
         def _replace_not_like_all(m):
             _col = m.group(1)
@@ -1143,7 +1745,20 @@ class OracleConnection(DatabaseConnection):
 
     # -- DML methods ------------------------------------------------------
 
-    async def execute(self, query: str, *args: Any, timeout: float | None = None) -> str:
+    async def execute(
+        self,
+        query: str,
+        *args: Any,
+        timeout: float | None = None,
+        ignore_duplicate: bool = False,
+    ) -> str:
+        # `ignore_duplicate` tells this layer that a unique-constraint violation
+        # is an expected outcome the caller handles itself, not a failure.
+        # The document upsert relies on it: PostgreSQL does this in one
+        # statement via ON CONFLICT ... DO UPDATE, Oracle has no ON CONFLICT,
+        # so an ORA-00001 is how the upsert learns the row already exists and
+        # falls back to UPDATE. Without this flag that normal path logged the
+        # full statement at ERROR on every idempotent re-retain.
         # PostgreSQL planner/session GUCs (SET LOCAL enable_seqscan, lock_timeout,
         # hnsw.ef_search, ...) have no Oracle equivalent; running them raises
         # ORA-00922. They are tuning hints scoped to the transaction, so skip them.
@@ -1153,28 +1768,32 @@ class OracleConnection(DatabaseConnection):
         query, ignore_dup, ret_cols = _rewrite_pg_to_oracle(query)
         cursor = self._conn.cursor()
         try:
-            params = self._make_bind_params(cursor, args, ret_cols)
+            params = self._make_bind_params(cursor, args, ret_cols, query)
             query, params = self._expand_any_lists(query, params)
+
+            _convert_vector_bind_params(query, params)
+            # The rewritten query has lost any "::vector" cast, so vector binds
+            # declared that way are visible only in the original SQL.
+            _convert_vector_bind_params(orig_query, params)
+
             await self._bind_large_values_as_lobs(params)
+
             self._apply_clob_input_sizes(cursor, query, params)
-            if ignore_dup:
-                try:
-                    await cursor.execute(query, params)
-                except Exception as e:
-                    if "ORA-00001" in str(e):
-                        return "INSERT 0 0"
-                    raise
-            else:
-                try:
-                    await cursor.execute(query, params)
-                except Exception as e:
-                    logger.error(
-                        "Oracle execute failed. Query: %s\nParams keys: %s\nError: %s",
-                        query[:500],
-                        list(params.keys()) if params else None,
-                        e,
-                    )
-                    raise
+            duplicate_is_ok = ignore_dup or ignore_duplicate
+            try:
+                await cursor.execute(query, params)
+            except Exception as e:
+                if duplicate_is_ok and _is_duplicate_key(e):
+                    # Expected control flow the caller asked us to absorb, not a
+                    # failure -- stay quiet.
+                    return "INSERT 0 0"
+                logger.error(
+                    "Oracle execute failed. Query: %s\nParams keys: %s\nError: %s",
+                    query[:500],
+                    list(params.keys()) if params else None,
+                    e,
+                )
+                raise
             # Return PG-compatible status string
             cmd = orig_query.strip().split()[0].upper() if orig_query.strip() else "OK"
             rowcount = cursor.rowcount
@@ -1186,9 +1805,17 @@ class OracleConnection(DatabaseConnection):
         finally:
             cursor.close()
 
-    async def executemany(self, query: str, args: list[tuple[Any, ...]], *, timeout: float | None = None) -> None:
+    async def executemany(
+        self,
+        query: str,
+        args: list[tuple[Any, ...]],
+        *,
+        timeout: float | None = None,
+        column_types: list[str] | None = None,
+        n_cols: int | None = None,
+    ) -> None:
         query, ignore_dup, _ = _rewrite_pg_to_oracle(query)
-        converted = _convert_args_list(args)
+        converted = _convert_args_list(args, query)
         cursor = self._conn.cursor()
         try:
             if ignore_dup:
@@ -1200,7 +1827,7 @@ class OracleConnection(DatabaseConnection):
                     try:
                         await cursor.execute(query, params)
                     except Exception as e:
-                        if "ORA-00001" not in str(e):
+                        if not _is_duplicate_key(e):
                             raise
             else:
                 # Convert tuples to dicts for named binding (:1, :2, ...). No temporary
@@ -1211,7 +1838,28 @@ class OracleConnection(DatabaseConnection):
                 # The driver types each column from the first row, so a column holding
                 # any CLOB-sized value must be declared CLOB for the whole batch.
                 clob_keys = {k for row in converted_dicts for k, v in row.items() if _needs_clob_bind(v)}
-                if clob_keys:
+                # A column declared "clob[]" in column_types is always a CLOB, even
+                # when this batch's first row happens to hold a short value. The
+                # driver types the column once for the whole batch, so a short first
+                # row would otherwise pin a later long row to VARCHAR2 and Oracle
+                # rejects it with ORA-01461.
+                if column_types:
+                    oracledb = _import_oracledb()
+                    input_sizes: dict[str, Any] = {}
+                    limit = n_cols if n_cols is not None else len(column_types)
+                    for i, ct in enumerate(column_types[:limit]):
+                        if ct == "clob[]":
+                            input_sizes[str(i + 1)] = oracledb.DB_TYPE_CLOB
+                        elif ct == "timestamptz[]":
+                            # Oracle infers NULL as VARCHAR2 for an array bind.
+                            # A NULL first row can pin the whole executemany
+                            # column to CHAR, making a later timestamp fail.
+                            input_sizes[str(i + 1)] = oracledb.DB_TYPE_TIMESTAMP_TZ
+                    for key in clob_keys:
+                        input_sizes.setdefault(key, oracledb.DB_TYPE_CLOB)
+                    if input_sizes:
+                        cursor.setinputsizes(**input_sizes)
+                elif clob_keys:
                     cursor.setinputsizes(**dict.fromkeys(clob_keys, _import_oracledb().DB_TYPE_CLOB))
                 try:
                     await cursor.executemany(query, converted_dicts)
@@ -1253,22 +1901,30 @@ class OracleConnection(DatabaseConnection):
 
         rows_data = [tuple(arrays[col_idx][row_idx] for col_idx in range(n_cols)) for row_idx in range(n_rows)]
         query = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})"
-        await self.executemany(query, rows_data)
+        await self.executemany(query, rows_data, column_types=column_types, n_cols=n_cols)
         return f"INSERT 0 {n_rows}"
 
     async def fetch(self, query: str, *args: Any, timeout: float | None = None) -> list[ResultRow]:
+        orig_query = query
         query, ignore_dup, ret_cols = _rewrite_pg_to_oracle(query)
         cursor = self._conn.cursor()
         try:
-            params = self._make_bind_params(cursor, args, ret_cols)
+            params = self._make_bind_params(cursor, args, ret_cols, query)
             query, params = self._expand_any_lists(query, params)
+
+            _convert_vector_bind_params(query, params)
+            # The rewritten query has lost any "::vector" cast, so vector binds
+            # declared that way are visible only in the original SQL.
+            _convert_vector_bind_params(orig_query, params)
+
             await self._bind_large_values_as_lobs(params)
+
             self._apply_clob_input_sizes(cursor, query, params)
             if ignore_dup:
                 try:
                     await cursor.execute(query, params)
                 except Exception as e:
-                    if "ORA-00001" in str(e):
+                    if _is_duplicate_key(e):
                         return []
                     raise
                 # INSERT succeeded but RETURNING was stripped — return empty
@@ -1299,18 +1955,26 @@ class OracleConnection(DatabaseConnection):
             cursor.close()
 
     async def fetchrow(self, query: str, *args: Any, timeout: float | None = None) -> ResultRow | None:
+        orig_query = query
         query, ignore_dup, ret_cols = _rewrite_pg_to_oracle(query)
         cursor = self._conn.cursor()
         try:
-            params = self._make_bind_params(cursor, args, ret_cols)
+            params = self._make_bind_params(cursor, args, ret_cols, query)
             query, params = self._expand_any_lists(query, params)
+
+            _convert_vector_bind_params(query, params)
+            # The rewritten query has lost any "::vector" cast, so vector binds
+            # declared that way are visible only in the original SQL.
+            _convert_vector_bind_params(orig_query, params)
+
             await self._bind_large_values_as_lobs(params)
+
             self._apply_clob_input_sizes(cursor, query, params)
             if ignore_dup:
                 try:
                     await cursor.execute(query, params)
                 except Exception as e:
-                    if "ORA-00001" in str(e):
+                    if _is_duplicate_key(e):
                         return None
                     raise
                 # INSERT succeeded but RETURNING was stripped
@@ -1344,7 +2008,7 @@ class OracleConnection(DatabaseConnection):
         query, ignore_dup, ret_cols = _rewrite_pg_to_oracle(query)
         cursor = self._conn.cursor()
         try:
-            params = self._make_bind_params(cursor, args, ret_cols)
+            params = self._make_bind_params(cursor, args, ret_cols, query)
             query, params = self._expand_any_lists(query, params)
             await self._bind_large_values_as_lobs(params)
             self._apply_clob_input_sizes(cursor, query, params)
@@ -1352,7 +2016,7 @@ class OracleConnection(DatabaseConnection):
                 try:
                     await cursor.execute(query, params)
                 except Exception as e:
-                    if "ORA-00001" in str(e):
+                    if _is_duplicate_key(e):
                         return None
                     raise
                 # INSERT succeeded (no dup). RETURNING was stripped, so we can't

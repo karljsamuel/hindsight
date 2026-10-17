@@ -1,0 +1,230 @@
+# KJS CI Workflow - Code quality checks only (no LLM/GCP dependencies)
+# Runs on PRs to main and kjs-edits
+
+name: KJS-CI
+
+on:
+  pull_request:
+    branches: [main, kjs-edits]
+    paths:
+      - 'hindsight-api-slim/**'
+      - 'hindsight-clients/**'
+      - 'hindsight-control-plane/**'
+      - 'hindsight-tools/**'
+      - 'docker/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.python-version'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/ci.yml'
+
+permissions:
+  contents: read
+  packages: read
+  pull-requests: read
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    outputs:
+      core: ${{ steps.filter.outputs.core }}
+      clients-ts: ${{ steps.filter.outputs.clients-ts }}
+      control-plane: ${{ steps.filter.outputs.control-plane }}
+      docker: ${{ steps.filter.outputs.docker }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            core:
+              - 'hindsight-api-slim/**'
+              - '.python-version'
+              - 'pyproject.toml'
+              - 'uv.lock'
+            clients-ts:
+              - 'hindsight-clients/typescript/**'
+              - 'package.json'
+              - 'package-lock.json'
+            control-plane:
+              - 'hindsight-control-plane/**'
+            docker:
+              - 'docker/**'
+
+  typecheck-api:
+    # `ty check` over hindsight-api-slim
+    needs: [detect-changes]
+    if: >-
+      (github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.core == 'true')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || '' }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install dependencies
+        working-directory: ./hindsight-api-slim
+        run: uv sync --frozen --all-extras --index-strategy unsafe-best-match
+
+      - name: ty check
+        working-directory: ./hindsight-api-slim
+        run: uv run ty check
+
+  build-api-python-versions:
+    needs: [detect-changes]
+    if: >-
+      (github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.core == 'true')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || '' }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build hindsight-api
+        working-directory: ./hindsight-api-slim
+        run: uv build
+
+      - name: Install and smoke-test on Python ${{ matrix.python-version }}
+        working-directory: ./hindsight-api-slim
+        run: |
+          uv venv --python ${{ matrix.python-version }} .venv-smoke
+          VIRTUAL_ENV=.venv-smoke uv pip install .
+          .venv-smoke/bin/python -m compileall -q hindsight_api
+          .venv-smoke/bin/python -c "import hindsight_api, hindsight_api.main, hindsight_api.config; from hindsight_api.engine import memory_engine, llm_wrapper; print('import OK')"
+
+  build-typescript-client:
+    needs: [detect-changes]
+    if: >-
+      (github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.clients-ts == 'true')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || '' }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --workspace=hindsight-clients/typescript
+
+      - name: Build TypeScript client
+        run: npm run build --workspace=hindsight-clients/typescript
+
+  build-control-plane:
+    needs: [detect-changes]
+    if: >-
+      (github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.control-plane == 'true' ||
+      needs.detect-changes.outputs.clients-ts == 'true')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || '' }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install SDK dependencies
+        run: npm ci --workspace=hindsight-clients/typescript
+
+      - name: Build SDK
+        run: npm run build --workspace=hindsight-clients/typescript
+
+      - name: Install Control Plane dependencies
+        run: |
+          npm install --workspace=hindsight-control-plane
+          rm -rf node_modules/lightningcss node_modules/@tailwindcss
+          npm install lightningcss @tailwindcss/postcss @tailwindcss/node
+
+      - name: Test Control Plane
+        run: npm test --workspace=hindsight-control-plane
+
+      - name: Check i18n locale parity and hardcoded strings
+        run: npm run i18n:check --workspace=hindsight-control-plane
+
+      - name: Build Control Plane
+        run: npm run build --workspace=hindsight-control-plane
+
+  lint-helm-chart:
+    needs: [detect-changes]
+    if: >-
+      (github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.docker == 'true')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || '' }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: 'latest'
+
+      - name: Lint Helm chart
+        run: helm lint helm/hindsight
+
+  check-integration-lockfiles:
+    needs: [detect-changes]
+    if: >-
+      (github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.core == 'true')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || '' }}
+
+      - name: Check integration lockfiles resolve from npm registry
+        run: ./scripts/check-integration-lockfiles.sh

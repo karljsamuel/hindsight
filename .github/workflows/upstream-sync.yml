@@ -1,0 +1,291 @@
+# KJS Upstream Sync Workflow - Scheduled PR Creation
+#
+# SCHEDULE: Weekly (Monday 06:00 UTC)
+# ACTION:
+#   1. Fetch upstream/main
+#   2. Create a branch: upstream-sync-ddmmyyyy (e.g. upstream-sync-17102026) AT upstream/main
+#   3. Report, per file, what the merge of our edits into upstream will conflict on
+#   4. Open a PR that karljsamuel resolves and merges by hand
+#
+# THIS WORKFLOW PICKS NO SIDE. It resolves no conflict, for us or for upstream:
+# which side wins is a per-file judgement made by the reviewer in the PR. The
+# branch carries upstream/main's tree as-is, plus a report of what the merge
+# will ask of the reviewer.
+#
+# Why the merge is not committed here: a branch with unmerged paths cannot be
+# pushed, so "stage the merge in the PR" can only mean the PR is where the merge
+# happens, with the conflict list attached. Committing a resolved merge would
+# mean this workflow deciding ours-vs-upstream for every conflicting file.
+#
+# NO automatic merge. NO force-push, ever: the branch belongs to the reviewer
+# once it exists, and a force-push would erase edits made on the PR.
+# kjsagent (via GH_KJSAGENT_PAT) pushes the branch and opens the PR; it cannot
+# approve it. karljsamuel reviews and merges.
+
+name: KJS Upstream Sync
+
+on:
+  schedule:
+    # Every Monday 06:00 UTC - adjust as needed
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      base_date:
+        description: 'Override date for branch name (ddmmyyyy)'
+        required: false
+        type: string
+
+# One sync at a time. A run while a PR is already open is skipped anyway; this
+# stops two runs racing on the same branch name.
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  create-sync-pr:
+    name: KJS Create Upstream Sync PR
+    runs-on: ubuntu-26.04
+    env:
+      GH_TOKEN: ${{ secrets.GH_KJSAGENT_PAT }}
+      SIGNING_KEY: ${{ secrets.KJS_AGENT_SIGNING_KEY }}
+    steps:
+      - name: Check push access
+        # The run of 2026-10-05 died at the push with a bare 403. Fail up front,
+        # where the cause is obvious.
+        run: |
+          set -euo pipefail
+          push=$(gh api repos/karljsamuel/hindsight --jq .permissions.push)
+          if [ "$push" != "true" ]; then
+            echo "::error::GH_KJSAGENT_PAT cannot push to karljsamuel/hindsight (permissions.push=$push). The token needs Contents: read and write, and Workflows: read and write."
+            exit 1
+          fi
+          echo "Push access confirmed."
+
+      - name: Skip when a sync PR is already open
+        # The PR is resolved and merged by hand, so it can sit for a while; a
+        # weekly run would otherwise stack a second PR missing the first one's work.
+        id: open_pr
+        run: |
+          set -euo pipefail
+          n=$(gh pr list --repo karljsamuel/hindsight --state open --limit 100 \
+                --json headRefName \
+                --jq '[.[] | select(.headRefName | startswith("upstream-sync-"))] | length')
+          if [ "$n" != "0" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::An upstream-sync PR is already open. Merge or close it before the next sync."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout with full history
+        if: steps.open_pr.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_KJSAGENT_PAT }}
+
+      - name: Configure git identity and optional SSH signing
+        if: steps.open_pr.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "Karl J Samuel (AI Agent)"
+          git config user.email "aiagent@kjs.ovh"
+          if [ -z "${SIGNING_KEY:-}" ]; then
+            echo "::notice::KJS_AGENT_SIGNING_KEY is not set - commits will be unsigned."
+            exit 0
+          fi
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$SIGNING_KEY" > "$HOME/.ssh/agent_signing_key"
+          chmod 600 "$HOME/.ssh/agent_signing_key"
+          # A passphrase-protected key would block on stdin here, hanging the
+          # runner until it times out; leave commits unsigned instead.
+          if ssh-keygen -y -f "$HOME/.ssh/agent_signing_key" > "$HOME/.ssh/agent_signing_key.pub" </dev/null 2>/dev/null; then
+            git config gpg.format ssh
+            git config user.signingkey "$HOME/.ssh/agent_signing_key.pub"
+            git config commit.gpgsign true
+            echo "Commit signing enabled (SSH)."
+          else
+            rm -f "$HOME/.ssh/agent_signing_key"
+            echo "::warning::Signing key has no usable public half or is passphrase-protected - committing unsigned."
+          fi
+
+      - name: Add upstream remote and fetch
+        if: steps.open_pr.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          # --no-tags: upstream carries thousands of tags and the previous run
+          # spent most of its log printing them.
+          git remote add upstream https://github.com/vectorize-io/hindsight.git
+          git fetch --no-tags upstream main
+
+      - name: Determine branch name
+        id: name
+        if: steps.open_pr.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          SYNC_DATE="${{ github.event.inputs.base_date }}"
+          if [ -z "$SYNC_DATE" ]; then
+            SYNC_DATE=$(date -u +%d%m%Y)
+          fi
+          echo "sync_date=$SYNC_DATE" >> "$GITHUB_OUTPUT"
+          echo "branch=upstream-sync-$SYNC_DATE" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse to reuse an existing branch
+        if: steps.open_pr.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          BRANCH="${{ steps.name.outputs.branch }}"
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "::error::Branch $BRANCH already exists on origin. Delete it, or dispatch again with a different base_date."
+            exit 1
+          fi
+
+      - name: Create the sync branch at upstream/main
+        id: branch
+        if: steps.open_pr.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          BRANCH="${{ steps.name.outputs.branch }}"
+          git checkout -b "$BRANCH" upstream/main
+          count=$(git rev-list --count origin/main..HEAD)
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "Commits upstream/main has beyond main: $count"
+          if [ "$count" = "0" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::upstream/main adds no commits beyond main - nothing to sync."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report what the merge will conflict on
+        # A trial merge in a throwaway worktree: it reads both sides and writes
+        # nothing to the branch, so no side is chosen. This only tells the
+        # reviewer what they will be deciding.
+        id: report
+        if: steps.open_pr.outputs.skip != 'true' && steps.branch.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          TRIAL="${RUNNER_TEMP}/sync-trial"
+          rm -rf "$TRIAL"
+          git worktree add --detach "$TRIAL" upstream/main >/dev/null
+
+          if git -C "$TRIAL" merge --no-commit --no-ff origin/main >/dev/null 2>&1; then
+            echo "conflict_count=0" >> "$GITHUB_OUTPUT"
+            echo "This delta merges cleanly."
+          else
+            # Materialise the list before touching anything: a streaming read
+            # races the commands below for the index lock.
+            mapfile -t cpaths < <(git -C "$TRIAL" diff --name-only --diff-filter=U)
+            MB=$(git merge-base origin/main upstream/main)
+            rows=""
+            for p in "${cpaths[@]}"; do
+              # In the trial, HEAD is upstream/main, so stage 2 is upstream's
+              # side and stage 3 is ours. 12 = we deleted it; 123 = content.
+              stages=$(git -C "$TRIAL" ls-files -u -- "$p" | awk '{print $3}' | sort -u | tr -d '\n')
+              case "$stages" in
+                123) kind="content conflict" ;;
+                12)  kind="we deleted it, upstream modified it" ;;
+                13)  kind="upstream deleted it, we modified it" ;;
+                *)   kind="unclassified (stages $stages)" ;;
+              esac
+              uc=$(git rev-list --count "$MB..upstream/main" -- "$p")
+              oc=$(git rev-list --count "$MB..origin/main" -- "$p")
+              un=$(git diff --numstat "$MB" upstream/main -- "$p" | awk 'NR==1{print "+"$1"/-"$2}')
+              on=$(git diff --numstat "$MB" origin/main -- "$p" | awk 'NR==1{print "+"$1"/-"$2}')
+              rows="${rows}| \`$p\` | $kind | $uc | $oc | ${un:-n/a} | ${on:-n/a} |"$'\n'
+            done
+            echo "conflict_count=${#cpaths[@]}" >> "$GITHUB_OUTPUT"
+            {
+              echo "conflicts<<SYNC_EOF"
+              printf '%s' "$rows"
+              echo "SYNC_EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "Conflicts: ${#cpaths[@]}"
+            printf '%s' "$rows"
+          fi
+
+          git worktree remove --force "$TRIAL" >/dev/null 2>&1 || true
+
+      - name: Push the sync branch
+        if: steps.open_pr.outputs.skip != 'true' && steps.branch.outputs.skip != 'true'
+        # No --force and no --force-with-lease: if this fails, someone has already
+        # pushed to the branch and their work must not be overwritten.
+        run: |
+          set -euo pipefail
+          git push origin "HEAD:refs/heads/${{ steps.branch.outputs.branch }}"
+
+      - name: Open the pull request
+        if: steps.open_pr.outputs.skip != 'true' && steps.branch.outputs.skip != 'true'
+        env:
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          COMMITS: ${{ steps.branch.outputs.count }}
+          CONFLICT_COUNT: ${{ steps.report.outputs.conflict_count }}
+          CONFLICTS: ${{ steps.report.outputs.conflicts }}
+          SYNC_DATE: ${{ steps.name.outputs.sync_date }}
+        run: |
+          set -euo pipefail
+          BODY=$(mktemp)
+          {
+            echo "Automated upstream sync for $SYNC_DATE. The merge is **not** applied:"
+            echo "this branch is \`upstream/main\` as-is, and resolving it is the review."
+            echo
+            echo "- Base: \`upstream/main\` (\`$(git rev-parse --short upstream/main)\`)"
+            echo "- Commits beyond \`main\`: $COMMITS"
+            echo "- Diverged at: \`$(git merge-base origin/main upstream/main)\`"
+            echo
+            git diff --stat "origin/main...$(git rev-parse HEAD)" | tail -1
+            echo
+            echo "## How to finish this PR"
+            echo
+            echo "Nothing here picks a side. For every conflicting file below, decide"
+            echo "whether ours or upstream's wins, then commit the merge. Locally:"
+            echo
+            echo '```bash'
+            echo "git fetch origin && git fetch upstream"
+            echo "git switch $BRANCH                      # this PR's branch"
+            echo "git merge origin/main                   # brings our commits in"
+            echo "# per file, unambiguously:"
+            echo "git checkout origin/main  -- <path>     # keep OURS"
+            echo "git checkout upstream/main -- <path>    # take UPSTREAM's"
+            echo "git rm <path>                           # keep it deleted"
+            echo "git commit && git push origin HEAD"
+            echo '```'
+            echo
+            if [ "${CONFLICT_COUNT:-0}" != "0" ]; then
+              echo "## Conflicts: $CONFLICT_COUNT file(s)"
+              echo
+              echo "| File | Conflict | Upstream commits | Our commits | Upstream +/- | Ours +/- |"
+              echo "|---|---|---|---|---|---|"
+              printf '%s' "$CONFLICTS"
+              echo
+              echo "Commit counts are each side's commits touching that file since the"
+              echo "divergence point; the +/- is each side's total change to it. Together"
+              echo "they show how much work sits on either side of the decision."
+              echo
+              echo "GitHub cannot build the merge ref for a conflicting PR, so CI stays"
+              echo "silent until the merge is committed - it then runs before merging."
+            else
+              echo "## No conflicts"
+              echo
+              echo "This delta merges into \`main\` cleanly; review the diff and merge."
+            fi
+            echo
+            echo "Merging is a manual decision. Nothing auto-merges, and this workflow"
+            echo "never force-pushes this branch."
+          } > "$BODY"
+
+          args=(--repo karljsamuel/hindsight
+                --base main
+                --head "$BRANCH"
+                --title "chore(sync): upstream/main into main ($BRANCH)"
+                --body-file "$BODY"
+                --assignee karljsamuel
+                --label upstream-sync
+                --label automated)
+          gh pr create "${args[@]}"

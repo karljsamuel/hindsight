@@ -21,6 +21,7 @@ import json
 from datetime import datetime
 from typing import Any
 
+from ...db.ops import nullable_year1_timestamp_sql
 from ...search.tags import (
     TagGroup,
     TagsMatch,
@@ -486,7 +487,10 @@ async def list_entities(
     # Get paginated entities
     rows = await conn.fetch(
         f"""
-        SELECT id, canonical_name, entity_kind, mention_count, first_seen, last_seen, metadata
+        SELECT id, canonical_name, entity_kind, mention_count,
+               {nullable_year1_timestamp_sql('first_seen')} AS first_seen,
+               {nullable_year1_timestamp_sql('last_seen')} AS last_seen,
+               metadata
         FROM {fq_table("entities")}
         WHERE {where_clause}
         ORDER BY mention_count DESC, last_seen DESC, id ASC
@@ -550,7 +554,11 @@ def visible_entity_mentions_sql(fq_table, ops, tag_clause_sql: str) -> str:
     ue = fq_table("unit_entities")
     sources = "" if ops.uses_observation_sources_table else ", source_memory_ids"
     visible = f"""(
-            SELECT id, fact_type, COALESCE(occurred_start, mentioned_at, event_date) AS seen_at{sources}
+            SELECT id, fact_type, COALESCE(
+                {nullable_year1_timestamp_sql('occurred_start')},
+                {nullable_year1_timestamp_sql('mentioned_at')},
+                {nullable_year1_timestamp_sql('event_date')}
+            ) AS seen_at{sources}
             FROM {fq_table("memory_units")}
             WHERE bank_id = $1 {tag_clause_sql}
         )"""

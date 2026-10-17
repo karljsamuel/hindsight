@@ -1,0 +1,152 @@
+name: KJS Oracle Unified Image
+'on':
+  push:
+    branches:
+    - main
+    paths:
+    - docker/standalone/Dockerfile.oracle
+    - hindsight-api-slim/hindsight_api/**
+    - hindsight-control-plane/**
+    - .github/workflows/oracle-image.yml
+  workflow_dispatch: {}
+  schedule:
+  - cron: 0 2 * * 0
+concurrency:
+  group: kjs-oracle-smoke-test
+  cancel-in-progress: false
+permissions:
+  contents: read
+  packages: write
+  pull-requests: write
+jobs:
+  build-and-test:
+    name: KJS Build & Smoke Test
+    strategy:
+      matrix:
+        include:
+        - platform: linux/amd64
+          runner: ubuntu-26.04
+        - platform: linux/arm64
+          runner: ubuntu-26.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - name: Login to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ghcr.io/karljsamuel/hindsight
+        tags: |
+          type=raw,value=oracle-latest
+          type=sha,prefix=oracle-
+          type=ref,event=branch,suffix=-oracle
+    - name: Build Oracle unified image (load for testing)
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: docker/standalone/Dockerfile.oracle
+        target: oracle-full
+        platforms: ${{ matrix.platform }}
+        push: false
+        load: true
+        tags: ghcr.io/karljsamuel/hindsight:oracle-latest
+        labels: ${{ steps.meta.outputs.labels }}
+        build-args: 'INCLUDE_LOCAL_MODELS=false
+PRELOAD_ML_MODELS=false
+ORACLEDB_VERSION=26.0.1'
+    - name: Smoke test - API health check
+      env:
+        KJS_TEST_ODB_PASSWORD: ${{ secrets.KJS_TEST_ODB_PASSWORD }}
+        KJS_TEST_LLM_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
+      run: |
+        # Build the database URL with decoded DSN (oracledb thin mode compatible)
+        cat > /tmp/build_dsn.py << 'PYEOF'
+        import urllib.parse
+        dsn = '(description=(retry_count=20)(retry_delay=3)(address=(protocol=tcps)(port=1522)(host=adb.ap-hyderabad-1.oraclecloud.com))(connect_data=(service_name=g4a90f2577f59fb_hindsightdb_high.adb.oraclecloud.com))(security=(ssl_server_dn_match=yes)))'
+        print(urllib.parse.quote(dsn))
+        PYEOF
+        DSN_QUOTED=$(python3 /tmp/build_dsn.py)
+        DATABASE_URL="oracle+oracledb://HINDSIGHT_TEST:${KJS_TEST_ODB_PASSWORD}@/?dsn=${DSN_QUOTED}"
+
+        # Start container with real test database for health check.
+        # The image ships NO local ML models (INCLUDE_LOCAL_MODELS=false), so
+        # every provider must be named explicitly -- the built-in defaults are
+        # "local" for embeddings and reranker, which aborts startup with
+        # "sentence-transformers is not installed".
+        #
+        # Env var names are not uniform here, which is worth knowing:
+        #   LLM       -> HINDSIGHT_API_LLM_API_KEY (generic; there is no
+        #                *_LLM_OPENROUTER_API_KEY, and omitting it raises
+        #                "LLM API key is required" before startup)
+        #   embeddings/reranker -> the provider-specific *_OPENROUTER_API_KEY
+        # Reference the single tag the build above actually loaded, NOT the
+        # metadata action's multi-tag output. NOTE: do not write that output
+        # name using GitHub expression syntax in this comment -- Actions
+        # expands expressions before bash sees the script, so the expansion
+        # would turn the remaining comment lines into bare commands that the
+        # shell tries to execute (exit 127). Refer to it in prose instead.
+        #
+        # The tag list is newline-delimited and unquoted, so substituting it
+        # here word-splits into several arguments, making the second one the
+        # container COMMAND and overriding the image entrypoint. The health
+        # loop below then catches the dead container and fails the job. This
+        # substitution was reverted once already by commit babfb81b6 -- keep
+        # it that way. The `docker rmi -f` cleanup step is fine unquoted, since
+        # rmi accepts several images and tolerates missing ones.
+        docker run -d --name hindsight-test \
+          -e HINDSIGHT_API_DATABASE_BACKEND=oracle \
+          -e HINDSIGHT_API_VECTOR_EXTENSION=oracle \
+          -e HINDSIGHT_API_EMBEDDINGS_DIMENSION=2048 \
+          -e HINDSIGHT_API_DATABASE_URL="$DATABASE_URL" \
+          -e HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP=false \
+          -e HINDSIGHT_API_WORKER_ENABLED=false \
+          -e HINDSIGHT_ENABLE_CP=false \
+          -e HINDSIGHT_API_LLM_PROVIDER=openrouter \
+          -e HINDSIGHT_API_LLM_API_KEY="$KJS_TEST_LLM_API_KEY" \
+          -e HINDSIGHT_API_EMBEDDINGS_PROVIDER=openrouter \
+          -e HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY="$KJS_TEST_LLM_API_KEY" \
+          -e HINDSIGHT_API_RERANKER_PROVIDER=openrouter \
+          -e HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY="$KJS_TEST_LLM_API_KEY" \
+          -p 8888:8888 \
+          ghcr.io/karljsamuel/hindsight:oracle-latest
+
+        # Wait for startup (max 120s)
+        for i in {1..60}; do
+          if curl -sf http://localhost:8888/health >/dev/null 2>&1; then
+            echo "Health endpoint responded"
+            break
+          fi
+          if ! docker ps --format '{{.Names}}' | grep -q '^hindsight-test$'; then
+            echo "Container died"
+            docker logs hindsight-test
+            exit 1
+          fi
+          sleep 2
+        done
+
+        if ! curl -sf http://localhost:8888/health >/dev/null 2>&1; then
+          echo "Health endpoint never responded"
+          docker logs hindsight-test
+          exit 1
+        fi
+
+        echo "Smoke test passed - container running and healthy"
+
+        # Cleanup
+        docker stop hindsight-test && docker rm hindsight-test
+
+    # NOTE: no push step here on purpose. Publishing is publish-image.yml's job,
+    # and a per-arch push to the shared :oracle-latest tag from this workflow
+    # would race that job and can leave the tag single-arch. This workflow only
+    # builds and smoke-tests, on native amd64 (ubuntu-26.04) and arm64
+    # (ubuntu-26.04-arm) runners.

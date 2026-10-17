@@ -45,10 +45,40 @@ config = context.config
 target_metadata = Base.metadata
 
 
+def _oracle_connect_params(dsn: str) -> dict[str, any]:
+    """Turn the configured database URL into oracledb connect kwargs.
+
+    Accepts ``oracle://user:pass@host:port/service`` and, for Autonomous
+    Database / TCPS setups that need a full connect descriptor or TNS alias,
+    ``oracle://user:pass@/?dsn=<descriptor-or-alias>``. Credentials are
+    URL-decoded, so passwords containing ``#``, ``@`` or ``%`` work when
+    percent-encoded in the URL. Anything that is not an ``oracle://`` URL is
+    passed through as the dsn.
+    """
+    from urllib.parse import parse_qsl, unquote, urlparse
+
+    parsed = urlparse(dsn)
+    if parsed.scheme not in ("oracle", "oracle+oracledb"):
+        return {"dsn": dsn}
+    params: dict[str, any] = {
+        "user": unquote(parsed.username) if parsed.username else None,
+        "password": unquote(parsed.password) if parsed.password else None,
+    }
+    descriptor = parse_qsl(parsed.query).get("dsn")
+    if descriptor and descriptor[0]:
+        params["dsn"] = descriptor[0]
+    else:
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 1521
+        service = parsed.path.lstrip("/") if parsed.path else "FREEPDB1"
+        params["dsn"] = f"{host}:{port}/{service}"
+    return params
+
+
 def _normalize_oracle_url(url: str) -> str:
     """Coerce an Oracle URL into the SQLAlchemy form the oracledb dialect expects.
 
-    Two issues to handle:
+    Three issues to handle:
 
     1. Force the ``oracle+oracledb`` driver — bare ``oracle://`` defaults to
        cx_Oracle.
@@ -57,23 +87,34 @@ def _normalize_oracle_url(url: str) -> str:
        Autonomous DB only register a service name. Without this rewrite we get
        ``DPY-6003: SID "FREEPDB1" is not registered`` even though the listener
        is happy to accept the same name as a service.
+    3. Handle ``dsn`` query parameter with full Oracle descriptor — preserve it for oracledb thin mode.
     """
     parts = urlsplit(url)
     if not parts.scheme.startswith("oracle"):
         return url
 
     new_scheme = "oracle+oracledb" if parts.scheme == "oracle" else parts.scheme
-    service = parts.path.lstrip("/")
-    new_query = parts.query
-    new_path = parts.path
 
-    # Promote /SERVICE to ?service_name=SERVICE unless the caller already
-    # supplied an explicit ?sid= or ?service_name=.
-    if service and "service_name=" not in new_query and "sid=" not in new_query:
-        params = [(k, v) for k, v in parse_qsl(new_query, keep_blank_values=True)]
-        params.append(("service_name", service))
-        new_query = urlencode(params)
+    # Check if URL has a dsn query parameter with full descriptor
+    query_params = parse_qsl(parts.query, keep_blank_values=True)
+    dsn_param = next((v for k, v in query_params if k.lower() == "dsn"), None)
+
+    if dsn_param:
+        # URL has a full descriptor in dsn parameter - preserve it for oracledb thin mode
+        # The descriptor already contains all connection details
+        # Keep the dsn parameter but remove path
+        new_query = parts.query  # Keep the dsn parameter intact
         new_path = ""
+    else:
+        # Standard case: promote /SERVICE to ?service_name=SERVICE
+        service = parts.path.lstrip("/")
+        new_query = parts.query
+        new_path = parts.path
+        if service and "service_name=" not in new_query and "sid=" not in new_query:
+            params = [(k, v) for k, v in parse_qsl(new_query, keep_blank_values=True)]
+            params.append(("service_name", service))
+            new_query = urlencode(params)
+            new_path = ""
 
     return urlunsplit((new_scheme, parts.netloc, new_path, new_query, parts.fragment))
 
@@ -151,11 +192,29 @@ def run_migrations_online() -> None:
     target_schema = config.get_main_option("target_schema")
     is_oracle = is_oracle_url(database_url)
 
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    # For Oracle, use custom creator to properly handle dsn parameter
+    if is_oracle:
+        from hindsight_api.engine.db.oracle import _oracle_connect_params
+
+        connect_params = _oracle_connect_params(database_url)
+        oracledb = __import__("oracledb")
+        oracledb.defaults.fetch_lobs = False
+
+        def creator():
+            return oracledb.connect(**connect_params)
+
+        from sqlalchemy import create_engine
+        connectable = create_engine(
+            "oracle+oracledb://",
+            creator=creator,
+            poolclass=pool.NullPool,
+        )
+    else:
+        connectable = engine_from_config(
+            config.get_section(config.config_ini_section, {}),
+            prefix="sqlalchemy.",
+            poolclass=pool.NullPool,
+        )
 
     with connectable.connect() as connection:
         if is_oracle:
