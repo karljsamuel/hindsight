@@ -131,6 +131,8 @@ _JSON_ARROW_TEXT_RE = re.compile(r'("?\w+"?)\s*->>\s*\'(\w+)\'')  # handles both
 # Reserved-word columns ("trigger") are already quoted by the time this runs, so the
 # column group must accept the quoted form too — same shape as the arrow regex above.
 _JSON_HAS_KEY_RE = re.compile(r"(\"?\w+\"?)\s*\?\s*'(\w+)'")
+# array_position(:N, col) — PostgreSQL idiom for "keep the input list order"
+_ARRAY_POSITION_RE = re.compile(r"\barray_position\s*\(\s*:(\d+)\s*,\s*([\w.]+)\s*\)", re.IGNORECASE)
 # result_metadata::jsonb @> :N is special-cased before the generic rewrite below,
 # because that one emits JSON_EXISTS(col, '$' PASSING :N AS cond) and the '$' path
 # never references the bind, so Oracle evaluates it false for every row.
@@ -501,9 +503,15 @@ def _needs_blob_bind(val: Any) -> bool:
     return isinstance(val, (bytes, bytearray)) and len(val) > 2000
 
 
-def _convert_args_list(args_list: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+def _convert_args_list(
+    args_list: list[tuple[Any, ...]], query: str | None = None
+) -> list[tuple[Any, ...]]:
+    """Convert a list of tuples for executemany.
 
-    """Convert a list of tuples for executemany."""
+    ``query`` is threaded through to :func:`_convert_args` so bind types are
+    resolved from the statement (UUID/RAW columns) rather than guessed from the
+    values, which is what the fork's bind-typing fix needs.
+    """
     return [_convert_args(row, query) for row in args_list]
 
 
