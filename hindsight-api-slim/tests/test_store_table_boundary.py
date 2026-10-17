@@ -34,6 +34,9 @@ ALLOWED = (
     # The SQL dialect layer the store's writes go through.
     "engine/db/",
     "engine/schema.py",
+    # This fork's Oracle store: same role as the Postgres store, and it needs the
+    # store-owned table resolver to read memory_units.
+    "engine/memories/oracle.py",
 )
 
 _TABLES = "|".join(sorted(STORE_TABLES))
@@ -90,7 +93,9 @@ def test_no_store_table_sql_outside_the_store() -> None:
 
 
 # Only the Postgres store itself may import its SQL modules.
-_PG_IMPORTERS = ("engine/memories/pg/", "engine/memories/postgres.py")
+# The fork's Oracle store subclasses the Postgres store and reuses its SQL
+# builders directly (OracleMemories(PostgresMemories)), so it may import them.
+_PG_IMPORTERS = ("engine/memories/pg/", "engine/memories/postgres.py", "engine/memories/oracle.py")
 _PG_MODULE = "hindsight_api.engine.memories.pg"
 
 

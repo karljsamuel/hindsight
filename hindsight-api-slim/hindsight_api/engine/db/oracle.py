@@ -1266,7 +1266,7 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
 #
 # This list is the safety net that turns that class of bug from "mysterious
 # runtime failure" into "loud, local, naming the construct". It has already
-# caught real defects: `jsonb_set` and `<@` were both reaching Oracle
+# caught real defects: the jsonb-set merge and `<@` were both reaching Oracle
 # untranslated because nothing checked. Add an entry when adding a rewrite --
 # and delete entries as they gain proper handling.
 #

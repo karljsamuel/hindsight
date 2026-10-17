@@ -291,10 +291,9 @@ jobs:
       HINDSIGHT_API_LLM_PROVIDER: openrouter
       HINDSIGHT_API_LLM_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
       HINDSIGHT_API_LLM_MODEL: nvidia/nemotron-3.5-super-vl:free
-      HINDSIGHT_API_EMBEDDINGS_PROVIDER: openrouter
-      HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
-      HINDSIGHT_API_RERANKER_PROVIDER: openrouter
-      HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
+      HINDSIGHT_API_EMBEDDINGS_PROVIDER: local
+      HINDSIGHT_API_RERANKER_PROVIDER: local
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
     - uses: actions/checkout@v6
       with:
@@ -379,12 +378,10 @@ jobs:
       HINDSIGHT_API_LLM_PROVIDER: openrouter
       HINDSIGHT_API_LLM_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
       HINDSIGHT_API_LLM_MODEL: nvidia/nemotron-3.5-super-vl:free
-      HINDSIGHT_API_EMBEDDINGS_PROVIDER: openrouter
-      HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
-      HINDSIGHT_API_RERANKER_PROVIDER: openrouter
-      HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
       HINDSIGHT_API_DATABASE_BACKEND: oracle
       ORACLE_TEST_DSN: oracle+oracledb://hindsight_test:hindsight_test@localhost:1521/FREEPDB1
+      HINDSIGHT_API_EMBEDDINGS_PROVIDER: local
+      HINDSIGHT_API_RERANKER_PROVIDER: local
     services:
       oracle:
         image: container-registry.oracle.com/database/free:latest
