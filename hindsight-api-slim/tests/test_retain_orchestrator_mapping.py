@@ -360,10 +360,7 @@ async def test_semantic_ann_link_to_deleted_delta_target_is_filtered(monkeypatch
 @pytest.mark.asyncio
 async def test_existing_unit_check_batches_below_oracle_in_limit():
     """The endpoint check must stay under Oracle's 1000-expression IN limit."""
-    links = [
-        (uuid.uuid4(), uuid.uuid4(), "semantic", 0.8, None)
-        for _ in range(451)
-    ]
+    links = [(uuid.uuid4(), uuid.uuid4(), "semantic", 0.8, None) for _ in range(451)]
 
     class FakeConn:
         batch_sizes = []

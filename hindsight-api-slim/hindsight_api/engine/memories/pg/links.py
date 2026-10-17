@@ -864,9 +864,7 @@ def compute_semantic_links_within_batch(
     return links
 
 
-async def _filter_links_to_existing_units(
-    conn, links: list[tuple]
-) -> list[tuple]:
+async def _filter_links_to_existing_units(conn, links: list[tuple]) -> list[tuple]:
     """Keep only links whose endpoints still exist after a delta retain's deletes.
 
     Phase 1 computes ANN links before Phase 2 removes changed/removed chunks.

@@ -199,11 +199,7 @@ class OracleOps(DataAccessOps):
             """,
             rows_data,
             # positions 5-8: event_date, occurred_start/end, mentioned_at
-            column_types=(
-                ["text[]"] * 4
-                + ["timestamptz[]"] * 4
-                + ["text[]"] * 9
-            ),
+            column_types=(["text[]"] * 4 + ["timestamptz[]"] * 4 + ["text[]"] * 9),
             n_cols=17,
         )
         return unit_ids

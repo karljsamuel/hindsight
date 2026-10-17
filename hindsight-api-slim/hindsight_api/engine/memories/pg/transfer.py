@@ -17,9 +17,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from ...db.ops import safe_entity_event_date
 from ...causal_links import CAUSAL_LINK_TYPES
 from ...chunk_ids import build_chunk_id, parse_chunk_id
+from ...db.ops import safe_entity_event_date
 from ...metadata_utils import as_string_metadata
 from ...transfer.export import (
     _DERIVED_COLUMNS,
@@ -578,14 +578,14 @@ async def import_observations(
                 if obs.created_at is not None:
                     created_at.append((obs.created_at, observation_uuid, bank_id))
                 if obs.event_date is not None:
-                      # insert_facts_batch derives event_date for normal writes;
-                      # transfer restores the source value carried by the archive.
-                      # An older or hand-edited archive can carry datetime.min, which
-                      # Oracle cannot read back; the base insert has already supplied a
-                      # safe event_date (or the column default), so skip it instead.
-                      restored_event_date = safe_entity_event_date(obs.event_date)
-                      if restored_event_date is not None:
-                          event_date.append((restored_event_date, observation_uuid, bank_id))
+                    # insert_facts_batch derives event_date for normal writes;
+                    # transfer restores the source value carried by the archive.
+                    # An older or hand-edited archive can carry datetime.min, which
+                    # Oracle cannot read back; the base insert has already supplied a
+                    # safe event_date (or the column default), so skip it instead.
+                    restored_event_date = safe_entity_event_date(obs.event_date)
+                    if restored_event_date is not None:
+                        event_date.append((restored_event_date, observation_uuid, bank_id))
                 source_uuids = [uuid.UUID(s) for s in sources]
                 all_source_ids.update(source_uuids)
                 links.append(_ObservationLinks(observation_uuid, source_uuids, obs.proof_count))

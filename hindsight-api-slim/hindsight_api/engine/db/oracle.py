@@ -13,13 +13,13 @@ Requires: python-oracledb (thin mode — pure Python, no Oracle client needed).
 Supports multi-tenant schema isolation via ALTER SESSION SET CURRENT_SCHEMA.
 """
 
+import array
 import datetime
 import inspect
 import json
 import logging
 import re
 import uuid as _uuid_mod
-import array
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, NamedTuple, cast
@@ -82,6 +82,7 @@ _ON_CONFLICT_DO_UPDATE_RE = re.compile(
     r"\bON\s+CONFLICT\s*\((?:[^()]*|\([^()]*\))*\)\s*DO\s+UPDATE\s+SET\b", re.IGNORECASE
 )
 
+
 def _find_statement_returning(sql: str) -> tuple[int, str] | None:
     """Locate a statement-level RETURNING clause: (start_index, column_list), or None.
 
@@ -120,6 +121,7 @@ def _find_statement_returning(sql: str) -> tuple[int, str] | None:
                     return i, sql[after:].strip()
         i += 1
     return None
+
 
 _ANY_RE = re.compile(r"=\s*ANY\s*\(\s*:(\d+)\s*\)", re.IGNORECASE)
 _NOT_ALL_RE = re.compile(r"!=\s*ALL\s*\(\s*:(\d+)\s*\)", re.IGNORECASE)
@@ -173,27 +175,68 @@ def _matching_paren_end(sql: str, open_idx: int) -> int | None:
 # KNOWLEDGE_PAGES, MENTAL_MODELS) or NUMBER (OBSERVATION_HISTORY,
 # MENTAL_MODEL_HISTORY), so the bare name cannot classify a bind. Derived from
 # the live schema via ALL_TAB_COLUMNS.
-_RAW_ID_TABLES = frozenset({
-    "audit_log",
-    "directives",
-    "entities",
-    "invalidated_memory_units",
-    "memory_units",
-    "webhooks",
-})
+_RAW_ID_TABLES = frozenset(
+    {
+        "audit_log",
+        "directives",
+        "entities",
+        "invalidated_memory_units",
+        "memory_units",
+        "webhooks",
+    }
+)
 
 # Column names whose Oracle type is not implied by the name alone.
 _AMBIGUOUS_UUID_COLS = frozenset({"id"})
 
 # Words that may follow a table name without being an alias. Without this,
 # `FROM memory_units WHERE ...` would read WHERE as an alias.
-_NOT_AN_ALIAS = frozenset({
-    "where", "group", "order", "having", "set", "values", "on", "using", "left",
-    "right", "inner", "outer", "full", "cross", "join", "fetch", "for", "limit",
-    "offset", "union", "and", "or", "not", "as", "select", "from", "returning",
-    "when", "then", "else", "end", "connect", "start", "partition", "model",
-    "sample", "pivot", "unpivot", "by", "asc", "desc", "nulls",
-})
+_NOT_AN_ALIAS = frozenset(
+    {
+        "where",
+        "group",
+        "order",
+        "having",
+        "set",
+        "values",
+        "on",
+        "using",
+        "left",
+        "right",
+        "inner",
+        "outer",
+        "full",
+        "cross",
+        "join",
+        "fetch",
+        "for",
+        "limit",
+        "offset",
+        "union",
+        "and",
+        "or",
+        "not",
+        "as",
+        "select",
+        "from",
+        "returning",
+        "when",
+        "then",
+        "else",
+        "end",
+        "connect",
+        "start",
+        "partition",
+        "model",
+        "sample",
+        "pivot",
+        "unpivot",
+        "by",
+        "asc",
+        "desc",
+        "nulls",
+    }
+)
 
 _FROM_ALIAS_RE = re.compile(
     r"\b(?:FROM|JOIN)\s+([A-Za-z_][\w$#.]*)(?:\s+(?:AS\s+)?([A-Za-z_][\w$#]*))?",
@@ -255,9 +298,7 @@ def _uuid_bind_indices(query: str) -> set[int] | None:
     aliases = _table_aliases(query)
     found: set[int] = set()
 
-    def is_uuid_col(
-        col: str, qualifier: str | None = None, table: str | None = None
-    ) -> bool:
+    def is_uuid_col(col: str, qualifier: str | None = None, table: str | None = None) -> bool:
         c = col.strip().strip('"').lower()
         if c in _AMBIGUOUS_UUID_COLS:
             # `id` carries no type information, so the owning table decides.
@@ -352,12 +393,7 @@ def _convert_arg_for_bind(value: Any, index: int, uuid_binds: set[int] | None) -
     unconditional behaviour is kept. A `uuid.UUID` object is always converted:
     it can only have come from a RAW column, since that is how those read back.
     """
-    if (
-        uuid_binds is not None
-        and isinstance(value, str)
-        and _UUID_STR_RE.match(value)
-        and index not in uuid_binds
-    ):
+    if uuid_binds is not None and isinstance(value, str) and _UUID_STR_RE.match(value) and index not in uuid_binds:
         # Targets a VARCHAR2 column (bank_id, document_id, chunk_id, ...).
         # Leave it as text; converting would bind RAW bytes to VARCHAR2.
         return value
@@ -367,9 +403,7 @@ def _convert_arg_for_bind(value: Any, index: int, uuid_binds: set[int] | None) -
 def _convert_args(args: tuple[Any, ...], query: str | None = None) -> tuple[Any, ...]:
     """Convert a tuple of Python values to Oracle-compatible bind values."""
     uuid_binds = _uuid_bind_indices(query) if query else None
-    return tuple(
-        _convert_arg_for_bind(a, i + 1, uuid_binds) for i, a in enumerate(args)
-    )
+    return tuple(_convert_arg_for_bind(a, i + 1, uuid_binds) for i, a in enumerate(args))
 
 
 # Oracle's numeric server error code for "unique constraint violated"
@@ -465,9 +499,7 @@ def _convert_vector_bind_params(
             flags=re.IGNORECASE,
         )
     )
-    vector_keys.update(
-        re.findall(r"\$(\d+)\s*::\s*vector\b", query, flags=re.IGNORECASE)
-    )
+    vector_keys.update(re.findall(r"\$(\d+)\s*::\s*vector\b", query, flags=re.IGNORECASE))
 
     for key in set(vector_keys):
         value = params.get(key)
@@ -503,9 +535,7 @@ def _needs_blob_bind(val: Any) -> bool:
     return isinstance(val, (bytes, bytearray)) and len(val) > 2000
 
 
-def _convert_args_list(
-    args_list: list[tuple[Any, ...]], query: str | None = None
-) -> list[tuple[Any, ...]]:
+def _convert_args_list(args_list: list[tuple[Any, ...]], query: str | None = None) -> list[tuple[Any, ...]]:
     """Convert a list of tuples for executemany.
 
     ``query`` is threaded through to :func:`_convert_args` so bind types are
@@ -962,8 +992,6 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
         r"JSON_VALUE(\1, '$.parent_operation_id') = JSON_VALUE(:\2, '$.parent_operation_id')", query
     )
 
-
-
     def _rewrite_jsonb_contains(m: re.Match) -> str:
         col, param_num = m.group(1), m.group(2)
         # _JSONB_CONTAINS_RE captures only the numeric part of :N.
@@ -1006,7 +1034,6 @@ def _rewrite_pg_to_oracle(query: str) -> RewriteResult:
         query,
         flags=re.IGNORECASE,
     )
-
 
     # pgvector distance operator: col <=> :N → VECTOR_DISTANCE(col, :N, COSINE)
     # Use [\w.]+ to capture table-qualified columns like mu.embedding
@@ -1543,9 +1570,7 @@ class OracleConnection(DatabaseConnection):
         # function already creates, so translate it into a CASE that maps each
         # value to its index. Recorded here rather than in the rewriter because
         # the bind names do not exist until expansion runs.
-        array_pos_re = re.compile(
-            r"array_position\(\s*:(\d+)\s*,\s*([A-Za-z_][\w.]*)\s*\)", re.IGNORECASE
-        )
+        array_pos_re = re.compile(r"array_position\(\s*:(\d+)\s*,\s*([A-Za-z_][\w.]*)\s*\)", re.IGNORECASE)
         expanded_lists: dict[str, list[str]] = {}
 
         def _replace(m):
@@ -1590,9 +1615,7 @@ class OracleConnection(DatabaseConnection):
             expanded_keys = expanded_lists.get(param_key)
             if expanded_keys is None:
                 return m.group(0)
-            arms = " ".join(
-                f"WHEN {bind} THEN {idx}" for idx, bind in enumerate(expanded_keys)
-            )
+            arms = " ".join(f"WHEN {bind} THEN {idx}" for idx, bind in enumerate(expanded_keys))
             return f"CASE {column} {arms} ELSE {len(expanded_keys)} END"
 
         query = array_pos_re.sub(_replace_array_pos, query)

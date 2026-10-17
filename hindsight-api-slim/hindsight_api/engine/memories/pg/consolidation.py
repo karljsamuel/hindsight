@@ -331,11 +331,11 @@ async def insert_observation(
         embedding,
         source_memory_ids,
         tags,
-          safe_entity_event_date(event_date) or datetime.now(UTC),
-          safe_entity_event_date(occurred_start),
-          safe_entity_event_date(occurred_end),
-          safe_entity_event_date(mentioned_at),
-          len(source_memory_ids),  # proof_count: the caller passes each live source once
+        safe_entity_event_date(event_date) or datetime.now(UTC),
+        safe_entity_event_date(occurred_start),
+        safe_entity_event_date(occurred_end),
+        safe_entity_event_date(mentioned_at),
+        len(source_memory_ids),  # proof_count: the caller passes each live source once
     )
 
     # Populate observation_sources junction table (Oracle only — PG uses native array ops).

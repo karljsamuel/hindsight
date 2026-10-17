@@ -488,8 +488,8 @@ async def list_entities(
     rows = await conn.fetch(
         f"""
         SELECT id, canonical_name, entity_kind, mention_count,
-               {nullable_year1_timestamp_sql('first_seen')} AS first_seen,
-               {nullable_year1_timestamp_sql('last_seen')} AS last_seen,
+               {nullable_year1_timestamp_sql("first_seen")} AS first_seen,
+               {nullable_year1_timestamp_sql("last_seen")} AS last_seen,
                metadata
         FROM {fq_table("entities")}
         WHERE {where_clause}
@@ -555,9 +555,9 @@ def visible_entity_mentions_sql(fq_table, ops, tag_clause_sql: str) -> str:
     sources = "" if ops.uses_observation_sources_table else ", source_memory_ids"
     visible = f"""(
             SELECT id, fact_type, COALESCE(
-                {nullable_year1_timestamp_sql('occurred_start')},
-                {nullable_year1_timestamp_sql('mentioned_at')},
-                {nullable_year1_timestamp_sql('event_date')}
+                {nullable_year1_timestamp_sql("occurred_start")},
+                {nullable_year1_timestamp_sql("mentioned_at")},
+                {nullable_year1_timestamp_sql("event_date")}
             ) AS seen_at{sources}
             FROM {fq_table("memory_units")}
             WHERE bank_id = $1 {tag_clause_sql}

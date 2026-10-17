@@ -57,9 +57,11 @@ def create_memories(context=None) -> MemoriesExtension:
 
     # Check if Oracle backend is configured
     from ...config import get_config
+
     config = get_config()
     if config.database_backend == "oracle":
         from .oracle import OracleMemories
+
         return OracleMemories({})
 
     from .postgres import PostgresMemories

@@ -16,6 +16,7 @@ Both dialect slots are empty on purpose: the merge is pure bookkeeping, and
 ``run_for_dialect`` is present because ``tests/test_migration_shape.py`` fails CI
 for any migration that omits the dispatcher.
 """
+
 from collections.abc import Sequence
 
 from hindsight_api.alembic._dialect import run_for_dialect

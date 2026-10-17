@@ -156,18 +156,7 @@ def _vector_index_names(
     drivername = str(conn.engine.url.drivername).lower()
     is_oracle = "oracle" in drivername
 
-    if is_oracle:
-        # Oracle: use all_indexes and all_ind_columns
-        query = text("""
-            SELECT i.index_name
-            FROM all_indexes i
-            JOIN all_ind_columns c ON i.index_name = c.index_name AND i.owner = c.index_owner
-            WHERE i.table_owner = :schema
-              AND i.table_name = UPPER(:table)
-              AND c.column_name = 'EMBEDDING'
-        """)
-        params = {"schema": schema_name.upper(), "table": table_name}
-    else:
+    if not is_oracle:
         # PostgreSQL: use pg_catalog
         rows = conn.execute(
             text("""
@@ -712,7 +701,7 @@ def _migrate_table_embedding_dimension(
             """),
             {"schema": schema_name.upper(), "table": table_name.upper()},
         ).scalar()
-        
+
         # Oracle VECTOR adds 8 bytes (2 dimensions) of padding
         # Standard dimensions: 384, 768, 1024, 1536, 2048, 4096, etc.
         if raw_dim is not None:
@@ -841,16 +830,18 @@ def _create_embedding_vector_index(
         # Oracle: use native CREATE VECTOR INDEX syntax with uppercase table names
         conn.execute(
             text(f"""
-                CREATE VECTOR INDEX idx_{table_name.upper()}_embedding_{index_type} 
-                ON {schema_name}.{table_name.upper()}(embedding) 
-                ORGANIZATION NEIGHBOR PARTITIONS 
-                DISTANCE COSINE 
+                CREATE VECTOR INDEX idx_{table_name.upper()}_embedding_{index_type}
+                ON {schema_name}.{table_name.upper()}(embedding)
+                ORGANIZATION NEIGHBOR PARTITIONS
+                DISTANCE COSINE
                 WITH TARGET ACCURACY 95
             """)
         )
     else:
         conn.execute(
-            text(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_embedding_{index_type} ON {schema_name}.{table_name} (embedding) {index_using_clause(vector_ext, dimension)}")
+            text(
+                f"CREATE INDEX IF NOT EXISTS idx_{table_name}_embedding_{index_type} ON {schema_name}.{table_name} (embedding) {index_using_clause(vector_ext, dimension)}"
+            )
         )
     logger.info(f"Created {index_type} index on {table_name} for {dimension}-dimensional embeddings")
     conn.commit()
@@ -891,13 +882,16 @@ def ensure_embedding_dimension(
         # Check if memory_units table exists (proxy for schema being initialized)
         # Oracle uses all_tables, PostgreSQL uses information_schema.tables
         if "oracle" in database_url.lower():
-            table_exists = conn.execute(
-                text("""
+            table_exists = (
+                conn.execute(
+                    text("""
                     SELECT 1 FROM all_tables
                     WHERE owner = :schema AND table_name = 'MEMORY_UNITS'
                 """),
-                {"schema": schema_name.upper()},
-            ).scalar() is not None
+                    {"schema": schema_name.upper()},
+                ).scalar()
+                is not None
+            )
         else:
             table_exists = conn.execute(
                 text("""
@@ -995,13 +989,16 @@ def ensure_vector_extension(
         for table_name, index_name in tables_to_check:
             # Check if table exists (Oracle-compatible)
             if "oracle" in database_url.lower():
-                table_exists = conn.execute(
-                    text("""
+                table_exists = (
+                    conn.execute(
+                        text("""
                         SELECT 1 FROM all_tables
                         WHERE owner = :schema AND table_name = :table_name
                     """),
-                    {"schema": schema_name.upper(), "table_name": table_name.upper()},
-                ).scalar() is not None
+                        {"schema": schema_name.upper(), "table_name": table_name.upper()},
+                    ).scalar()
+                    is not None
+                )
             else:
                 table_exists = conn.execute(
                     text("""
@@ -1423,13 +1420,16 @@ def ensure_text_search_extension(
         for table_name in tables_to_check:
             # Check if table exists (Oracle-compatible)
             if "oracle" in database_url.lower():
-                table_exists = conn.execute(
-                    text("""
+                table_exists = (
+                    conn.execute(
+                        text("""
                         SELECT 1 FROM all_tables
                         WHERE owner = :schema AND table_name = :table_name
                     """),
-                    {"schema": schema_name.upper(), "table_name": table_name.upper()},
-                ).scalar() is not None
+                        {"schema": schema_name.upper(), "table_name": table_name.upper()},
+                    ).scalar()
+                    is not None
+                )
             else:
                 table_exists = conn.execute(
                     text("""
@@ -1578,14 +1578,25 @@ def ensure_text_search_extension(
             current_col_type = mismatched_tables[0][1]
             current_idx_type = mismatched_tables[0][2]
             first_is_pg_search = mismatched_tables[0][3]
-            
+
             # Detect Oracle native text search (Oracle Text/CTXSYS.CONTEXT)
             drivername = str(conn.engine.url.drivername).lower()
             is_oracle = "oracle" in drivername
-            
-            if is_oracle and current_col_type and current_col_type.lower() in ("clob", "blob", "varchar2", "varchar") and current_idx_type and current_idx_type.lower() == "domain":
+
+            if (
+                is_oracle
+                and current_col_type
+                and current_col_type.lower() in ("clob", "blob", "varchar2", "varchar")
+                and current_idx_type
+                and current_idx_type.lower() == "domain"
+            ):
                 current_ext = "native"
-            elif is_oracle and current_col_type and current_col_type.lower() in ("clob", "blob", "varchar2", "varchar") and (current_idx_type is None or current_idx_type.lower() == "domain"):
+            elif (
+                is_oracle
+                and current_col_type
+                and current_col_type.lower() in ("clob", "blob", "varchar2", "varchar")
+                and (current_idx_type is None or current_idx_type.lower() == "domain")
+            ):
                 # Oracle with CLOB column and no index (or DOMAIN index) = native
                 current_ext = "native"
             elif current_col_type == "tsvector":
@@ -1614,6 +1625,8 @@ def ensure_text_search_extension(
         # boot concurrently during a rolling restart and each runs this
         # reconciliation, so a plain CREATE/ADD would crash whichever replica
         # loses the race to the first one's committed DDL.
+
+
 def _migrate_one_schema_pg(
     database_url: str,
     schema: str,

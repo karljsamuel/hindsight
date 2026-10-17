@@ -83,10 +83,7 @@ def _oracle_upgrade() -> None:
 
     # Co-occurrence timestamps are derived cache/recency data; they can be
     # regenerated from unit_entities and do not own any content.
-    op.execute(
-        "DELETE FROM entity_cooccurrences "
-        "WHERE TO_CHAR(last_cooccurred, 'YYYY') = '0001'"
-    )
+    op.execute("DELETE FROM entity_cooccurrences WHERE TO_CHAR(last_cooccurred, 'YYYY') = '0001'")
 
 
 def _oracle_downgrade() -> None:

@@ -759,7 +759,7 @@ class EntityResolver:
         try:
             all_entities = await conn.fetch(
                 f"""
-                SELECT canonical_name, id, metadata, {nullable_year1_timestamp_sql('last_seen')} AS last_seen, mention_count
+                SELECT canonical_name, id, metadata, {nullable_year1_timestamp_sql("last_seen")} AS last_seen, mention_count
                 FROM {fq_table("entities")}
                 WHERE bank_id = $1
                 """,
@@ -872,7 +872,7 @@ class EntityResolver:
             rows.extend(
                 await conn.fetch(
                     f"""
-                    SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql('e.last_seen')} AS last_seen, e.mention_count,
+                    SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql("e.last_seen")} AS last_seen, e.mention_count,
                            q.query_text
                     FROM unnest($2::text[]) AS q(query_text)
                     JOIN {fq_table("entities")} e ON (
@@ -913,7 +913,7 @@ class EntityResolver:
                            q.query_text
                     FROM unnest($2::text[]) AS q(query_text)
                     CROSS JOIN LATERAL (
-                        SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql('e.last_seen')} AS last_seen, e.mention_count
+                        SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql("e.last_seen")} AS last_seen, e.mention_count
                         FROM {fq_table("entities")} e
                         WHERE e.bank_id = $1
                           AND e.entity_kind != 'label'
@@ -1016,7 +1016,7 @@ class EntityResolver:
                 rows.extend(
                     await conn.fetch(
                         f"""
-                        SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql('e.last_seen')} AS last_seen, e.mention_count,
+                        SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql("e.last_seen")} AS last_seen, e.mention_count,
                                q.query_text
                         FROM JSON_TABLE($2, '$[*]' COLUMNS (query_text VARCHAR2(4000) PATH '$')) q
                         JOIN {entities_table} e ON (
@@ -1039,7 +1039,7 @@ class EntityResolver:
                         f"""
                         SELECT id, canonical_name, metadata, last_seen, mention_count, query_text
                         FROM (
-                            SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql('e.last_seen')} AS last_seen, e.mention_count,
+                            SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql("e.last_seen")} AS last_seen, e.mention_count,
                                    q.query_text,
                                    ROW_NUMBER() OVER (
                                        PARTITION BY q.query_text
@@ -1217,9 +1217,7 @@ class EntityResolver:
             # the date fans out to entity stats / co-occurrence rows. Sanitizing only
             # at the final entity INSERT is too late: datetime.min is truthy and can
             # already have poisoned those downstream paths.
-            entity_event_date = safe_entity_event_date(
-                entity_data.get("event_date", unit_event_date)
-            )
+            entity_event_date = safe_entity_event_date(entity_data.get("event_date", unit_event_date))
 
             # Per mention, not per batch: retain resolves the caller's entities and the
             # extractor's in one pass, and only the caller's are meant literally (#3479).
