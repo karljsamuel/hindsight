@@ -150,6 +150,20 @@ for i in {1..60}; do
     sleep 2
     if [ $i -eq 60 ]; then
         echo "❌ Health endpoint never responded after 120s"
+        # /health is an alias of /health/ready: it answers 503 when its database
+        # check fails, and `curl -sf` treats any non-2xx as "no response" — which is
+        # why this failure used to be opaque. The body names the reason
+        # ("not_initialized", or the exception repr), and /health/live never touches
+        # the database, so the pair separates "process wedged" from "database
+        # unreachable" without another CI round trip.
+        echo "=== /health response ==="
+        curl -s -o /tmp/health.json -w "HTTP %{http_code}\n" \
+            "http://localhost:${HINDSIGHT_PORT}/health" || echo "(no response at all)"
+        cat /tmp/health.json 2>/dev/null; echo
+        echo "=== /health/live response ==="
+        curl -s -o /tmp/live.json -w "HTTP %{http_code}\n" \
+            "http://localhost:${HINDSIGHT_PORT}/health/live" || echo "(no response at all)"
+        cat /tmp/live.json 2>/dev/null; echo
         echo "=== Final container logs ==="
         docker logs "$CONTAINER_NAME"
         exit 1
