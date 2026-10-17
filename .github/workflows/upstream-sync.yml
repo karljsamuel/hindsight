@@ -42,7 +42,12 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  # Write is needed to push the sync branch. The push uses this job token, not a
+  # PAT: a PAT needs Contents *and* Workflows write to push upstream's
+  # .github/workflows/* files, and when either is missing GitHub reports a bare
+  # "Permission to <repo> denied to <user>". The job token always has write to
+  # its own repository.
+  contents: write
   pull-requests: write
 
 jobs:
@@ -53,17 +58,11 @@ jobs:
       GH_TOKEN: ${{ secrets.GH_KJSAGENT_PAT }}
       SIGNING_KEY: ${{ secrets.KJS_AGENT_SIGNING_KEY }}
     steps:
-      - name: Check push access
-        # The run of 2026-10-05 died at the push with a bare 403. Fail up front,
-        # where the cause is obvious.
-        run: |
-          set -euo pipefail
-          push=$(gh api repos/karljsamuel/hindsight --jq .permissions.push)
-          if [ "$push" != "true" ]; then
-            echo "::error::GH_KJSAGENT_PAT cannot push to karljsamuel/hindsight (permissions.push=$push). The token needs Contents: read and write, and Workflows: read and write."
-            exit 1
-          fi
-          echo "Push access confirmed."
+      # No "check push access" step: it read the PAT user's *collaborator*
+      # permission, which was `true` through every failed run, so it vouched for
+      # something it could not know. The push step below is the real test, and it
+      # now runs before the expensive trial merge so a permission problem costs
+      # seconds instead of a full fetch and merge.
 
       - name: Skip when a sync PR is already open
         # The PR is resolved and merged by hand, so it can sit for a while; a
@@ -86,7 +85,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GH_KJSAGENT_PAT }}
+          # No `token:` here on purpose: checkout then persists the *job* token,
+          # so the push below uses it too. GH_KJSAGENT_PAT is still used for
+          # `gh pr create`, which keeps the PR authored by kjsagent and therefore
+          # approvable by karljsamuel.
 
       - name: Configure git identity and optional SSH signing
         if: steps.open_pr.outputs.skip != 'true'
@@ -163,6 +165,17 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Push the sync branch
+        if: steps.open_pr.outputs.skip != 'true' && steps.branch.outputs.skip != 'true'
+        # Runs before the conflict report on purpose: this is where a permission
+        # problem surfaces, so it must not sit behind the expensive trial merge.
+        # Uses the job token (see the checkout step). Never a force push: if this
+        # fails, someone has already pushed to the branch and their work must not
+        # be overwritten.
+        run: |
+          set -euo pipefail
+          git push origin "HEAD:refs/heads/${{ steps.branch.outputs.branch }}"
+
       - name: Report what the merge will conflict on
         # A trial merge in a throwaway worktree: it reads both sides and writes
         # nothing to the branch, so no side is chosen. This only tells the
@@ -211,14 +224,6 @@ jobs:
           fi
 
           git worktree remove --force "$TRIAL" >/dev/null 2>&1 || true
-
-      - name: Push the sync branch
-        if: steps.open_pr.outputs.skip != 'true' && steps.branch.outputs.skip != 'true'
-        # No --force and no --force-with-lease: if this fails, someone has already
-        # pushed to the branch and their work must not be overwritten.
-        run: |
-          set -euo pipefail
-          git push origin "HEAD:refs/heads/${{ steps.branch.outputs.branch }}"
 
       - name: Open the pull request
         if: steps.open_pr.outputs.skip != 'true' && steps.branch.outputs.skip != 'true'
