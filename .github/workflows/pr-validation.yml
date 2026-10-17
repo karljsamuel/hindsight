@@ -48,8 +48,24 @@ jobs:
           fi
 
       - name: Validate changed files
+        # An upstream sync PR integrates upstream's own tree wholesale, so it
+        # necessarily touches paths unrelated to Oracle compatibility - which is
+        # what this gate constrains. The gate exists to stop an Oracle branch
+        # from silently changing unrelated parts of the repo (leaked credential
+        # files being the main concern), not to constrain upstream's own content,
+        # so an upstream-sync branch from this repository is exempt. Scoped to
+        # same-repo heads: github.head_ref carries only the branch name, so a
+        # fork branch named upstream-sync-* would otherwise skip the gate too.
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
         run: |
           echo "Validating changed files..."
+          if [[ "$HEAD_REF" == upstream-sync-* && "$HEAD_REPO" == "$REPO" ]]; then
+            echo "Branch $HEAD_REF is an upstream sync - file gate skipped by design."
+            exit 0
+          fi
           CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
           echo "Changed files:"
           echo "$CHANGED"
