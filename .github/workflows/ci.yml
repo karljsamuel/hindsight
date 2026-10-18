@@ -388,7 +388,7 @@ jobs:
     if: needs.detect-changes.outputs.has_secrets == 'true' && (github.event_name == 'workflow_dispatch'
       || needs.detect-changes.outputs.core == 'true' || needs.detect-changes.outputs.ci == 'true')
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     # Upstream's oracle-marked suite, run against the KJS Oracle test database
     # (HINDSIGHT_TEST on the ADB instance) instead of a throwaway container: this fork
     # is Oracle with the 2048-dim OpenRouter embedding model, and a local container
@@ -408,6 +408,10 @@ jobs:
       HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
       ORACLE_TEST_USER: HINDSIGHT_TEST
       ORACLE_TEST_PASSWORD: ${{ secrets.KJS_TEST_ODB_PASSWORD }}
+      KJS_TEST_ODB_PASSWORD: ${{ secrets.KJS_TEST_ODB_PASSWORD }}
+      # The app-side path (migrations, the API the http integration tests boot) is
+      # addressed separately from the fixtures' ORACLE_TEST_* trio.
+      HINDSIGHT_API_DATABASE_SCHEMA: HINDSIGHT_TEST
       ORACLE_TEST_DSN: "(description=(retry_count=20)(retry_delay=3)(address=(protocol=tcps)(port=1522)(host=adb.ap-hyderabad-1.oraclecloud.com))(connect_data=(service_name=g4a90f2577f59fb_hindsightdb_high.adb.oraclecloud.com))(security=(ssl_server_dn_match=yes)))"
     steps:
     - uses: actions/checkout@v6
@@ -428,6 +432,20 @@ jobs:
     - name: Install dependencies
       working-directory: ./hindsight-api-slim
       run: uv sync --frozen --all-extras --index-strategy unsafe-best-match
+    - name: Point the app at the Oracle test database
+      # A tcps connect descriptor cannot live in the host position of a URL; it
+      # rides URL-encoded in `dsn=`, which is how smoketest.sh builds the same URL.
+      # The password is read from the environment, never passed as an argument.
+      run: |
+        python3 - <<'PY' >> "$GITHUB_ENV"
+        import os
+        import urllib.parse
+
+        dsn = os.environ["ORACLE_TEST_DSN"]
+        pwd = urllib.parse.quote(os.environ["KJS_TEST_ODB_PASSWORD"], safe="")
+        url = f"oracle+oracledb://HINDSIGHT_TEST:{pwd}@/?dsn={urllib.parse.quote(dsn, safe='')}"
+        print(f"HINDSIGHT_API_DATABASE_URL={url}")
+        PY
     - name: Run Oracle tests
       working-directory: ./hindsight-api-slim
       run: uv run pytest tests -v -m oracle -n0

@@ -621,8 +621,17 @@ def embeddings(tmp_path_factory, worker_id):
 
     lock_file = root_tmp_dir / "embeddings_init.lock"
 
-    _skip_without_local_ml("embeddings")
-    emb = LocalSTEmbeddings()
+    # provider=local keeps upstream's exact behaviour (it is what the Postgres
+    # shards run); anything else is built from the app's own configuration, so the
+    # suite embeds with the model this fork ships — the Oracle job points it at the
+    # remote 2048-dim OpenRouter model, and the vector column must match.
+    if os.getenv("HINDSIGHT_API_EMBEDDINGS_PROVIDER", "local").lower() == "local":
+        _skip_without_local_ml("embeddings")
+        emb = LocalSTEmbeddings()
+    else:
+        from hindsight_api.engine.embeddings import create_embeddings_from_env
+
+        emb = create_embeddings_from_env()
 
     # Serialize model initialization across workers
     with filelock.FileLock(str(lock_file)):
@@ -653,8 +662,13 @@ def cross_encoder(tmp_path_factory, worker_id):
 
     lock_file = root_tmp_dir / "cross_encoder_init.lock"
 
-    _skip_without_local_ml("cross_encoder")
-    ce = LocalSTCrossEncoder()
+    if os.getenv("HINDSIGHT_API_RERANKER_PROVIDER", "local").lower() == "local":
+        _skip_without_local_ml("cross_encoder")
+        ce = LocalSTCrossEncoder()
+    else:
+        from hindsight_api.engine.cross_encoder import create_cross_encoder_from_env
+
+        ce = create_cross_encoder_from_env()
 
     # Serialize model initialization across workers
     with filelock.FileLock(str(lock_file)):
