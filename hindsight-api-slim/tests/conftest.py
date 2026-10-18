@@ -454,8 +454,11 @@ def oracle_db_url(_oracle_admin_dsn):
     admin_pass = _oracle_admin_dsn["password"]
     bare_dsn = _oracle_admin_dsn["dsn"]
 
-    test_user = "HINDSIGHT_TEST"
-    test_pass = "hindsight_test"
+    # The test user lives on the target database and is provisioned outside CI
+    # (this bootstrap cannot create it — ORA-01031 above is tolerated), so its
+    # credentials come from the environment rather than the container defaults.
+    test_user = os.getenv("ORACLE_TEST_USER", "HINDSIGHT_TEST")
+    test_pass = os.getenv("ORACLE_TEST_PASSWORD", "hindsight_test")
 
     conn = oracledb.connect(user=admin_user, password=admin_pass, dsn=bare_dsn)
     cursor = conn.cursor()
@@ -503,7 +506,15 @@ def oracle_db_url(_oracle_admin_dsn):
         conn.close()
 
     # Return URL-format DSN for the test user
-    url = f"oracle://{test_user}:{test_pass}@{bare_dsn}"
+    if "(" in bare_dsn:
+        # A full connect descriptor (tcps, Autonomous Database) cannot sit in the
+        # host position of a URL; it rides in the `dsn=` query parameter, encoded,
+        # exactly as smoketest.sh builds DATABASE_URL for the same instance.
+        from urllib.parse import quote
+
+        url = f"oracle+oracledb://{test_user}:{quote(test_pass, safe='')}@/?dsn={quote(bare_dsn, safe='')}"
+    else:
+        url = f"oracle://{test_user}:{test_pass}@{bare_dsn}"
 
     # Run idempotent migrations once at session scope (mirrors PG's pg0_db_url).
     # This avoids re-running DDL checks on every function-scoped test.
