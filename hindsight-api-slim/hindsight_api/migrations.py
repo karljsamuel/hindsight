@@ -71,6 +71,23 @@ MIGRATION_LOCK_ID = 123456789
 _alembic_lock = threading.Lock()
 
 
+def _connection_is_oracle(conn) -> bool:
+    """True when ``conn`` talks to Oracle.
+
+    Prefer the SQLAlchemy engine, but never require it: the text-search
+    reconciliation path is driven by bare connections (and by test doubles that
+    expose only ``execute``), where reading the engine off the connection raises
+    AttributeError before any DDL is emitted.
+    """
+    engine = getattr(conn, "engine", None)
+    if engine is not None:
+        return "oracle" in str(engine.url.drivername).lower()
+    dialect = getattr(conn, "dialect", None)
+    if dialect is not None:
+        return "oracle" in str(getattr(dialect, "name", "")).lower()
+    return False
+
+
 def _set_alembic_main_option(config: Config, name: str, value: str) -> None:
     """Set an Alembic option without treating URL percent escapes as interpolation."""
     config.set_main_option(name, value.replace("%", "%%"))
@@ -153,8 +170,7 @@ def _vector_index_names(
     cannot break it.
     """
     # Detect dialect
-    drivername = str(conn.engine.url.drivername).lower()
-    is_oracle = "oracle" in drivername
+    is_oracle = _connection_is_oracle(conn)
 
     if not is_oracle:
         # PostgreSQL: use pg_catalog
@@ -682,8 +698,7 @@ def _migrate_table_embedding_dimension(
     Works for both PostgreSQL and Oracle (detected via connection dialect).
     """
     # Detect dialect
-    drivername = str(conn.engine.url.drivername).lower()
-    is_oracle = "oracle" in drivername
+    is_oracle = _connection_is_oracle(conn)
 
     # Get current dimension
     if is_oracle:
@@ -823,8 +838,7 @@ def _create_embedding_vector_index(
         return
 
     # Detect dialect
-    drivername = str(conn.engine.url.drivername).lower()
-    is_oracle = "oracle" in drivername
+    is_oracle = _connection_is_oracle(conn)
 
     if is_oracle:
         # Oracle: use native CREATE VECTOR INDEX syntax with uppercase table names
@@ -838,9 +852,14 @@ def _create_embedding_vector_index(
             """)
         )
     else:
+        # The USING clause carries its own column list ("USING hnsw (embedding
+        # vector_cosine_ops)"), so the column must not also appear before it:
+        # `ON t (embedding) USING hnsw (...)` is a PG syntax error, which made
+        # every dimension change on Postgres fail.
         conn.execute(
             text(
-                f"CREATE INDEX IF NOT EXISTS idx_{table_name}_embedding_{index_type} ON {schema_name}.{table_name} (embedding) {index_using_clause(vector_ext, dimension)}"
+                f"CREATE INDEX IF NOT EXISTS idx_{table_name}_embedding_{index_type} "
+                f"ON {schema_name}.{table_name} {index_using_clause(vector_ext, dimension)}"
             )
         )
     logger.info(f"Created {index_type} index on {table_name} for {dimension}-dimensional embeddings")
@@ -1580,8 +1599,7 @@ def ensure_text_search_extension(
             first_is_pg_search = mismatched_tables[0][3]
 
             # Detect Oracle native text search (Oracle Text/CTXSYS.CONTEXT)
-            drivername = str(conn.engine.url.drivername).lower()
-            is_oracle = "oracle" in drivername
+            is_oracle = _connection_is_oracle(conn)
 
             if (
                 is_oracle
@@ -1625,6 +1643,93 @@ def ensure_text_search_extension(
         # boot concurrently during a rolling restart and each runs this
         # reconciliation, so a plain CREATE/ADD would crash whichever replica
         # loses the race to the first one's committed DDL.
+        #
+        # Oracle is excluded from this block: every statement below is
+        # PostgreSQL DDL (tsvector, bm25_catalog.bm25vector, to_tsvector)
+        # that Oracle cannot execute. This fork's Oracle path never emitted
+        # it; the restoration is what the reconciliation tests assert for
+        # Postgres.
+        if _connection_is_oracle(conn):
+            return
+
+        logger.info(f"Recreating text search columns/indexes for {text_search_extension}")
+
+        for table_name, current_col_type, current_idx_type, _was_pg_search in mismatched_tables:
+            # Drop existing index if it exists
+            if current_idx_type:
+                logger.info(f"Dropping {current_idx_type} index on {table_name}")
+                conn.execute(
+                    text(f"""
+                        DROP INDEX IF EXISTS {schema_name}.idx_{table_name.replace(".", "_")}_text_search
+                    """)
+                )
+
+            # Drop existing column if it exists
+            if current_col_type:
+                logger.info(f"Dropping {current_col_type} column on {table_name}")
+                conn.execute(text(f"ALTER TABLE {schema_name}.{table_name} DROP COLUMN IF EXISTS search_vector"))
+
+            # Create new column with appropriate type
+            if text_search_extension == "vchord":
+                logger.info(f"Creating bm25vector column on {table_name}")
+                # Note: vchord_bm25 extension creates types in bm25_catalog schema
+                conn.execute(
+                    text(
+                        f"ALTER TABLE {schema_name}.{table_name} "
+                        f"ADD COLUMN IF NOT EXISTS search_vector bm25_catalog.bm25vector"
+                    )
+                )
+            elif text_search_extension == "pg_textsearch":
+                logger.info(f"Creating TEXT column on {table_name}")
+                # Dummy TEXT column for consistency (indexes operate on base columns)
+                conn.execute(
+                    text(f"ALTER TABLE {schema_name}.{table_name} ADD COLUMN IF NOT EXISTS search_vector TEXT")
+                )
+            elif text_search_extension == "pgroonga":
+                _ensure_pgroonga_extension(conn)
+                logger.info(f"Creating dummy TEXT search_vector on {table_name} for pgroonga")
+                # pgroonga indexes the base text columns directly, but we keep a
+                # dummy search_vector column for symmetry with pg_textsearch and
+                # so the column-type mismatch detection above keeps working.
+                conn.execute(
+                    text(f"ALTER TABLE {schema_name}.{table_name} ADD COLUMN IF NOT EXISTS search_vector TEXT")
+                )
+            elif text_search_extension == "pg_search":
+                logger.info(f"Creating TEXT column on {table_name}")
+                # Dummy TEXT column for schema symmetry; pg_search indexes operate on base columns.
+                conn.execute(
+                    text(f"ALTER TABLE {schema_name}.{table_name} ADD COLUMN IF NOT EXISTS search_vector TEXT")
+                )
+            else:  # native
+                logger.info(f"Creating tsvector column on {table_name}")
+                if table_name == "mental_models":
+                    # No write path populates mental_models.search_vector for
+                    # native (pg_search_vector_expr passes native_inline=False),
+                    # so it must be GENERATED exactly like the learnings /
+                    # pinned_reflections migration creates it — a plain column
+                    # here would stay NULL and silently empty knowledge search.
+                    # The 'english' config is hard-coded there and in
+                    # knowledge_bm25_arm's native branch; keep all three in step.
+                    conn.execute(
+                        text(f"""
+                            ALTER TABLE {schema_name}.{table_name}
+                            ADD COLUMN IF NOT EXISTS search_vector tsvector
+                            GENERATED ALWAYS AS (
+                                to_tsvector('english', {mental_models_text_document()})
+                            ) STORED
+                        """)
+                    )
+                else:
+                    # memory_units writes populate this plain column with the
+                    # configured native language in ops_postgresql.
+                    conn.execute(
+                        text(f"ALTER TABLE {schema_name}.{table_name} ADD COLUMN IF NOT EXISTS search_vector tsvector")
+                    )
+
+            _create_text_search_index(conn, schema_name, table_name, text_search_extension, pg_search_tokenizer)
+
+        conn.commit()
+        logger.info(f"Successfully migrated text search to {text_search_extension}")
 
 
 def _migrate_one_schema_pg(

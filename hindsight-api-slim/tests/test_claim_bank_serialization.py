@@ -353,8 +353,15 @@ def test_guard_survives_the_oracle_sql_rewrite():
     Oracle tests need an ORACLE_TEST_DSN this suite does not have, so the dialect
     parity of this guard is otherwise unverified. The rewriter is pure text
     substitution, so assert on its output directly: PG-only spellings must be
-    gone, and the ROWNUM row limit must land on the *outer* WHERE rather than the
-    subquery's (the rewriter replaces only the first WHERE it sees).
+    gone, and the row limit must be ordering-safe.
+
+    The limit is emitted as `ORDER BY ... FETCH FIRST n ROWS ONLY`, deliberately
+    NOT as `WHERE ROWNUM <= n`: Oracle applies ROWNUM during the scan, before
+    ORDER BY, so the ROWNUM form silently returned the *newest* pending
+    operations instead of the oldest and broke oldest-first claim fairness
+    (measured on 26ai; see db/oracle.py). Upstream still injects ROWNUM for
+    FOR UPDATE and its copy of this test asserts that; this fork diverges on
+    purpose.
     """
     from hindsight_api.engine.db.ops import bank_serialization_sql, key_serialization_sql
     from hindsight_api.engine.db.oracle import _rewrite_pg_to_oracle
@@ -378,7 +385,8 @@ def test_guard_survives_the_oracle_sql_rewrite():
     assert "!= ALL" not in rewritten and "::uuid[]" not in rewritten
     assert "LIMIT" not in rewritten
     assert "FOR UPDATE SKIP LOCKED" in rewritten
-    assert "WHERE ROWNUM <= :2 AND o.status = 'pending'" in rewritten
+    assert "WHERE ROWNUM" not in rewritten
+    assert "ORDER BY o.created_at FETCH FIRST :2 ROWS ONLY FOR UPDATE SKIP LOCKED" in " ".join(rewritten.split())
     assert "WHERE doc_peer.bank_id = o.bank_id" in rewritten
     # The correlated subquery keeps its own unmodified WHERE.
     assert "WHERE bank_peer.bank_id = o.bank_id" in rewritten
@@ -400,7 +408,8 @@ def test_guard_survives_the_oracle_sql_rewrite():
 
     assert "LIKE ANY" not in tiered
     assert "o./*LIKE_ANY" not in tiered
-    assert "WHERE ROWNUM <= :2 AND o.status = 'pending'" in tiered
+    assert "WHERE ROWNUM" not in tiered
+    assert "ORDER BY o.created_at FETCH FIRST :2 ROWS ONLY FOR UPDATE SKIP LOCKED" in " ".join(tiered.split())
 
 
 @pytest.mark.asyncio
