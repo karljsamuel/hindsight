@@ -113,6 +113,7 @@ ORACLEDB_VERSION=26.0.1'
           -e HINDSIGHT_ENABLE_CP=false \
           -e HINDSIGHT_API_LLM_PROVIDER=openrouter \
           -e HINDSIGHT_API_LLM_API_KEY="$KJS_TEST_LLM_API_KEY" \
+          -e HINDSIGHT_API_LLM_MODEL=nvidia/nemotron-3.5-super-vl:free \
           -e HINDSIGHT_API_EMBEDDINGS_PROVIDER=openrouter \
           -e HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY="$KJS_TEST_LLM_API_KEY" \
           -e HINDSIGHT_API_RERANKER_PROVIDER=openrouter \
