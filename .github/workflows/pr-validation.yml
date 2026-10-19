@@ -126,6 +126,7 @@ jobs:
     env:
       KJS_TEST_ODB_PASSWORD: ${{ secrets.KJS_TEST_ODB_PASSWORD }}
       KJS_TEST_LLM_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
+      KJS_TEST_NVIDIA_API_KEY: ${{ secrets.KJS_TEST_NVIDIA_API_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -178,6 +179,7 @@ jobs:
     env:
       KJS_TEST_ODB_PASSWORD: ${{ secrets.KJS_TEST_ODB_PASSWORD }}
       KJS_TEST_LLM_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
+      KJS_TEST_NVIDIA_API_KEY: ${{ secrets.KJS_TEST_NVIDIA_API_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

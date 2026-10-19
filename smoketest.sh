@@ -22,6 +22,13 @@ if [[ -z "$OPENROUTER_API_KEY" ]]; then
     exit 1
 fi
 
+# Get NVIDIA API key from secret (for the LLM)
+NVIDIA_API_KEY="${KJS_TEST_NVIDIA_API_KEY:-}"
+if [[ -z "$NVIDIA_API_KEY" ]]; then
+    echo "❌ KJS_TEST_NVIDIA_API_KEY environment variable not set"
+    exit 1
+fi
+
 # Build the database URL with decoded DSN (oracledb thin mode compatible)
 # Use the high performance service (port 1522, TLS)
 DATABASE_URL="oracle+oracledb://HINDSIGHT_TEST:${DB_PASSWORD}@/?dsn=$(python3 -c "
@@ -123,9 +130,10 @@ docker run -d --name "$CONTAINER_NAME" \
     -e HINDSIGHT_API_VECTOR_EXTENSION=oracle \
     -e HINDSIGHT_API_EMBEDDINGS_ONNX_DIMENSIONS=2048 \
     -e HINDSIGHT_API_DATABASE_URL="$DATABASE_URL" \
-    -e HINDSIGHT_API_LLM_PROVIDER=openrouter \
-    -e HINDSIGHT_API_LLM_API_KEY="$OPENROUTER_API_KEY" \
-    -e HINDSIGHT_API_LLM_MODEL=nvidia/nemotron-3.5-super-vl:free \
+    -e HINDSIGHT_API_LLM_PROVIDER=openai \
+    -e HINDSIGHT_API_LLM_BASE_URL=https://integrate.api.nvidia.com/v1 \
+    -e HINDSIGHT_API_LLM_API_KEY="$NVIDIA_API_KEY" \
+    -e HINDSIGHT_API_LLM_MODEL=nvidia/nemotron-3.5-super-vl-120b-a12b \
     -e HINDSIGHT_API_EMBEDDINGS_PROVIDER=openrouter \
     -e HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY="$OPENROUTER_API_KEY" \
     -e HINDSIGHT_API_EMBEDDINGS_MODEL=nvidia/llama-nemotron-embed-vl-1b-v2:free \
