@@ -293,15 +293,12 @@ jobs:
         - 3
     name: test-api (${{ matrix.shard }}/3)
     env:
-      # LLM on NVIDIA NIM through the OpenAI-compatible client: the OpenRouter
-      # free tier returned a provider error for every call and the smoke
-      # container could not pass its startup verification with it. Embeddings
-      # and reranker stay on OpenRouter, which works.
-      HINDSIGHT_API_LLM_PROVIDER: openai
-      HINDSIGHT_API_LLM_BASE_URL: https://integrate.api.nvidia.com/v1
-      HINDSIGHT_API_LLM_API_KEY: ${{ secrets.KJS_TEST_NVIDIA_API_KEY }}
-      HINDSIGHT_API_LLM_MODEL: nvidia/nemotron-3.5-super-vl-120b-a12b
-      HINDSIGHT_API_LLM_REASONING_EFFORT: low
+      # No LLM: this job is upstream's shared-logic harness (4100 tests) and its
+      # real-LLM tests (api_client_real_llm + llm_judge) cannot finish inside the
+      # 300s per-test cap against a remote provider. They only ever passed because
+      # the LLM was broken and the calls failed fast. The fork's LLM path is
+      # covered by test-api-oracle and the smoke test, both on NIM.
+      HINDSIGHT_API_LLM_PROVIDER: none
       HINDSIGHT_API_EMBEDDINGS_PROVIDER: local
       HINDSIGHT_API_RERANKER_PROVIDER: local
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -394,7 +391,7 @@ jobs:
     if: needs.detect-changes.outputs.has_secrets == 'true' && (github.event_name == 'workflow_dispatch'
       || needs.detect-changes.outputs.core == 'true' || needs.detect-changes.outputs.ci == 'true')
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     # Upstream's oracle-marked suite, run against the KJS Oracle test database
     # (HINDSIGHT_TEST on the ADB instance) instead of a throwaway container: this fork
     # is Oracle with the 2048-dim OpenRouter embedding model, and a local container
