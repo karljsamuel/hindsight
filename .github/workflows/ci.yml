@@ -301,6 +301,7 @@ jobs:
       HINDSIGHT_API_LLM_BASE_URL: https://integrate.api.nvidia.com/v1
       HINDSIGHT_API_LLM_API_KEY: ${{ secrets.KJS_TEST_NVIDIA_API_KEY }}
       HINDSIGHT_API_LLM_MODEL: nvidia/nemotron-3.5-super-vl-120b-a12b
+      HINDSIGHT_API_LLM_REASONING_EFFORT: none
       HINDSIGHT_API_EMBEDDINGS_PROVIDER: local
       HINDSIGHT_API_RERANKER_PROVIDER: local
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -407,14 +408,15 @@ jobs:
       HINDSIGHT_API_LLM_BASE_URL: https://integrate.api.nvidia.com/v1
       HINDSIGHT_API_LLM_API_KEY: ${{ secrets.KJS_TEST_NVIDIA_API_KEY }}
       HINDSIGHT_API_LLM_MODEL: nvidia/nemotron-3.5-super-vl-120b-a12b
+      HINDSIGHT_API_LLM_REASONING_EFFORT: none
       HINDSIGHT_API_DATABASE_BACKEND: oracle
       HINDSIGHT_API_EMBEDDINGS_PROVIDER: openrouter
-      HINDSIGHT_API_EMBEDDINGS_MODEL: nvidia/llama-nemotron-embed-vl-1b-v2:free
+      HINDSIGHT_API_EMBEDDINGS_OPENROUTER_MODEL: nvidia/llama-nemotron-embed-vl-1b-v2:free
       HINDSIGHT_API_EMBEDDINGS_DIMENSION: 2048
       HINDSIGHT_API_EMBEDDINGS_ONNX_DIMENSIONS: 2048
       HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
       HINDSIGHT_API_RERANKER_PROVIDER: openrouter
-      HINDSIGHT_API_RERANKER_MODEL: nvidia/llama-nemotron-rerank-vl-1b-v2:free
+      HINDSIGHT_API_RERANKER_OPENROUTER_MODEL: nvidia/llama-nemotron-rerank-vl-1b-v2:free
       HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
       ORACLE_TEST_USER: HINDSIGHT_TEST
       ORACLE_TEST_PASSWORD: ${{ secrets.KJS_TEST_ODB_PASSWORD }}

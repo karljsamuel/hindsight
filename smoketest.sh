@@ -134,12 +134,13 @@ docker run -d --name "$CONTAINER_NAME" \
     -e HINDSIGHT_API_LLM_BASE_URL=https://integrate.api.nvidia.com/v1 \
     -e HINDSIGHT_API_LLM_API_KEY="$NVIDIA_API_KEY" \
     -e HINDSIGHT_API_LLM_MODEL=nvidia/nemotron-3.5-super-vl-120b-a12b \
+    -e HINDSIGHT_API_LLM_REASONING_EFFORT=none \
     -e HINDSIGHT_API_EMBEDDINGS_PROVIDER=openrouter \
     -e HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY="$OPENROUTER_API_KEY" \
-    -e HINDSIGHT_API_EMBEDDINGS_MODEL=nvidia/llama-nemotron-embed-vl-1b-v2:free \
+    -e HINDSIGHT_API_EMBEDDINGS_OPENROUTER_MODEL=nvidia/llama-nemotron-embed-vl-1b-v2:free \
     -e HINDSIGHT_API_RERANKER_PROVIDER=openrouter \
     -e HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY="$OPENROUTER_API_KEY" \
-    -e HINDSIGHT_API_RERANKER_MODEL=nvidia/llama-nemotron-rerank-vl-1b-v2:free \
+    -e HINDSIGHT_API_RERANKER_OPENROUTER_MODEL=nvidia/llama-nemotron-rerank-vl-1b-v2:free \
     -e HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP=false \
     -e HINDSIGHT_API_WORKER_ENABLED=false \
     -p "${HINDSIGHT_PORT}:8888" \
