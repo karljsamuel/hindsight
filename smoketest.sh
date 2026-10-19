@@ -390,6 +390,8 @@ asyncio.run(ingest())
 INGEST1_ID=$(echo "${INGEST1}" | { grep 'INGEST_ID:' || true; } | cut -d: -f2)
 if [[ -z "$INGEST1_ID" ]]; then
     echo "❌ Failed to ingest content 1"
+    echo "--- ingest 1 output (last 40 lines) ---"
+    echo "${INGEST1}" | tail -40
     echo "$INGEST1"
     exit 1
 fi
@@ -430,6 +432,8 @@ asyncio.run(ingest())
 INGEST2_ID=$(echo "${INGEST2}" | { grep 'INGEST_ID:' || true; } | cut -d: -f2)
 if [[ -z "$INGEST2_ID" ]]; then
     echo "❌ Failed to ingest content 2"
+    echo "--- ingest 2 output (last 40 lines) ---"
+    echo "${INGEST2}" | tail -40
     exit 1
 fi
 echo "✅ Ingested content 2: $INGEST2_ID"
@@ -469,6 +473,8 @@ asyncio.run(ingest())
 INGEST3_ID=$(echo "${INGEST3}" | { grep 'INGEST_ID:' || true; } | cut -d: -f2)
 if [[ -z "$INGEST3_ID" ]]; then
     echo "❌ Failed to ingest content 3"
+    echo "--- ingest 3 output (last 40 lines) ---"
+    echo "${INGEST3}" | tail -40
     exit 1
 fi
 echo "✅ Ingested content 3: $INGEST3_ID"
