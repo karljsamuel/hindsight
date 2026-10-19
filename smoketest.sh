@@ -385,7 +385,7 @@ async def ingest():
     await engine.close()
 
 asyncio.run(ingest())
-" 2>&1)
+" 2>&1) || true
 
 INGEST1_ID=$(echo "${INGEST1}" | { grep 'INGEST_ID:' || true; } | cut -d: -f2)
 if [[ -z "$INGEST1_ID" ]]; then
@@ -427,7 +427,7 @@ async def ingest():
     await engine.close()
 
 asyncio.run(ingest())
-" 2>&1)
+" 2>&1) || true
 
 INGEST2_ID=$(echo "${INGEST2}" | { grep 'INGEST_ID:' || true; } | cut -d: -f2)
 if [[ -z "$INGEST2_ID" ]]; then
@@ -468,7 +468,7 @@ async def ingest():
     await engine.close()
 
 asyncio.run(ingest())
-" 2>&1)
+" 2>&1) || true
 
 INGEST3_ID=$(echo "${INGEST3}" | { grep 'INGEST_ID:' || true; } | cut -d: -f2)
 if [[ -z "$INGEST3_ID" ]]; then
