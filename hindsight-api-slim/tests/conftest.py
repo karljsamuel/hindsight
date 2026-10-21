@@ -6,6 +6,7 @@ import asyncio
 import importlib.util
 import inspect
 import os
+import uuid
 from pathlib import Path
 
 import filelock
@@ -525,13 +526,14 @@ def oracle_db_url(_oracle_admin_dsn):
     return url
 
 
-@pytest_asyncio.fixture(scope="function")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def oracle_memory(oracle_db_url, embeddings, cross_encoder, query_analyzer):
     """
-    Provide a MemoryEngine backed by Oracle 23ai for each test.
+    Provide one MemoryEngine backed by Oracle 23ai for the test session.
 
-    Mirrors the PG `memory` fixture but uses the Oracle backend.
-    Migrations are run once at session scope in the `oracle_db_url` fixture.
+    Tests use unique bank IDs and clean up their own data, so reusing the engine
+    avoids repeatedly creating pools and verifying remote providers. Migrations
+    are run once at session scope in the `oracle_db_url` fixture.
     """
     from hindsight_api.config import clear_config_cache
 
@@ -559,6 +561,34 @@ async def oracle_memory(oracle_db_url, embeddings, cross_encoder, query_analyzer
             task_backend=SyncTaskBackend(),
         )
         await mem.initialize()
+
+        # Production clients identify source documents; these lower-level Oracle
+        # tests historically omitted IDs and therefore exercised the UUID-generated
+        # fallback rather than the production contract. Oracle stores document IDs
+        # as VARCHAR2, so give every implicit test document a realistic text ID.
+        original_retain = mem.retain_async
+        original_retain_batch = mem.retain_batch_async
+
+        async def retain_with_source_document(*args, **kwargs):
+            bound = inspect.signature(original_retain).bind_partial(*args, **kwargs)
+            if not bound.arguments.get("document_id"):
+                bound.arguments["document_id"] = f"oracle-test-{uuid.uuid4().hex}"
+            return await original_retain(*bound.args, **bound.kwargs)
+
+        async def retain_batch_with_source_documents(*args, **kwargs):
+            bound = inspect.signature(original_retain_batch).bind_partial(*args, **kwargs)
+            # A batch-level ID intentionally groups all items into one source;
+            # otherwise mirror the API and assign each ID-less item its own source.
+            if not bound.arguments.get("document_id"):
+                contents = [dict(item) for item in bound.arguments["contents"]]
+                for item in contents:
+                    if not item.get("document_id"):
+                        item["document_id"] = f"oracle-test-{uuid.uuid4().hex}"
+                bound.arguments["contents"] = contents
+            return await original_retain_batch(*bound.args, **bound.kwargs)
+
+        mem.retain_async = retain_with_source_document
+        mem.retain_batch_async = retain_batch_with_source_documents
         yield mem
         await _teardown_memory_engine(mem)
     finally:

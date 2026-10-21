@@ -10,7 +10,7 @@ from hindsight_api.engine.db import create_database_backend
 pytestmark = pytest.mark.oracle
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="session")
 @pytest.mark.parametrize("linguistic", [False, True], ids=["binary", "linguistic"])
 @pytest.mark.parametrize(
     "relation,child_status,eligible",

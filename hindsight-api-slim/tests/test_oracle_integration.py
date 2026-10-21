@@ -16,11 +16,12 @@ from datetime import datetime, timezone
 from typing import Any, NoReturn
 
 import pytest
-import pytest_asyncio
 
 from hindsight_api import MemoryEngine, RequestContext
 from hindsight_api.engine.db import DatabaseConnection
+from hindsight_api.engine.memories.pg.links import compute_semantic_links_ann
 from hindsight_api.engine.memory_engine import Budget
+from hindsight_api.engine.retain.chunk_storage import delete_chunks_by_ids
 from hindsight_api.engine.retain.types import embedding_to_pgvector
 from tests import consolidation_actions
 from tests.test_bank_config_atomicity import (
@@ -81,7 +82,7 @@ async def _safe_cleanup(memory: MemoryEngine, bank_id: str, request_context: Req
 class TestCoreCRUD:
     """Basic bank, memory, and document CRUD against Oracle."""
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_create_bank(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("bank")
         try:
@@ -91,7 +92,7 @@ class TestCoreCRUD:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_retain_simple(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("retain")
         try:
@@ -106,7 +107,7 @@ class TestCoreCRUD:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_retain_with_document(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("retdoc")
         try:
@@ -128,7 +129,7 @@ class TestCoreCRUD:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_recall_semantic(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("recall")
         try:
@@ -152,7 +153,7 @@ class TestCoreCRUD:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_recall_with_filters(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("filter")
         try:
@@ -195,7 +196,7 @@ class TestCoreCRUD:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_recall_temporal(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("temporal")
         try:
@@ -224,7 +225,7 @@ class TestCoreCRUD:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_reflect_basic(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("reflect")
         try:
@@ -247,7 +248,7 @@ class TestCoreCRUD:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_delete_memory(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("delmem")
         try:
@@ -272,7 +273,7 @@ class TestCoreCRUD:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_delete_document(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("deldoc")
         try:
@@ -298,7 +299,7 @@ class TestCoreCRUD:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_bank_profile_crud(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("profile")
         try:
@@ -332,7 +333,7 @@ class TestCoreCRUD:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_list_memories(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("listmem")
         try:
@@ -350,7 +351,7 @@ class TestCoreCRUD:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_get_memory(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("getmem")
         try:
@@ -390,7 +391,7 @@ class TestBankConfigAtomicity:
     exactly the same interleavings; only the fixture differs.
     """
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_concurrent_updates_cannot_persist_invalid_recall_budget_bounds(
         self, oracle_memory: MemoryEngine, request_context: RequestContext
     ):
@@ -404,7 +405,7 @@ class TestBankConfigAtomicity:
     # keeps the pin. The recall-budget scenarios here cover the same atomicity
     # property with top-level scalars, which both dialects store identically.
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_one_sided_recall_budget_update_is_validated_against_stored_state(
         self, oracle_memory: MemoryEngine, request_context: RequestContext
     ):
@@ -419,7 +420,7 @@ class TestBankConfigAtomicity:
 class TestRetainPipeline:
     """Retain-specific behaviors: chunking, delta, entities, batch."""
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_retain_chunking(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("chunk")
         try:
@@ -448,7 +449,7 @@ class TestRetainPipeline:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_retain_delta(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("delta")
         try:
@@ -475,7 +476,7 @@ class TestRetainPipeline:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_retain_entities(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("entity")
         try:
@@ -498,7 +499,7 @@ class TestRetainPipeline:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_retain_entity_dedup(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("entdedup")
         try:
@@ -528,7 +529,7 @@ class TestRetainPipeline:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_retain_batch(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("batch")
         try:
@@ -556,7 +557,7 @@ class TestRetainPipeline:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_retain_idempotent(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("idempotent")
         try:
@@ -582,7 +583,7 @@ class TestRetainPipeline:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_retain_with_tags(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("tags")
         try:
@@ -611,7 +612,7 @@ class TestRetainPipeline:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_retain_document_metadata(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("docmeta")
         try:
@@ -678,11 +679,8 @@ class TestOracleRetainSql:
         )
         return chunk_id, unit_ids
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_semantic_ann_links_delete_chunks(self, oracle_memory: MemoryEngine, request_context: RequestContext):
-        from hindsight_api.engine.retain.chunk_storage import delete_chunks_by_ids
-        from hindsight_api.engine.memories.pg.links import compute_semantic_links_ann
-
         bank_id = _bank_id("retainsql")
         dim = oracle_memory.embeddings.dimension
         try:
@@ -731,7 +729,7 @@ class TestOracleRetainSql:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_batch_parent_siblings_lookup_and_rollup(
         self, oracle_memory: MemoryEngine, request_context: RequestContext
     ):
@@ -798,7 +796,7 @@ class TestOracleRetainSql:
 class TestSearchRetrieval:
     """Multi-strategy search tests against Oracle."""
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_vector_search_accuracy(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("vecsearch")
         try:
@@ -830,7 +828,7 @@ class TestSearchRetrieval:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_text_search(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("textsearch")
         try:
@@ -852,7 +850,7 @@ class TestSearchRetrieval:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_graph_retrieval(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("graph")
         try:
@@ -882,7 +880,7 @@ class TestSearchRetrieval:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_fusion_ranking(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("fusion")
         try:
@@ -905,7 +903,7 @@ class TestSearchRetrieval:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_search_with_limit(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("limit")
         try:
@@ -937,7 +935,7 @@ class TestSearchRetrieval:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_search_bank_isolation(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_a = _bank_id("iso-a")
         bank_b = _bank_id("iso-b")
@@ -971,7 +969,7 @@ class TestSearchRetrieval:
             await oracle_memory.delete_bank(bank_a, request_context=request_context)
             await oracle_memory.delete_bank(bank_b, request_context=request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_recall_after_retain(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("e2e")
         try:
@@ -993,7 +991,7 @@ class TestSearchRetrieval:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_reranking(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("rerank")
         try:
@@ -1036,7 +1034,7 @@ class TestSearchRetrieval:
 class TestAdvancedFeatures:
     """Mental models, directives, operations, webhooks against Oracle."""
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_mental_model_crud(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("mmcrud")
         try:
@@ -1095,7 +1093,7 @@ class TestAdvancedFeatures:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_knowledge_page_failure_rolls_back_mental_model(
         self, oracle_memory: MemoryEngine, request_context: RequestContext, monkeypatch
     ):
@@ -1125,7 +1123,7 @@ class TestAdvancedFeatures:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_mental_model_refresh(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("mmrefresh")
         try:
@@ -1147,7 +1145,7 @@ class TestAdvancedFeatures:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_consolidation(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         """Verify that consolidation (observation creation) works on Oracle."""
         bank_id = _bank_id("consolidate")
@@ -1172,7 +1170,7 @@ class TestAdvancedFeatures:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_operations_tracking(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("ops")
         try:
@@ -1191,7 +1189,7 @@ class TestAdvancedFeatures:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_directives_crud(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("directives")
         try:
@@ -1218,7 +1216,7 @@ class TestAdvancedFeatures:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_list_tags(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("tags")
         try:
@@ -1239,7 +1237,7 @@ class TestAdvancedFeatures:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_task_queue(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("taskq")
         try:
@@ -1258,7 +1256,7 @@ class TestAdvancedFeatures:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_bank_config(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         bank_id = _bank_id("config")
         try:
@@ -1285,7 +1283,7 @@ class TestAdvancedFeatures:
 class TestOracleSpecific:
     """Oracle 23ai-specific feature tests."""
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_oracle_vector_index(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         """Verify HNSW vector index is used for cosine similarity search."""
         bank_id = _bank_id("vecidx")
@@ -1313,7 +1311,7 @@ class TestOracleSpecific:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_oracle_text_index(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         """Verify Oracle Text CONTEXT index for full-text search."""
         bank_id = _bank_id("textidx")
@@ -1340,7 +1338,7 @@ class TestOracleSpecific:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_oracle_json_operations(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         """Verify JSON column read/write via CLOB — bank profile stores JSON."""
         bank_id = _bank_id("json")
@@ -1360,7 +1358,7 @@ class TestOracleSpecific:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_oracle_migration_idempotent(self, oracle_db_url):
         """Verify that running migrations twice causes no errors."""
         from hindsight_api.migrations import run_migrations
@@ -1370,7 +1368,7 @@ class TestOracleSpecific:
         run_migrations(oracle_db_url)
         run_migrations(oracle_db_url)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_observation_update_widens_null_bounds(
         self, oracle_memory: MemoryEngine, request_context: RequestContext
     ):
@@ -1468,7 +1466,7 @@ class TestOracleSpecific:
 class TestEdgeCases:
     """Edge case tests: unicode, empty strings, nulls, large content."""
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_unicode_content(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         """Verify CLOB handles multi-byte unicode correctly."""
         bank_id = _bank_id("unicode")
@@ -1497,7 +1495,7 @@ class TestEdgeCases:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_empty_context(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         """Verify retain works with empty string context."""
         bank_id = _bank_id("emptyctx")
@@ -1515,7 +1513,7 @@ class TestEdgeCases:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_large_content_chunking(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         """Verify large documents are chunked properly in Oracle."""
         bank_id = _bank_id("largecontent")
@@ -1554,7 +1552,7 @@ class TestEdgeCases:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_special_characters_in_content(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         """Verify content with SQL-sensitive characters doesn't cause errors."""
         bank_id = _bank_id("specialchars")
@@ -1583,7 +1581,7 @@ class TestEdgeCases:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_concurrent_retains(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         """Verify concurrent retain operations complete (Oracle may deadlock on auto-partition creation)."""
         bank_id = _bank_id("concurrent")
@@ -1616,7 +1614,7 @@ class TestEdgeCases:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_recall_empty_bank(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         """Verify recall on an empty bank returns empty results without error."""
         bank_id = _bank_id("emptyrecall")
@@ -1635,13 +1633,13 @@ class TestEdgeCases:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_delete_nonexistent_bank(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         """Verify deleting a non-existent bank doesn't raise."""
         # Should not raise an exception
         await oracle_memory.delete_bank(f"nonexistent-{uuid.uuid4().hex[:8]}", request_context=request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_retain_and_delete_cycle(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         """Verify retain → delete → retain cycle works (no stale data)."""
         bank_id = _bank_id("cycle")
@@ -1680,7 +1678,7 @@ class TestEdgeCases:
         finally:
             await _safe_cleanup(oracle_memory, bank_id, request_context)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_multiple_documents_same_bank(self, oracle_memory: MemoryEngine, request_context: RequestContext):
         """Verify multiple documents with different IDs in the same bank."""
         bank_id = _bank_id("multidoc")

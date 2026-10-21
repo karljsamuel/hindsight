@@ -224,9 +224,124 @@ jobs:
           chmod +x smoketest.sh
           ./smoketest.sh localhost/hindsight-oracle-test:latest
 
+  test-api-oracle:
+    name: Oracle API Tests (after both smoke tests)
+    needs: build-arm64
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    env:
+      HINDSIGHT_API_LLM_PROVIDER: openai
+      HINDSIGHT_API_LLM_BASE_URL: https://integrate.api.nvidia.com/v1
+      HINDSIGHT_API_LLM_API_KEY: ${{ secrets.KJS_TEST_NVIDIA_API_KEY }}
+      HINDSIGHT_API_LLM_MODEL: nvidia/nemotron-3.5-super-vl-120b-a12b
+      HINDSIGHT_API_LLM_REASONING_EFFORT: low
+      HINDSIGHT_API_DATABASE_BACKEND: oracle
+      HINDSIGHT_API_DATABASE_SCHEMA: HINDSIGHT_TEST
+      HINDSIGHT_API_EMBEDDINGS_PROVIDER: openrouter
+      HINDSIGHT_API_EMBEDDINGS_OPENROUTER_MODEL: nvidia/llama-nemotron-embed-vl-1b-v2:free
+      HINDSIGHT_API_EMBEDDINGS_OPENAI_DIMENSIONS: 2048
+      HINDSIGHT_API_EMBEDDINGS_ONNX_DIMENSIONS: 2048
+      HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
+      HINDSIGHT_API_RERANKER_PROVIDER: openrouter
+      HINDSIGHT_API_RERANKER_OPENROUTER_MODEL: nvidia/llama-nemotron-rerank-vl-1b-v2:free
+      HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY: ${{ secrets.KJS_TEST_LLM_API_KEY }}
+      ORACLE_TEST_USER: HINDSIGHT_TEST
+      ORACLE_TEST_PASSWORD: ${{ secrets.KJS_TEST_ODB_PASSWORD }}
+      KJS_TEST_ODB_PASSWORD: ${{ secrets.KJS_TEST_ODB_PASSWORD }}
+      ORACLE_TEST_DSN: "(description=(retry_count=20)(retry_delay=3)(address=(protocol=tcps)(port=1522)(host=adb.ap-hyderabad-1.oraclecloud.com))(connect_data=(service_name=g4a90f2577f59fb_hindsightdb_high.adb.oraclecloud.com))(security=(ssl_server_dn_match=yes)))"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || '' }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          prune-cache: false
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+      - name: Install API dependencies
+        working-directory: ./hindsight-api-slim
+        run: uv sync --frozen --all-extras --index-strategy unsafe-best-match
+      - name: Reset Oracle test schema (smoke-test cleanup)
+        working-directory: ./hindsight-api-slim
+        run: |
+          uv run python - <<'PY'
+          import os
+          import oracledb
+
+          conn = oracledb.connect(
+              user=os.environ.get("ORACLE_TEST_USER", "HINDSIGHT_TEST"),
+              password=os.environ["ORACLE_TEST_PASSWORD"],
+              dsn=os.environ["ORACLE_TEST_DSN"],
+          )
+          cursor = conn.cursor()
+          errors = 0
+          cursor.execute("""
+              SELECT index_name, index_type FROM user_indexes
+              WHERE index_type IN ('DOMAIN', 'VECTOR')
+          """)
+          indexes = cursor.fetchall()
+          for index_name, index_type in indexes:
+              try:
+                  cursor.execute(f'DROP INDEX "{index_name}"')
+              except oracledb.DatabaseError as exc:
+                  message = str(exc)
+                  if "ORA-01418" in message or "ORA-00942" in message:
+                      continue
+                  print(f"Could not drop {index_type} index {index_name}: Oracle error")
+                  errors += 1
+          conn.commit()
+
+          cursor.execute("""
+              SELECT table_name FROM user_tables
+              WHERE table_name NOT LIKE :pattern
+          """, {"pattern": "BIN$%"})
+          tables = [row[0] for row in cursor.fetchall()]
+          errors = 0
+          dropped = 0
+          for table in tables:
+              try:
+                  cursor.execute(f'DROP TABLE "{table}" CASCADE CONSTRAINTS PURGE')
+                  dropped += 1
+              except oracledb.DatabaseError as exc:
+                  message = str(exc)
+                  if "ORA-00942" in message or "ORA-51903" in message:
+                      continue
+                  print(f"Could not drop table {table}: Oracle error")
+                  errors += 1
+          conn.commit()
+          cursor.execute("SELECT COUNT(*) FROM user_tables")
+          remaining = cursor.fetchone()[0]
+          cursor.close()
+          conn.close()
+          print(f"Smoke reset complete: {len(indexes)} indexes, {dropped}/{len(tables)} tables dropped, {remaining} remaining")
+          if errors or remaining:
+              raise SystemExit(f"Schema reset left {remaining} tables and had {errors} unexpected errors")
+          PY
+      - name: Point the app at the Oracle test database
+        # A tcps connect descriptor belongs in the URL's dsn= parameter. Read the
+        # password from the environment and append the URL to GITHUB_ENV without
+        # printing it or placing it in a command argument.
+        run: |
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import os
+          import urllib.parse
+
+          dsn = os.environ["ORACLE_TEST_DSN"]
+          pwd = urllib.parse.quote(os.environ["KJS_TEST_ODB_PASSWORD"], safe="")
+          url = f"oracle+oracledb://HINDSIGHT_TEST:{pwd}@/?dsn={urllib.parse.quote(dsn, safe='')}"
+          print(f"HINDSIGHT_API_DATABASE_URL={url}")
+          PY
+      - name: Run Oracle API tests
+        working-directory: ./hindsight-api-slim
+        run: uv run pytest tests -v -m oracle -n0
+
   validation-summary:
     name: KJS-PR Validation Summary
-    needs: [validate-repository, build-amd64, build-arm64]
+    needs: [validate-repository, build-amd64, build-arm64, test-api-oracle]
     if: always()
     runs-on: ubuntu-26.04
     steps:
@@ -234,12 +349,14 @@ jobs:
         run: |
           if [[ "${{ needs.validate-repository.result }}" == "success" && \
                 "${{ needs.build-amd64.result }}" == "success" && \
-                "${{ needs.build-arm64.result }}" == "success" ]]; then
+                "${{ needs.build-arm64.result }}" == "success" && \
+                "${{ needs.test-api-oracle.result }}" == "success" ]]; then
             echo "All validations passed"
           else
             echo "Some validations failed"
             echo "Repository: ${{ needs.validate-repository.result }}"
             echo "Build amd64: ${{ needs.build-amd64.result }}"
             echo "Build arm64: ${{ needs.build-arm64.result }}"
+            echo "Oracle API tests: ${{ needs.test-api-oracle.result }}"
             exit 1
           fi
