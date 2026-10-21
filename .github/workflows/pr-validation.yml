@@ -284,6 +284,7 @@ jobs:
               WHERE index_type IN ('DOMAIN', 'VECTOR')
           """)
           indexes = cursor.fetchall()
+          errors = 0
           for index_name, index_type in indexes:
               try:
                   cursor.execute(f'DROP INDEX "{index_name}"')
