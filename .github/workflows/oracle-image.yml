@@ -108,22 +108,25 @@ ORACLEDB_VERSION=26.0.1'
           -e HINDSIGHT_API_DATABASE_BACKEND=oracle \
           -e HINDSIGHT_API_VECTOR_EXTENSION=oracle \
           -e HINDSIGHT_API_EMBEDDINGS_DIMENSION=2048 \
+          -e HINDSIGHT_API_EMBEDDINGS_ONNX_DIMENSIONS=2048 \
           -e HINDSIGHT_API_EMBEDDINGS_OPENAI_DIMENSIONS=2048 \
+          -e HINDSIGHT_API_EMBEDDINGS_NVIDIA_DIMENSIONS=2048 \
           -e HINDSIGHT_API_DATABASE_URL="$DATABASE_URL" \
           -e HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP=false \
           -e HINDSIGHT_API_WORKER_ENABLED=false \
           -e HINDSIGHT_ENABLE_CP=false \
-          -e HINDSIGHT_API_LLM_PROVIDER=openai \
-          -e HINDSIGHT_API_LLM_BASE_URL=https://integrate.api.nvidia.com/v1 \
+          -e HINDSIGHT_API_LLM_PROVIDER=openrouter \
+          -e HINDSIGHT_API_LLM_BASE_URL=https://openrouter.ai/api/v1 \
           -e HINDSIGHT_API_LLM_API_KEY="$KJS_TEST_LLM_API_KEY" \
-          -e HINDSIGHT_API_LLM_MODEL=nvidia/nemotron-3.5-super-vl-120b-a12b \
+          -e HINDSIGHT_API_LLM_MODEL=nvidia/nemotron-3.5-super-vl:free \
           -e HINDSIGHT_API_LLM_REASONING_EFFORT=low \
-          -e HINDSIGHT_API_EMBEDDINGS_PROVIDER=openrouter \
-          -e HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY="$KJS_TEST_LLM_API_KEY" \
-          -e HINDSIGHT_API_EMBEDDINGS_OPENROUTER_MODEL=nvidia/llama-nemotron-embed-vl-1b-v2:free \
+          -e HINDSIGHT_API_EMBEDDINGS_PROVIDER=nvidia \
+          -e HINDSIGHT_API_EMBEDDINGS_NVIDIA_BASE_URL=https://openrouter.ai/api/v1 \
+          -e HINDSIGHT_API_EMBEDDINGS_NVIDIA_API_KEY="$KJS_TEST_LLM_API_KEY" \
+          -e HINDSIGHT_API_EMBEDDINGS_NVIDIA_MODEL=nvidia/nemotron-3.5-embed-1b:free \
           -e HINDSIGHT_API_RERANKER_PROVIDER=openrouter \
           -e HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY="$KJS_TEST_LLM_API_KEY" \
-          -e HINDSIGHT_API_RERANKER_OPENROUTER_MODEL=nvidia/llama-nemotron-rerank-vl-1b-v2:free \
+          -e HINDSIGHT_API_RERANKER_OPENROUTER_MODEL=nvidia/nemotron-3.5-rerank-8b:free \
           -p 8888:8888 \
           ghcr.io/karljsamuel/hindsight:oracle-latest
 
