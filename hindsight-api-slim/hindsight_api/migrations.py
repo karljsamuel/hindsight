@@ -702,12 +702,17 @@ def _migrate_table_embedding_dimension(
 
     # Get current dimension
     if is_oracle:
-        # Oracle: all_tab_columns.DATA_LENGTH / 4 = dimension for VECTOR
-        # Oracle adds 8 bytes (2 dimensions) of padding to VECTOR columns
-        # So we need to round down to the nearest standard dimension
-        raw_dim = conn.execute(
+        # Oracle exposes the declared dimension as CHAR_LENGTH on the vector
+        # column (with the full declaration in VECTOR_INFO).
+        #
+        # DATA_LENGTH must NOT be used: Oracle reports the same 8200 for
+        # VECTOR(384) through VECTOR(4096) — verified against this instance —
+        # so the old `data_length / 4` derivation reported 2048 for every
+        # column. A real dimension mismatch was therefore never detected, and
+        # the reconciliation silently did nothing.
+        current_dim = conn.execute(
             text("""
-                SELECT data_length / 4
+                SELECT char_length
                 FROM all_tab_columns
                 WHERE owner = :schema
                   AND table_name = UPPER(:table)
@@ -716,22 +721,6 @@ def _migrate_table_embedding_dimension(
             """),
             {"schema": schema_name.upper(), "table": table_name.upper()},
         ).scalar()
-
-        # Oracle VECTOR adds 8 bytes (2 dimensions) of padding
-        # Standard dimensions: 384, 768, 1024, 1536, 2048, 4096, etc.
-        if raw_dim is not None:
-            standard_dims = [384, 768, 1024, 1536, 2048, 4096, 8192]
-            # Find the standard dimension that matches (raw_dim - 2) or raw_dim
-            current_dim = None
-            for std_dim in standard_dims:
-                if raw_dim == std_dim or raw_dim == std_dim + 2:
-                    current_dim = std_dim
-                    break
-            if current_dim is None:
-                # Fallback: round down to nearest even number
-                current_dim = raw_dim - (raw_dim % 2)
-        else:
-            current_dim = None
     else:
         # PostgreSQL: pg_attribute.atttypmod
         current_dim = conn.execute(
@@ -783,11 +772,16 @@ def _migrate_table_embedding_dimension(
     _drop_embedding_vector_indexes(conn, schema_name, table_name)
 
     if is_oracle:
-        # Oracle: ALTER TABLE ... MODIFY (embedding VECTOR(:dim, FLOAT32))
-        conn.execute(
-            text(f"ALTER TABLE {schema_name}.{table_name} MODIFY (embedding VECTOR(:dim, FLOAT32))"),
-            {"dim": required_dimension},
-        )
+        # Oracle refuses ALTER ... MODIFY on a typed VECTOR column outright
+        # (ORA-51859) — on populated and empty tables alike, and even when the
+        # requested dimension equals the current one. A :dim bind in this DDL
+        # also never reaches the driver (DPY-4008), so the value is inlined.
+        #
+        # Reaching here means the caller already established the column holds
+        # no vectors (`row_count == 0` above), so re-creating it loses nothing.
+        dim = int(required_dimension)
+        conn.execute(text(f"ALTER TABLE {schema_name}.{table_name} DROP COLUMN embedding"))
+        conn.execute(text(f"ALTER TABLE {schema_name}.{table_name} ADD (embedding VECTOR({dim}, FLOAT32))"))
     else:
         # PostgreSQL: ALTER COLUMN TYPE vector(:dim)
         conn.execute(
