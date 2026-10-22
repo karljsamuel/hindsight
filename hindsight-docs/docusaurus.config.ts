@@ -12,7 +12,7 @@ const umamiWebsiteId = process.env.UMAMI_WEBSITE_ID;
 // points at the thing we want people to do, not off-site. The paper used to live
 // here and now sits in the homepage hero, which is where a visitor who wants
 // evidence is already looking.
-const ANNOUNCEMENT_BAR = 'Sign up with GitHub and get <strong>$5 of free credit</strong> on Hindsight Cloud. <a href="https://ui.hindsight.vectorize.io/signup" target="_blank">Claim it →</a>';
+const ANNOUNCEMENT_BAR = 'New: <strong>Introducing Hindsight Memlake</strong>, serving 100M memories at &lt;100ms p99 on object storage. <a href="/blog/2026/10/13/memlake">Read the post →</a>';
 
 const config: Config = {
   title: 'Hindsight',
@@ -255,14 +255,18 @@ const config: Config = {
   themeConfig: {
     ...(ANNOUNCEMENT_BAR && {
       announcementBar: {
-        id: 'announcement',
+        id: 'memlake-launch',
         content: ANNOUNCEMENT_BAR,
         backgroundColor: '#0074d9',
         textColor: '#ffffff',
         isCloseable: false,
       },
     }),
-    image: 'img/logo.png',
+    image: 'img/social-card.png',
+    // Fallback for pages with no description of their own; a page's own one wins.
+    metadata: [
+      {name: 'description', content: 'State of the art long-term memory for your agents. Hindsight gives AI agents memory that learns across sessions.'},
+    ],
     colorMode: {
       defaultMode: 'dark',
       respectPrefersColorScheme: true,

@@ -69,7 +69,9 @@ Every memory and observation carries temporal fields in the JSON tool result:
 - `mentioned_at` — when the user retained the fact (always set).
 - `occurred_start` / `occurred_end` — when the underlying event happened (optional, set for dated events).
 
-When facts about the SAME facet conflict — counts, statuses, ownership, location, presence, etc. — the fact with the LATEST `mentioned_at` is authoritative. Later statements SUPERSEDE earlier ones. Do NOT average, sum, or favor an explicitly-dated fact over a more recent one.
+When facts about the SAME facet conflict — counts, statuses, ownership, location, presence, etc. — the fact with the LATEST `mentioned_at` is authoritative. Later statements SUPERSEDE earlier ones. Do NOT average, sum, or favor an explicitly-dated fact over a more recent one. The one exception is a DECISION, below.
+
+A DECISION is different from a state. When the record holds a decision with its rationale (what was decided and why) and a later record changes the same thing WITHOUT stating a reason that overturns that decision (a refactor, a 'simplification', a cleanup, a performance change), the later record does NOT supersede the decision: report the decision as the standing one, and report the later change as a departure from it. Only a later record that itself decides, with its own rationale, replaces an earlier decision. Example: 'Invoices are due net-30; finance chose it for cash flow' (March) and 'cleanup: simplify billing config, terms = net-45' (May) → the rule is net-30; the May cleanup is a change that departed from it, NOT the rule.
 
 Example: three count facts come back from recall:
   - 'Team has 2 engineers' (mentioned_at=T1)
@@ -140,7 +142,7 @@ You have access to THREE levels of knowledge. Use them in this order:
 - User-curated summaries about specific topics
 - HIGHEST quality - manually created and maintained
 - Search returns the best match in full and a SNIPPET of the others; call read_mental_models on any id whose snippet looks like it answers the question, and read it before answering from it
-- If a relevant mental model exists and is FRESH, it may fully answer the question
+- A FRESH mental model may fully answer the question — but only if it actually STATES the answer. One that shares the question's topic without stating the answer (e.g. it describes a process, or names the thing without its status) has not answered it: go to the next level
 - Check `is_stale` field - if stale, also verify with lower levels
 
 ### 2. OBSERVATIONS (search_observations) - Second Priority
@@ -151,7 +153,7 @@ You have access to THREE levels of knowledge. Use them in this order:
 ### 3. RAW FACTS (recall) - Ground Truth
 - Individual memories (world facts and experiences)
 - Use when: no mental models/observations exist, they're stale, or you need specific details
-- MANDATORY: If search_mental_models and search_observations both return 0 results, you MUST call recall() before giving up
+- MANDATORY: If search_mental_models and search_observations return 0 results, OR return results that do not STATE the answer, you MUST call recall() before giving up. Never report that the bank holds nothing about something until recall() has run with the question's key terms (an issue key, name or identifier) verbatim
 - This is the source of truth that other levels are built from
 
 **Tool result ordering:** `recall()` and `search_observations()` return their `memories` / `observations` arrays sorted by SEMANTIC RELEVANCE to the query, NOT by time. The POSITION of an entry tells you nothing about when it was retained. For any temporal reasoning — recency, supersession, applying events on top of a state — IGNORE the position and read the per-entry `mentioned_at` field (and `occurred_start` / `occurred_end` for events).
@@ -172,13 +174,13 @@ You have access to TWO levels of knowledge. Use them in this order:
 - User-curated summaries about specific topics
 - HIGHEST quality - manually created and maintained
 - Search returns the best match in full and a SNIPPET of the others; call read_mental_models on any id whose snippet looks like it answers the question, and read it before answering from it
-- If a relevant mental model exists and is FRESH, it may fully answer the question
+- A FRESH mental model may fully answer the question — but only if it actually STATES the answer. One that shares the question's topic without stating the answer (e.g. it describes a process, or names the thing without its status) has not answered it: go to the next level
 - Check `is_stale` field - if stale, also verify with lower levels
 
 ### 2. RAW FACTS (recall) - Ground Truth
 - Individual memories (world facts and experiences)
 - Use when: no mental model exists, it's stale, or you need specific details
-- MANDATORY: If search_mental_models returns 0 results, you MUST call recall() before giving up
+- MANDATORY: If search_mental_models returns 0 results, OR returns a model that does not STATE the answer, you MUST call recall() before giving up. Never report that the bank holds nothing about something until recall() has run with the question's key terms verbatim
 - This is the source of truth that mental models are built from
 
 ## Search Plan
@@ -200,7 +202,7 @@ You have access to TWO levels of knowledge. Use them in this order:
 ### 2. RAW FACTS (recall) - Ground Truth
 - Individual memories (world facts and experiences)
 - Use when: no observations exist, they're stale, or you need specific details
-- MANDATORY: If search_observations returns 0 results or count=0, you MUST call recall() before giving up
+- MANDATORY: If search_observations returns 0 results or count=0, OR returns observations that do not STATE the answer, you MUST call recall() before giving up. Never report that the bank holds nothing about something until recall() has run with the question's key terms verbatim
 - This is the source of truth that observations are built from
 
 **Tool result ordering:** `recall()` and `search_observations()` return their `memories` / `observations` arrays sorted by SEMANTIC RELEVANCE to the query, NOT by time. The POSITION of an entry tells you nothing about when it was retained. For any temporal reasoning — recency, supersession, applying events on top of a state — IGNORE the position and read the per-entry `mentioned_at` field (and `occurred_start` / `occurred_end` for events).
@@ -228,8 +230,8 @@ You have access to ONE level of knowledge:
 _WORKFLOW_MM_AND_OBS = """\
 ## Workflow
 1. First, try search_mental_models() - check if a curated summary exists
-2. If no mental model or it's stale, try search_observations() for consolidated knowledge
-3. If observations are stale OR you need specific details, use recall() for raw facts
+2. If there is no mental model, it's stale, OR it does not state the answer, try search_observations() for consolidated knowledge
+3. If the levels above are stale, do not state the answer, OR you need specific details, use recall() for raw facts. Reporting that nothing is known requires recall() first
 4. Use expand() if you need more context on specific memories
 5. When ready, call done() with your answer and supporting IDs\
 """
@@ -237,7 +239,7 @@ _WORKFLOW_MM_AND_OBS = """\
 _WORKFLOW_MM_ONLY = """\
 ## Workflow
 1. First, try search_mental_models() - check if a curated summary exists
-2. If no mental model or it's stale, use recall() for raw facts
+2. If there is no mental model, it's stale, OR it does not state the answer, use recall() for raw facts. Reporting that nothing is known requires recall() first
 3. Use expand() if you need more context on specific memories
 4. When ready, call done() with your answer and supporting IDs\
 """
@@ -245,7 +247,7 @@ _WORKFLOW_MM_ONLY = """\
 _WORKFLOW_OBS_ONLY = """\
 ## Workflow
 1. First, try search_observations() - check for consolidated knowledge
-2. If search_observations returns 0 results OR observations are stale, you MUST call recall() for raw facts
+2. If search_observations returns 0 results, is stale, OR does not state the answer, you MUST call recall() for raw facts
 3. Use expand() if you need more context on specific memories
 4. When ready, call done() with your answer and supporting IDs\
 """
@@ -261,11 +263,10 @@ _WORKFLOW_RECALL_ONLY = """\
 
 _BUDGET_LOW = """\
 ## RESEARCH DEPTH: SHALLOW (Quick Response)
-- Prioritize speed over completeness
-- If mental models or observations provide a reasonable answer, stop there
-- Only dig deeper if the initial results are clearly insufficient
-- Prefer a quick overview rather than exhaustive details
-- Answer promptly with available information
+- Keep the ANSWER short: a quick overview, not exhaustive detail. Depth is what you cut, not coverage
+- Spend few searches, but make them count: vary the query instead of repeating one that already ran
+- A mental model or observation that ANSWERS the question is enough to stop; one that is merely on the same topic is not
+- If what you found does not cover the question, go on to the next level rather than answering from it
 """
 
 _BUDGET_MID = """\
@@ -273,6 +274,7 @@ _BUDGET_MID = """\
 - Balance thoroughness with efficiency
 - Check multiple sources when the question warrants it
 - Verify stale data if it's central to the answer
+- A result that is merely on the same topic does not answer the question: when it does not cover it, go on to the next level
 - Don't over-explore, but ensure reasonable coverage
 """
 
@@ -687,3 +689,18 @@ def test_final_prompt_output_language_override_replaces_the_language_rule():
     assert "## LANGUAGE" not in prompt
     assert "SAME language as the user's question" not in prompt
     assert "Respond exclusively in Spanish" not in prompt, "the directive belongs on the user prompt"
+
+
+def test_agent_user_prompt_restates_the_mission_after_the_question():
+    """The mission also rides on the user message, where it is read after the question (see the docstring)."""
+    prompt = prompts.build_agent_user_prompt("Who owns billing?", mission="  Chat decisions outrank commits.  ")
+
+    assert prompt == (
+        "Who owns billing?\n\n## Bank mission (it governs what you search and how you answer)\n"
+        "Chat decisions outrank commits."
+    )
+
+
+@pytest.mark.parametrize("mission", [None, "", "   "])
+def test_agent_user_prompt_without_a_mission_is_the_question(mission):
+    assert prompts.build_agent_user_prompt("Who owns billing?", mission=mission) == "Who owns billing?"

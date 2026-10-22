@@ -9,59 +9,22 @@ from __future__ import annotations
 
 import json
 import logging
-import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from ..retain.types import EmbeddingLike, EntityResolutionResult
-from ..schema import fq_store_table, fq_store_table_explicit
-from ..search.tags import TagGroup, TagsMatch
+from ..schema import fq_store_table
+from ..search.tags import TagsMatch
 from .base import (
-    AttachmentRef,
-    BankContentCounts,
-    DeletedDocument,
-    DeletePredicate,
-    DocumentBase,
-    DocumentChunkState,
-    DocumentSourceUnits,
-    DocumentTags,
-    EntityPrunePassResult,
-    EntityResolverHandle,
-    ExistingChunk,
-    MemoriesExtension,
-    MemoryLocation,
-    MemoryPatch,
-    MemoryScopeWatermark,
-    ObservationChunkIds,
     RecallArms,
-    RelabelResult,
-    RelinkPassResult,
     ScanPage,
     SemanticBm25Result,
     StoredMemory,
-    TypedMemoryScope,
 )
-from .pg import admin as pg_admin
-from .pg import banks as pg_banks
-from .pg import consolidation as pg_consolidation
-from .pg import counts, curation, documents, engine_curation, graph, reads, writes
-from .pg import expand as pg_expand
-from .pg import links as pg_links
-from .pg import retain as pg_retain
-from .pg import transfer as pg_transfer
+from .pg import reads
 from .postgres import PostgresMemories
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from ..consolidation.consolidator import _TemporalBounds
-    from ..embeddings import Embeddings
-    from ..response_models import MemoryFact
-    from ..retain.types import CausalRelation, ProcessedFact
-    from ..search.graph_retrieval import GraphRetriever
-    from ..transfer.export import _LoadedExport, _UnitLocation
-    from ..transfer.importer import FactLifecycle, _ObservationOutcome
-    from ..transfer.schema import TransferObservation
-    from .pg.entity_resolver import EntityResolver
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -200,7 +163,9 @@ class OracleMemories(PostgresMemories):
                     budget=limit,
                     bank_id=bank_id,
                     fact_type=ft,
-                    preselected_semantic_seeds=semantic_bm25.get(ft, SemanticBm25Result(semantic=[], bm25=[], graph_seeds=None)).semantic[:limit],
+                    preselected_semantic_seeds=semantic_bm25.get(
+                        ft, SemanticBm25Result(semantic=[], bm25=[], graph_seeds=None)
+                    ).semantic[:limit],
                 )
                 for ft in fact_types
             ]
@@ -241,15 +206,15 @@ class OracleMemories(PostgresMemories):
         enable_text_search: bool = True,
     ) -> dict[str, SemanticBm25Result]:
         """Oracle-native semantic + BM25 search using VECTOR_DISTANCE and CONTAINS."""
-        from .pg.recall import (
-            build_bm25_query_text,
-            tokenize_query,
-            build_tags_where_clause_simple,
-            build_tag_groups_where_clause,
-            GRAPH_SEED_LIMIT,
-        )
         from ...config import get_config
         from ..sql import create_sql_dialect
+        from .pg.recall import (
+            GRAPH_SEED_LIMIT,
+            build_bm25_query_text,
+            build_tag_groups_where_clause,
+            build_tags_where_clause_simple,
+            tokenize_query,
+        )
 
         result_dict = {ft: SemanticBm25Result(semantic=[], bm25=[], graph_seeds=None) for ft in fact_types}
 
@@ -441,8 +406,7 @@ class OracleMemories(PostgresMemories):
             result_dict[ft].semantic.extend(candidates[:limit])
             if graph_seed_threshold is not None:
                 result_dict[ft].graph_seeds = [
-                    r for r in candidates[:limit]
-                    if (r.similarity or 0) >= graph_seed_threshold
+                    r for r in candidates[:limit] if (r.similarity or 0) >= graph_seed_threshold
                 ][:GRAPH_SEED_LIMIT]
 
         return result_dict
@@ -465,15 +429,13 @@ class OracleMemories(PostgresMemories):
         created_before: datetime | None = None,
     ) -> dict[str, list]:
         """Oracle-native temporal search with VECTOR_DISTANCE."""
-        from .pg.recall import (
-            build_tags_where_clause_simple,
-            build_tag_groups_where_clause,
-        )
-        from ...config import get_config
-        from ..sql import create_sql_dialect
         from ..search.types import RetrievalResult
+        from ..sql import create_sql_dialect
+        from .pg.recall import (
+            build_tag_groups_where_clause,
+            build_tags_where_clause_simple,
+        )
 
-        config = get_config()
         dialect = create_sql_dialect("oracle")
 
         table = fq_store_table("memory_units")
@@ -556,7 +518,7 @@ class OracleMemories(PostgresMemories):
         doc_table = "documents"
         params = [
             document_id,  # :1 id
-            bank_id,      # :2 bank_id
+            bank_id,  # :2 bank_id
             original_text,  # :3 original_text (CLOB)
             content_hash,  # :4 content_hash
             json.dumps(retain_params) if retain_params else None,  # :5 retain_params (CLOB)

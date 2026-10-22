@@ -759,7 +759,7 @@ class EntityResolver:
         try:
             all_entities = await conn.fetch(
                 f"""
-                SELECT canonical_name, id, metadata, {nullable_year1_timestamp_sql('last_seen')} AS last_seen, mention_count
+                SELECT canonical_name, id, metadata, {nullable_year1_timestamp_sql("last_seen")} AS last_seen, mention_count
                 FROM {fq_table("entities")}
                 WHERE bank_id = $1
                 """,
@@ -872,7 +872,7 @@ class EntityResolver:
             rows.extend(
                 await conn.fetch(
                     f"""
-                    SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql('e.last_seen')} AS last_seen, e.mention_count,
+                    SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql("e.last_seen")} AS last_seen, e.mention_count,
                            q.query_text
                     FROM unnest($2::text[]) AS q(query_text)
                     JOIN {fq_table("entities")} e ON (
@@ -913,7 +913,7 @@ class EntityResolver:
                            q.query_text
                     FROM unnest($2::text[]) AS q(query_text)
                     CROSS JOIN LATERAL (
-                        SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql('e.last_seen')} AS last_seen, e.mention_count
+                        SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql("e.last_seen")} AS last_seen, e.mention_count
                         FROM {fq_table("entities")} e
                         WHERE e.bank_id = $1
                           AND e.entity_kind != 'label'
@@ -988,7 +988,10 @@ class EntityResolver:
 
         Replaces pg_trgm for Oracle backends. Uses JSON_TABLE to expand the
         entity text list into rows (Oracle equivalent of PG's unnest), then
-        joins with a Jaro-Winkler threshold of 70/100 (≈ pg_trgm 0.15).
+        joins with a Jaro-Winkler threshold of 70/100 — looser than the trigram
+        merge floor, deliberately: Jaro-Winkler and trigram rank names differently,
+        so no JW cutoff maps onto that floor without dropping mergeable candidates.
+        The floor is applied afterwards in _resolve_from_candidates.
         Falls back to the "full" strategy if UTL_MATCH is unavailable.
         """
         entity_texts = list(set(e["text"] for e in entities_data))
@@ -1005,7 +1008,7 @@ class EntityResolver:
         try:
             # Batch entity texts into bounded sub-queries using JSON_TABLE to
             # expand the list into rows. UTL_MATCH.JARO_WINKLER_SIMILARITY
-            # returns 0-100; threshold 70 ≈ pg_trgm similarity 0.15.
+            # returns 0-100; threshold 70 is kept loose (see the docstring).
             # Bounded batches mirror the PG trigram path so very wide retain
             # batches don't time out a single JOIN on large banks.
             rows = []
@@ -1013,7 +1016,7 @@ class EntityResolver:
                 rows.extend(
                     await conn.fetch(
                         f"""
-                        SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql('e.last_seen')} AS last_seen, e.mention_count,
+                        SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql("e.last_seen")} AS last_seen, e.mention_count,
                                q.query_text
                         FROM JSON_TABLE($2, '$[*]' COLUMNS (query_text VARCHAR2(4000) PATH '$')) q
                         JOIN {entities_table} e ON (
@@ -1036,7 +1039,7 @@ class EntityResolver:
                         f"""
                         SELECT id, canonical_name, metadata, last_seen, mention_count, query_text
                         FROM (
-                            SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql('e.last_seen')} AS last_seen, e.mention_count,
+                            SELECT e.id, e.canonical_name, e.metadata, {nullable_year1_timestamp_sql("e.last_seen")} AS last_seen, e.mention_count,
                                    q.query_text,
                                    ROW_NUMBER() OVER (
                                        PARTITION BY q.query_text
@@ -1214,9 +1217,7 @@ class EntityResolver:
             # the date fans out to entity stats / co-occurrence rows. Sanitizing only
             # at the final entity INSERT is too late: datetime.min is truthy and can
             # already have poisoned those downstream paths.
-            entity_event_date = safe_entity_event_date(
-                entity_data.get("event_date", unit_event_date)
-            )
+            entity_event_date = safe_entity_event_date(entity_data.get("event_date", unit_event_date))
 
             # Per mention, not per batch: retain resolves the caller's entities and the
             # extractor's in one pass, and only the caller's are meant literally (#3479).
@@ -1313,8 +1314,8 @@ class EntityResolver:
                 if labels_cfg and _is_label_entity(canonical_name, labels_cfg, taxonomy_lookup or set()):
                     continue
 
-                # The trigram probe admits candidates at a deliberately loose recall
-                # threshold (0.15), and the signals below can total 0.5 on their own — so
+                # The Oracle probe and the "full" fallback admit candidates far looser than
+                # this, and the signals below can total 0.5 on their own — so
                 # without a floor here a name merely *considered* similar could be merged
                 # onto purely because the bank had seen it recently next to the same
                 # entities (#3751). The two measures disagree most on short names, where a

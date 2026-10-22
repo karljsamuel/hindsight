@@ -10,7 +10,9 @@ from pydantic import ValidationError
 
 from hindsight_api.api import page_markdown
 from hindsight_api.engine.memory_engine import KEEP_PARENT, DirectivePage, MentalModelPage
+from hindsight_api.engine.response_models import MemoryFact, RecallResult
 from hindsight_api.mcp_tools import (
+    _ALL_TOOLS,
     KNOWLEDGE_ROOT_PARENT,
     MCPToolsConfig,
     MentalModelTriggerInput,
@@ -1272,6 +1274,14 @@ class TestRecallNewParams:
         call_kwargs = mock_memory.recall_async.call_args.kwargs
         assert call_kwargs["budget"] == Budget.LOW
 
+    async def test_recall_prefer_observations_defers_to_bank(self, mock_memory):
+        """Omitted → None, so the engine applies the bank's recall_prefer_observations."""
+        mcp = _make_mcp_server(mock_memory, {"recall"})
+        await _tools(mcp)["recall"].fn(query="test")
+        assert mock_memory.recall_async.call_args.kwargs["prefer_observations"] is None
+        await _tools(mcp)["recall"].fn(query="test", prefer_observations=False)
+        assert mock_memory.recall_async.call_args.kwargs["prefer_observations"] is False
+
     async def test_recall_with_types(self, mock_memory):
         mcp = _make_mcp_server(mock_memory, {"recall"})
         await _tools(mcp)["recall"].fn(query="test", types=["world"])
@@ -1343,6 +1353,35 @@ class TestRecallNewParams:
         call_kwargs = mock_memory.recall_async.call_args.kwargs
         assert "tag_groups" in call_kwargs
         assert len(call_kwargs["tag_groups"]) == 1
+
+    async def test_recall_include_options_off_by_default(self, mock_memory):
+        mcp = _make_mcp_server(mock_memory, {"recall"})
+        await _tools(mcp)["recall"].fn(query="test")
+        call_kwargs = mock_memory.recall_async.call_args.kwargs
+        assert call_kwargs["include_chunks"] is False
+        assert call_kwargs["include_entities"] is False
+        assert call_kwargs["include_source_facts"] is False
+
+    @pytest.mark.parametrize("include_bank_id", [True, False])
+    async def test_recall_include_options_passed_through(self, mock_memory, include_bank_id):
+        """Issue #5470: MCP recall must be able to return source chunks, entities and source facts."""
+        mcp = _make_mcp_server(mock_memory, {"recall"}, include_bank_id=include_bank_id)
+        await _tools(mcp)["recall"].fn(
+            query="test",
+            include_chunks=True,
+            max_chunk_tokens=6000,
+            include_entities=True,
+            max_entity_tokens=300,
+            include_source_facts=True,
+            max_source_facts_tokens=1000,
+        )
+        call_kwargs = mock_memory.recall_async.call_args.kwargs
+        assert call_kwargs["include_chunks"] is True
+        assert call_kwargs["max_chunk_tokens"] == 6000
+        assert call_kwargs["include_entities"] is True
+        assert call_kwargs["max_entity_tokens"] == 300
+        assert call_kwargs["include_source_facts"] is True
+        assert call_kwargs["max_source_facts_tokens"] == 1000
 
 
 @pytest.mark.asyncio
@@ -1775,6 +1814,34 @@ class TestListToolBounds:
         mcp = _make_mcp_server(mock_memory, {"list_operations"}, include_bank_id=True)
         await mcp.call_tool("list_operations", {"limit": 100})
         assert mock_memory.list_operations.call_args.kwargs["limit"] == 100
+
+
+@pytest.mark.asyncio
+class TestRecallReflectTagsMatch:
+    """#5371: an unknown tags_match is rejected instead of silently running as "any"."""
+
+    @pytest.fixture
+    def mock_memory(self, mock_memory):
+        mock_memory._config_resolver.get_bank_config = AsyncMock(return_value={})
+        mock_memory._operation_validator = None
+        mock_memory.audit_logger.action_allowed = MagicMock(return_value=False)
+        return mock_memory
+
+    @pytest.mark.parametrize("include_bank_id", [True, False])
+    @pytest.mark.parametrize("tool", ["recall", "reflect"])
+    async def test_unknown_mode_is_rejected(self, mock_memory, tool, include_bank_id):
+        from pydantic import ValidationError
+
+        mcp = _make_mcp_server(mock_memory, {tool}, include_bank_id=include_bank_id)
+        with pytest.raises(ValidationError):
+            await mcp.call_tool(tool, {"query": "q", "tags": ["typescript"], "tags_match": "any-strict"})
+        getattr(mock_memory, f"{tool}_async").assert_not_called()
+
+    @pytest.mark.parametrize("tool", ["recall", "reflect"])
+    async def test_schema_lists_all_modes(self, mock_memory, tool):
+        mcp = _make_mcp_server(mock_memory, {tool}, include_bank_id=True)
+        schema = _tools(mcp)[tool].parameters["properties"]["tags_match"]
+        assert set(schema["enum"]) == {"any", "all", "any_strict", "all_strict", "exact"}
 
 
 # =========================================================================
@@ -2631,6 +2698,40 @@ class TestReflectTraceOmission:
         assert "directives_applied" not in data
 
 
+def _refs(node: Any) -> set[str]:
+    """Every $defs name a schema fragment points at, at any depth."""
+    if isinstance(node, dict):
+        found = {node["$ref"].rsplit("/", 1)[-1]} if isinstance(node.get("$ref"), str) else set()
+        return found.union(*(_refs(v) for v in node.values()))
+    if isinstance(node, list):
+        return set().union(*(_refs(v) for v in node))
+    return set()
+
+
+def test_no_tool_input_schema_is_recursive(mock_memory):
+    """Some LLM providers reject a recursive tool schema and fail the whole request (#5013)."""
+    from fastmcp import FastMCP
+
+    mcp = FastMCP("test")
+    register_mcp_tools(
+        mcp,
+        mock_memory,
+        MCPToolsConfig(bank_id_resolver=lambda: "b", include_bank_id_param=True, tools=set(_ALL_TOOLS)),
+    )
+    tools = _tools(mcp)
+    assert {"create_mental_model", "create_knowledge_page"} <= tools.keys()
+    for name, tool in tools.items():
+        defs = tool.parameters.get("$defs", {})
+        for start in defs:
+            seen, todo = set(), set(_refs(defs[start]))
+            while todo:
+                ref = todo.pop()
+                assert ref != start, f"{name}: $defs/{start} refers back to itself"
+                if ref not in seen:
+                    seen.add(ref)
+                    todo |= _refs(defs.get(ref, {}))
+
+
 class TestMentalModelTriggerInput:
     """The MCP trigger input contract: HTTP parity, patch shape, merge semantics."""
 
@@ -2652,6 +2753,16 @@ class TestMentalModelTriggerInput:
     def test_rejects_unknown_field(self):
         with pytest.raises(ValidationError):
             MentalModelTriggerInput(refresh_evry_hour=True)
+
+    def test_rejects_malformed_tag_groups(self):
+        """tag_groups is plain JSON in the schema, so the shape is checked by the validator."""
+        with pytest.raises(ValidationError):
+            MentalModelTriggerInput(tag_groups=[{"and": "not-a-list"}])
+
+    def test_tag_groups_reach_the_engine_in_canonical_form(self):
+        """The field name 'filters' is accepted and sent down under its alias, as before #5013."""
+        trigger = MentalModelTriggerInput(tag_groups=[{"filters": [{"tags": ["a"]}, {"not": {"tags": ["b"]}}]}])
+        assert trigger.tag_groups == [{"and": [{"tags": ["a"]}, {"not": {"tags": ["b"]}}]}]
 
     def test_rejects_invalid_cron(self):
         with pytest.raises(ValidationError):
@@ -2682,3 +2793,38 @@ class TestMentalModelTriggerInput:
 
     def test_no_trigger_and_no_shorthand_is_no_patch(self):
         assert _mental_model_trigger_patch(None) is None
+
+
+@pytest.mark.asyncio
+class TestRecallResponseSize:
+    """max_tokens budgets fact text only; the MCP payload around it should not add more than it must."""
+
+    @staticmethod
+    def _result() -> RecallResult:
+        facts = [
+            MemoryFact(
+                id=f"fact-{i}",
+                text=f"fact number {i}",
+                fact_type="world",
+                tags=["project:x", "research"],
+                mentioned_at="2026-09-28T00:00:00+00:00",
+            )
+            for i in range(3)
+        ]
+        return RecallResult(results=facts)
+
+    async def test_bank_id_recall_returns_compact_json(self, mock_memory):
+        mock_memory.recall_async = AsyncMock(return_value=self._result())
+        mcp = _make_mcp_server(mock_memory, {"recall"}, include_bank_id=True)
+        out = await _tools(mcp)["recall"].fn(query="test")
+        assert json.loads(out) == json.loads(self._result().model_dump_json())
+        assert "\n" not in out
+
+    @pytest.mark.parametrize("include_bank_id", [True, False])
+    async def test_recall_docs_say_max_tokens_counts_fact_text_only(self, mock_memory, include_bank_id):
+        mcp = _make_mcp_server(mock_memory, {"recall"}, include_bank_id=include_bank_id)
+        doc = _tools(mcp)["recall"].fn.__doc__
+        max_tokens_doc = doc.split("max_tokens:", 1)[1].split("budget:", 1)[0]
+        # An agent sizes its context from this line, so it must say what the budget covers.
+        assert "'text' counts" in max_tokens_doc
+        assert "several times larger" in max_tokens_doc

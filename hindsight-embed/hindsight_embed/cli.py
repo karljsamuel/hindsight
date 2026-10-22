@@ -31,31 +31,14 @@ from pathlib import Path
 
 from . import get_embed_manager
 
+# The --profile override is stored in profile_manager, not here: we must keep
+# supporting `python -m hindsight_embed.cli`, and the note there explains why a
+# global in this module breaks that form.
+from .profile_manager import get_cli_profile_override, set_cli_profile_override
+
 CONFIG_DIR = Path.home() / ".hindsight"
 CONFIG_FILE = CONFIG_DIR / "embed"
 CONFIG_FILE_ALT = CONFIG_DIR / "config.env"  # Alternative config file location
-
-# Module-level variable to store CLI profile override (set by argparse)
-_cli_profile_override: str | None = None
-
-
-def get_cli_profile_override() -> str | None:
-    """Get the profile override from CLI flag (--profile).
-
-    Returns:
-        Profile name if set via CLI flag, None otherwise.
-    """
-    return _cli_profile_override
-
-
-def set_cli_profile_override(profile: str | None) -> None:
-    """Set the profile override from CLI flag (--profile).
-
-    Args:
-        profile: Profile name to set, or None to clear.
-    """
-    global _cli_profile_override
-    _cli_profile_override = profile
 
 
 def setup_logging(verbose: bool = False):
@@ -87,7 +70,7 @@ def load_config_file():
     IMPORTANT: Only loads from the active profile, never from default if a specific profile is set.
     Uses dynamic path resolution to support testing with temporary HOME directories.
     """
-    from .profile_manager import ProfileManager, resolve_active_profile
+    from .profile_manager import ProfileManager, parse_env_file, resolve_active_profile
 
     # Resolve which profile to use (respects --profile flag, env vars, active_profile file)
     active_profile = resolve_active_profile()
@@ -99,17 +82,9 @@ def load_config_file():
     config_path = paths.config
 
     # Load ONLY this profile's config, never fall back to default
-    if config_path.exists():
-        with open(config_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    # Handle 'export VAR=value' format
-                    if line.startswith("export "):
-                        line = line[7:]
-                    key, value = line.split("=", 1)
-                    if key not in os.environ:  # Don't override env vars
-                        os.environ[key] = value
+    for key, value in parse_env_file(config_path).items():
+        if key not in os.environ:  # Don't override env vars
+            os.environ[key] = value
 
 
 ENV_LLM_PROVIDER = "HINDSIGHT_API_LLM_PROVIDER"
@@ -501,7 +476,7 @@ def do_daemon(args, config: dict, logger):
 
     # Get profile-specific paths
     pm = ProfileManager()
-    paths = pm.resolve_profile_paths(profile or "")
+    paths = pm.resolve_profile_paths(profile)
 
     daemon_log_path = paths.log
     port = paths.port
@@ -535,12 +510,10 @@ def do_daemon(args, config: dict, logger):
             # Start UI if --ui flag was passed
             if getattr(args, "ui", False):
                 from .daemon_embed_manager import DaemonEmbedManager
-                from .profile_manager import resolve_active_profile
 
-                # Use the same profile resolution as the daemon
-                resolved_profile = profile if profile is not None else resolve_active_profile()
+                # main() already resolved the profile the daemon was started with
                 manager = DaemonEmbedManager()
-                ui_started = manager.start_ui(resolved_profile, None, "0.0.0.0")
+                ui_started = manager.start_ui(profile, None, "0.0.0.0")
                 if not ui_started:
                     console.print(
                         Panel(
@@ -711,7 +684,7 @@ def do_ui(args, config: dict, logger):
 
     # Resolve default UI port (from the profile's .env, else API + offset)
     pm = ProfileManager()
-    paths = pm.resolve_profile_paths(profile or "")
+    paths = pm.resolve_profile_paths(profile)
     default_ui_port = paths.ui_port
 
     if args.ui_command == "start":
@@ -1085,7 +1058,7 @@ def do_profile_command(args: list[str]) -> int:
     Returns:
         Exit code (0 = success, 1 = error).
     """
-    from .profile_manager import ProfileManager, resolve_active_profile, validate_profile_exists
+    from .profile_manager import ProfileManager, parse_env_file, resolve_active_profile, validate_profile_exists
 
     parser = argparse.ArgumentParser(prog="hindsight-embed profile")
     subparsers = parser.add_subparsers(dest="profile_command", required=True)
@@ -1225,13 +1198,8 @@ def do_profile_command(args: list[str]) -> int:
             else:
                 config_path = CONFIG_FILE
 
-            if config_path.exists():
-                for line in config_path.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if line and not line.startswith("#") and "=" in line:
-                        k, v = line.split("=", 1)
-                        if k != "PORT":  # Don't copy PORT, we'll set it explicitly
-                            config[k] = v
+            config = parse_env_file(config_path)
+            config.pop("PORT", None)  # Don't copy PORT, we'll set it explicitly
 
         # Merge new config into existing
         config.update(new_config)
@@ -1276,13 +1244,7 @@ def do_profile_command(args: list[str]) -> int:
             config_path = CONFIG_FILE
 
         # Parse existing config
-        config = {}
-        if config_path.exists():
-            for line in config_path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    config[k] = v
+        config = parse_env_file(config_path)
 
         # Update the key
         config[key] = value
@@ -1321,13 +1283,7 @@ def do_profile_command(args: list[str]) -> int:
             config_path = CONFIG_FILE
 
         # Parse existing config
-        config = {}
-        if config_path.exists():
-            for line in config_path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    config[k] = v
+        config = parse_env_file(config_path)
 
         # Remove the key
         if key not in config:
@@ -1423,11 +1379,9 @@ def do_profile_command(args: list[str]) -> int:
 
         # Determine source
         source = "default"
-        if not active_profile:
-            source = "default"
-        elif os.getenv("HINDSIGHT_EMBED_PROFILE"):
+        if os.getenv("HINDSIGHT_EMBED_PROFILE"):
             source = "HINDSIGHT_EMBED_PROFILE"
-        elif get_cli_profile_override():
+        elif get_cli_profile_override() is not None:
             source = "cli_flag"
         elif pm.get_active_profile():
             source = "active_profile_file"
@@ -1471,7 +1425,7 @@ def do_profile_command(args: list[str]) -> int:
     return 1
 
 
-def main():
+def main() -> None:
     """Main entry point."""
     # Windows defaults stdout/stderr to the legacy cp1252 codec, which crashes
     # on the Unicode glyphs (✓, box-drawing, etc.) used throughout Rich-rendered
@@ -1493,7 +1447,7 @@ def main():
     global_args, remaining_args = parent_parser.parse_known_args()
     global_profile = global_args.profile
     if global_profile == "default":
-        global_profile = None
+        global_profile = ""
 
     # Set the CLI profile override so it's available to resolve_active_profile()
     # This must happen BEFORE any config loading (load_config_file, get_config, etc.)
@@ -1545,6 +1499,12 @@ def main():
             exit_code = do_profile_command(remaining_args[1:])  # Skip 'profile' itself
             sys.exit(exit_code)
 
+        from .profile_manager import resolve_active_profile
+
+        # Configuration and every command target must use the same priority chain.
+        # Passing the raw flag used to bypass env/active selection for some commands.
+        resolved_profile = resolve_active_profile()
+
         # Handle daemon subcommands
         if command == "daemon":
             # Parse daemon subcommand (profile already extracted globally)
@@ -1559,8 +1519,7 @@ def main():
             logs_parser.add_argument("--lines", "-n", type=int, default=50)
 
             args = parser.parse_args(remaining_args[1:])  # Skip 'daemon' itself
-            # Use globally extracted profile
-            args.profile = global_profile
+            args.profile = resolved_profile
             logger = setup_logging(False)
             config = get_config()
             exit_code = do_daemon(args, config, logger)
@@ -1584,7 +1543,7 @@ def main():
             logs_parser.add_argument("--lines", "-n", type=int, default=50)
 
             args = parser.parse_args(remaining_args[1:])
-            args.profile = global_profile
+            args.profile = resolved_profile
             logger = setup_logging(False)
             config = get_config()
             exit_code = do_ui(args, config, logger)
@@ -1631,9 +1590,9 @@ def main():
         from . import daemon_client
 
         # Forward to hindsight-cli (handles daemon startup and CLI installation)
-        # Pass the globally extracted profile
+        # Pass the same resolved profile used to load the configuration.
         # remaining_args already has --profile/-p filtered out
-        exit_code = daemon_client.run_cli(remaining_args, config, global_profile)
+        exit_code = daemon_client.run_cli(remaining_args, config, resolved_profile)
         sys.exit(exit_code)
 
     # No command - show help

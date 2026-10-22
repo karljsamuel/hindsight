@@ -1,0 +1,44 @@
+# KJS Security Scan — ported from upstream's security-scan.yml.
+#
+# Schedule-only by design: the findings that matter appear when a CVE is
+# published, not when our code changes, so a PR gate would sit green for weeks and
+# then fail an unrelated PR.
+#
+# Only scan-published is ported. Upstream's scan-next-build builds three images from
+# source and scans them; this fork publishes exactly one image
+# (ghcr.io/karljsamuel/hindsight), and oracle-image.yml already builds it on every
+# push to main, so scanning the published tag answers the same question without a
+# second 45-minute build.
+name: KJS Security Scan
+permissions:
+  contents: read
+jobs:
+  scan-published:
+    name: Scan published ${{ matrix.image }} (${{ matrix.platform }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+        - hindsight:oracle-latest
+        - hindsight:latest
+        platform:
+        - linux/amd64
+        - linux/arm64
+    steps:
+    - name: Scan ${{ matrix.image }}
+      uses: aquasecurity/trivy-action@v0.36.0
+      with:
+        image-ref: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+        scanners: vuln
+        severity: HIGH,CRITICAL
+        ignore-unfixed: true
+        exit-code: '1'
+        format: table
+      env:
+        TRIVY_PLATFORM: ${{ matrix.platform }}
+'on':
+  schedule:
+  - cron: 30 5 * * *
+  workflow_dispatch: null

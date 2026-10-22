@@ -10,6 +10,8 @@ from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
+from ..config import _get_raw_config
+
 logger = logging.getLogger(__name__)
 
 # Default retry configuration for database operations
@@ -111,6 +113,14 @@ async def retry_with_backoff(
     raise last_exception
 
 
+def _is_slow_acquire(acquire_time: float) -> bool:
+    """Whether an acquire is slow enough to warn about; a threshold of 0 disables the warning."""
+    # The cached raw config, not get_config(): this runs on every acquire, and the
+    # StaticConfigProxy get_config() builds per call costs ~0.3 ms.
+    threshold = _get_raw_config().db_pool_slow_acquire_threshold_seconds
+    return threshold > 0 and acquire_time > threshold
+
+
 @asynccontextmanager
 async def acquire_with_retry(backend_or_pool: Any, max_retries: int = DEFAULT_MAX_RETRIES) -> AsyncIterator[Any]:
     """
@@ -140,7 +150,7 @@ async def acquire_with_retry(backend_or_pool: Any, max_retries: int = DEFAULT_MA
     from .db.base import DatabaseBackend
 
     if isinstance(backend_or_pool, DatabaseBackend) or getattr(backend_or_pool, "_wraps_backend", False):
-        start = time.time()
+        start = time.perf_counter()
         async with AsyncExitStack() as stack:
             conn: Any = None
             for attempt in range(max_retries + 1):
@@ -167,23 +177,23 @@ async def acquire_with_retry(backend_or_pool: Any, max_retries: int = DEFAULT_MA
                         logger.error(f"Database acquire failed after {max_retries + 1} attempts: {e!r}")
                         raise
 
-            acquire_time = time.time() - start
-            if acquire_time > 0.05:
+            acquire_time = time.perf_counter() - start
+            if _is_slow_acquire(acquire_time):
                 logger.warning(f"[DB POOL] Slow acquire: {acquire_time:.3f}s")
 
             yield conn
     else:
         # Legacy path: raw asyncpg.Pool
         pool = backend_or_pool
-        start = time.time()
+        start = time.perf_counter()
 
         async def acquire():
             return await pool.acquire()
 
         conn = await retry_with_backoff(acquire, max_retries=max_retries)
-        acquire_time = time.time() - start
+        acquire_time = time.perf_counter() - start
 
-        if acquire_time > 0.05:
+        if _is_slow_acquire(acquire_time):
             pool_size = pool.get_size()
             pool_free = pool.get_idle_size()
             logger.warning(f"[DB POOL] Slow acquire: {acquire_time:.3f}s | size={pool_size}, idle={pool_free}")

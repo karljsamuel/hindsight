@@ -26,6 +26,7 @@ from hindsight_api.engine.llm_interface import LLM_TOOL_CHOICE_AUTO, LLMInterfac
 from hindsight_api.engine.llm_trace import LLMResponseUsage, stash_response_usage
 from hindsight_api.engine.llm_wrapper import parse_llm_json
 from hindsight_api.engine.providers.llm_debug import dump_request_on_4xx
+from hindsight_api.engine.remote_retry import jittered_backoff
 from hindsight_api.engine.response_models import LLMToolCall, LLMToolCallResult, TokenUsage
 from hindsight_api.engine.structured_output import has_tagged_union, provider_json_schema
 from hindsight_api.metrics import get_metrics_collector
@@ -39,6 +40,12 @@ logger = logging.getLogger(__name__)
 # Set exclusively by ConfiguredLLMProvider.call() / call_with_tools() via token-based
 # set/reset, so it is properly scoped to each individual LLM call and never leaks.
 _safety_settings_ctx: ContextVar[list | None] = ContextVar("gemini_safety_settings", default=None)
+
+# Google's documented placeholder for functionCall parts that never had a thought
+# signature (history transferred from another model, or injected by hand). Gemini 3
+# requires a signature on every functionCall part of the current turn.
+# https://ai.google.dev/gemini-api/docs/thought-signatures
+_SKIP_THOUGHT_SIGNATURE_VALIDATOR = b"skip_thought_signature_validator"
 
 
 # Vertex AI imports (optional)
@@ -228,6 +235,11 @@ def _convert_messages_to_gemini(msg_list: list[dict[str, Any]]) -> _GeminiConver
                     part_kwargs: dict[str, Any] = {"function_call": genai_types.FunctionCall(**fc_kwargs)}
                     if thought_signature:
                         part_kwargs["thought_signature"] = base64.b64decode(thought_signature)
+                    else:
+                        # Tool calls replayed from another provider (failover mid tool loop)
+                        # carry no signature, and Gemini 3 rejects the turn with HTTP 400.
+                        # Google documents this literal as the bypass for exactly that case.
+                        part_kwargs["thought_signature"] = _SKIP_THOUGHT_SIGNATURE_VALIDATOR
                     parts.append(genai_types.Part(**part_kwargs))
                 gemini_contents.append(genai_types.Content(role="model", parts=parts))
             else:
@@ -444,7 +456,7 @@ class GeminiLLM(LLMInterface):
 
         Returns:
         """
-        start_time = time.time()
+        start_time = time.perf_counter()
 
         # Convert OpenAI-style messages to Gemini format. We ALWAYS build
         # system_instruction (even when a cache is in use): the config builder
@@ -604,7 +616,7 @@ class GeminiLLM(LLMInterface):
                     cached_tokens = cached_input_tokens
 
                 # Record metrics
-                duration = time.time() - start_time
+                duration = time.perf_counter() - start_time
                 metrics = get_metrics_collector()
                 metrics.record_llm_call(
                     provider=self.provider,
@@ -749,9 +761,7 @@ class GeminiLLM(LLMInterface):
                 if e.code in (429, 500, 502, 503, 504) or (e.code and e.code >= 500):
                     last_exception = e
                     if attempt < max_retries:
-                        backoff = min(initial_backoff * (2**attempt), max_backoff)
-                        jitter = backoff * 0.2 * (2 * (time.time() % 1) - 1)
-                        await asyncio.sleep(backoff + jitter)
+                        await asyncio.sleep(jittered_backoff(attempt, initial_backoff, max_backoff))
                     else:
                         logger.error(f"Gemini API error after {max_retries + 1} attempts: {str(e)}")
                         raise
@@ -840,7 +850,7 @@ class GeminiLLM(LLMInterface):
         Returns:
             LLMToolCallResult with content and/or tool_calls.
         """
-        start_time = time.time()
+        start_time = time.perf_counter()
         using_cache = cached_prefix is not None
 
         # Convert tools to Gemini format. While the cache is in use the tool
@@ -1004,7 +1014,7 @@ class GeminiLLM(LLMInterface):
                     thoughts_tokens = getattr(response.usage_metadata, "thoughts_token_count", 0) or 0
 
                 # Record metrics
-                duration = time.time() - start_time
+                duration = time.perf_counter() - start_time
                 metrics = get_metrics_collector()
                 metrics.record_llm_call(
                     provider=self.provider,
@@ -1479,7 +1489,18 @@ class GeminiLLM(LLMInterface):
         prompt = meta.get("promptTokenCount") or meta.get("prompt_token_count") or 0
         completion = meta.get("candidatesTokenCount") or meta.get("candidates_token_count") or 0
         total = meta.get("totalTokenCount") or meta.get("total_token_count") or 0
-        return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
+        cached = meta.get("cachedContentTokenCount") or meta.get("cached_content_token_count") or 0
+        thoughts = meta.get("thoughtsTokenCount") or meta.get("thoughts_token_count") or 0
+        # Cached and thinking counts ride in OpenAI's detail blocks so the consumer
+        # reads them the way it reads a live call (#5487). Gemini's total already
+        # includes thoughts, which is the "unfolded" shape visible_token_usage expects.
+        return {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": total,
+            "prompt_tokens_details": {"cached_tokens": cached},
+            "completion_tokens_details": {"reasoning_tokens": thoughts},
+        }
 
     @staticmethod
     def _normalize_state(state: Any) -> str:

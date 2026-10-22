@@ -204,6 +204,7 @@ def run_migrations_online() -> None:
             return oracledb.connect(**connect_params)
 
         from sqlalchemy import create_engine
+
         connectable = create_engine(
             "oracle+oracledb://",
             creator=creator,

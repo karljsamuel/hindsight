@@ -5,6 +5,7 @@ the Julian-day conversion lands outside Python's representable datetime range --
 so one such value aborts every entity read for its bank. It is refused at each
 boundary where a date can enter the system, not merely filtered on write.
 """
+
 from datetime import UTC, datetime
 
 from hindsight_api.engine.consolidation.consolidator import _aggregate_source_fields
@@ -61,10 +62,20 @@ def test_aggregate_source_fields_ignores_sentinel_but_keeps_historical_dates():
     historical = datetime(1920, 4, 3, tzinfo=UTC)
     sentinel = datetime.min.replace(tzinfo=UTC)
     sources = [
-        {"event_date": sentinel, "occurred_start": sentinel,
-         "occurred_end": sentinel, "mentioned_at": sentinel, "tags": []},
-        {"event_date": historical, "occurred_start": historical,
-         "occurred_end": historical, "mentioned_at": historical, "tags": []},
+        {
+            "event_date": sentinel,
+            "occurred_start": sentinel,
+            "occurred_end": sentinel,
+            "mentioned_at": sentinel,
+            "tags": [],
+        },
+        {
+            "event_date": historical,
+            "occurred_start": historical,
+            "occurred_end": historical,
+            "mentioned_at": historical,
+            "tags": [],
+        },
     ]
 
     result = _aggregate_source_fields(sources)
@@ -79,10 +90,17 @@ def test_aggregate_source_fields_ignores_sentinel_but_keeps_historical_dates():
 
 def test_aggregate_source_fields_returns_none_if_all_dates_are_sentinels():
     sentinel = datetime.min.replace(tzinfo=UTC)
-    result = _aggregate_source_fields([
-        {"event_date": sentinel, "occurred_start": sentinel,
-         "occurred_end": sentinel, "mentioned_at": sentinel, "tags": []}
-    ])
+    result = _aggregate_source_fields(
+        [
+            {
+                "event_date": sentinel,
+                "occurred_start": sentinel,
+                "occurred_end": sentinel,
+                "mentioned_at": sentinel,
+                "tags": [],
+            }
+        ]
+    )
     assert result.event_date is None
     assert result.occurred_start is None
     assert result.occurred_end is None

@@ -13,6 +13,7 @@ values instead of from the schema.
     as RAW to a VARCHAR2 column (ORA-00932). Converted values are checked here
     rather than round-tripped, so the test does not need a database.
 """
+
 import uuid
 
 import pytest
@@ -24,17 +25,28 @@ UID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301"
 
 # --- column classification ---------------------------------------------
 
+
 @pytest.mark.parametrize(
-    "col", ["operation_id", "entity_id", "unit_id", "observation_id",
-            "source_id", "internal_id", "id", "from_unit_id", "to_unit_id"]
+    "col",
+    [
+        "operation_id",
+        "entity_id",
+        "unit_id",
+        "observation_id",
+        "source_id",
+        "internal_id",
+        "id",
+        "from_unit_id",
+        "to_unit_id",
+    ],
 )
 def test_raw_columns_are_uuid_columns(col):
     assert ora._is_uuid_column(col) is True
 
 
 @pytest.mark.parametrize(
-    "col", ["bank_id", "document_id", "chunk_id", "worker_id",
-            "serialization_key", "file_storage_key", "operation_type"]
+    "col",
+    ["bank_id", "document_id", "chunk_id", "worker_id", "serialization_key", "file_storage_key", "operation_type"],
 )
 def test_varchar2_columns_are_not_uuid_columns(col):
     # All of these matched the old "_id" suffix rule while being VARCHAR2.
@@ -43,23 +55,24 @@ def test_varchar2_columns_are_not_uuid_columns(col):
 
 # --- bind index resolution ---------------------------------------------
 
+
 def test_insert_maps_binds_to_their_own_columns():
-    q = ("INSERT INTO memory_units (id, bank_id, text) "
-         "VALUES (:1, :2, :3)")
+    q = "INSERT INTO memory_units (id, bank_id, text) VALUES (:1, :2, :3)"
     assert ora._uuid_bind_indices(q) == {1}
 
 
 def test_insert_with_reordered_uuid_column():
     # Uses a real RAW-id table: an unknown table's `id` cannot be classified,
     # so the resolver declines rather than assuming RAW (see the test below).
-    q = ("INSERT INTO memory_units (bank_id, document_id, id) "
-         "VALUES (:1, :2, :3)")
+    q = "INSERT INTO memory_units (bank_id, document_id, id) VALUES (:1, :2, :3)"
     assert ora._uuid_bind_indices(q) == {3}
 
 
 def test_insert_with_expression_in_values():
-    q = ("INSERT INTO memory_units (id, bank_id, created_at) "
-         "VALUES (:1, :2, COALESCE(CAST(:3 AS TIMESTAMP WITH TIME ZONE), SYSTIMESTAMP))")
+    q = (
+        "INSERT INTO memory_units (id, bank_id, created_at) "
+        "VALUES (:1, :2, COALESCE(CAST(:3 AS TIMESTAMP WITH TIME ZONE), SYSTIMESTAMP))"
+    )
     assert ora._uuid_bind_indices(q) == {1}
 
 
@@ -68,8 +81,7 @@ def test_unknown_table_id_declines_rather_than_assuming_raw():
     # is not RAW. Declining is the conservative direction: a UUID string that
     # really did target a RAW column fails loudly (ORA-01465) instead of
     # binding bytes to a VARCHAR2 column (ORA-00932).
-    assert ora._uuid_bind_indices(
-        "INSERT INTO some_unknown_table (id, bank_id) VALUES (:1, :2)") == set()
+    assert ora._uuid_bind_indices("INSERT INTO some_unknown_table (id, bank_id) VALUES (:1, :2)") == set()
 
 
 def test_where_clause_uuid_comparison():
@@ -91,6 +103,7 @@ def test_varchar2_bind_is_not_reported_as_uuid():
 
 # --- conversion behaviour ----------------------------------------------
 
+
 def test_uuid_string_for_varchar2_column_stays_text():
     got = ora._convert_args((UID,), "SELECT 1 FROM banks WHERE bank_id = :1")
     assert got == (UID,)
@@ -105,8 +118,8 @@ def test_uuid_string_for_raw_column_becomes_bytes():
 def test_mixed_insert_splits_the_two_columns():
     q = "INSERT INTO memory_units (id, bank_id, text) VALUES (:1, :2, :3)"
     got = ora._convert_args((UID, UID, "hello"), q)
-    assert got[0] == uuid.UUID(UID).bytes   # id is RAW(16)
-    assert got[1] == UID                    # bank_id is VARCHAR2(256)
+    assert got[0] == uuid.UUID(UID).bytes  # id is RAW(16)
+    assert got[1] == UID  # bank_id is VARCHAR2(256)
     assert got[2] == "hello"
 
 

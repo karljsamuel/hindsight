@@ -273,7 +273,7 @@ def _prepare_entities_for_resolution(
         - all_entities: per-unit formatted entity lists
         - entity_to_unit: maps flat index to (unit_id, local_index, fact_date)
     """
-    substep_start = time.time()
+    substep_start = time.perf_counter()
     all_entities = []
     dropped_empty = 0
     dropped_oversized = 0
@@ -341,11 +341,11 @@ def _prepare_entities_for_resolution(
     total_entities = sum(len(ents) for ents in all_entities)
     _log(
         log_buffer,
-        f"  [6.1] Process LLM entities: {total_entities} entities from {len(sentences)} facts in {time.time() - substep_start:.3f}s",
+        f"  [6.1] Process LLM entities: {total_entities} entities from {len(sentences)} facts in {time.perf_counter() - substep_start:.3f}s",
         level="debug",
     )
 
-    substep_start = time.time()
+    substep_start = time.perf_counter()
     all_entities_flat = []
     entity_to_unit: list[tuple] = []
 
@@ -364,7 +364,7 @@ def _prepare_entities_for_resolution(
             entity_to_unit.append((unit_id, local_idx, fact_date))
     _log(
         log_buffer,
-        f"    [6.2.1] Prepare entities: {len(all_entities_flat)} entities in {time.time() - substep_start:.3f}s",
+        f"    [6.2.1] Prepare entities: {len(all_entities_flat)} entities in {time.perf_counter() - substep_start:.3f}s",
         level="debug",
     )
 
@@ -420,7 +420,7 @@ async def resolve_entities_only(
         _log(log_buffer, "  [6.2] Entity resolution (batched): 0 entities", level="debug")
         return EntityResolutionResult(resolved_entities=[], entity_to_unit=[], unit_to_entity_ids={})
 
-    step_start = time.time()
+    step_start = time.perf_counter()
     resolved_entities = await entity_resolver.resolve_entities_batch(
         bank_id=bank_id,
         entities_data=all_entities_flat,
@@ -431,7 +431,7 @@ async def resolve_entities_only(
     )
     _log(
         log_buffer,
-        f"    [6.2.2] Resolve entities: {len(all_entities_flat)} entities in single batch in {time.time() - step_start:.3f}s",
+        f"    [6.2.2] Resolve entities: {len(all_entities_flat)} entities in single batch in {time.perf_counter() - step_start:.3f}s",
         level="debug",
     )
 
@@ -444,7 +444,7 @@ async def resolve_entities_only(
 
     _log(
         log_buffer,
-        f"  [6.2] Entity resolution (batched): {len(all_entities_flat)} entities resolved in {time.time() - step_start:.3f}s",
+        f"  [6.2] Entity resolution (batched): {len(all_entities_flat)} entities resolved in {time.perf_counter() - step_start:.3f}s",
         level="debug",
     )
 
@@ -486,17 +486,17 @@ async def create_temporal_links_batch_per_fact(
         import time as time_mod
 
         # Get the event_date for each new unit
-        fetch_dates_start = time_mod.time()
+        fetch_dates_start = time_mod.perf_counter()
         rows = await ops.fetch_unit_dates(conn, fq_table("memory_units"), unit_ids)
         new_units = {str(row["id"]): (row["event_date"], row["fact_type"]) for row in rows}
         _log(
             log_buffer,
-            f"      [7.1] Fetch event_dates for {len(unit_ids)} units: {time_mod.time() - fetch_dates_start:.3f}s",
+            f"      [7.1] Fetch event_dates for {len(unit_ids)} units: {time_mod.perf_counter() - fetch_dates_start:.3f}s",
         )
 
         # Use LATERAL push-down to fetch only top-N temporal neighbors per new unit,
         # avoiding transfer of the entire time-window result set (could be 50k+ rows).
-        fetch_neighbors_start = time_mod.time()
+        fetch_neighbors_start = time_mod.perf_counter()
 
         # Build arrays of new unit IDs, event dates, and fact types for the LATERAL query
         new_unit_entries = [(uid, edate, ftype) for uid, (edate, ftype) in new_units.items() if edate is not None]
@@ -537,11 +537,11 @@ async def create_temporal_links_batch_per_fact(
 
         _log(
             log_buffer,
-            f"      [7.2] Fetch {len(rows)} candidate neighbors (LATERAL): {time_mod.time() - fetch_neighbors_start:.3f}s",
+            f"      [7.2] Fetch {len(rows)} candidate neighbors (LATERAL): {time_mod.perf_counter() - fetch_neighbors_start:.3f}s",
         )
 
         # Build links directly from the LATERAL results (already per-unit limited)
-        link_gen_start = time_mod.time()
+        link_gen_start = time_mod.perf_counter()
         links = []
         for row in rows:
             time_diff_h = float(row["time_diff_hours"])
@@ -556,12 +556,18 @@ async def create_temporal_links_batch_per_fact(
         # retrieval only reads top 10-20 per unit anyway.
         links = _cap_links_per_unit(links)
 
-        _log(log_buffer, f"      [7.3] Generate {len(links)} temporal links: {time_mod.time() - link_gen_start:.3f}s")
+        _log(
+            log_buffer,
+            f"      [7.3] Generate {len(links)} temporal links: {time_mod.perf_counter() - link_gen_start:.3f}s",
+        )
 
         if links:
-            insert_start = time_mod.time()
+            insert_start = time_mod.perf_counter()
             await _bulk_insert_links(conn, links, bank_id=bank_id, skip_exists_check=True, ops=ops)
-            _log(log_buffer, f"      [7.4] Insert {len(links)} temporal links: {time_mod.time() - insert_start:.3f}s")
+            _log(
+                log_buffer,
+                f"      [7.4] Insert {len(links)} temporal links: {time_mod.perf_counter() - insert_start:.3f}s",
+            )
 
         return len(links)
 
@@ -615,7 +621,7 @@ async def compute_semantic_links_ann(
 
     import time as time_mod
 
-    ann_start = time_mod.time()
+    ann_start = time_mod.perf_counter()
     links = []
 
     logger.debug(f"[ANN] Starting: {len(unit_ids)} seeds, top_k={top_k}")
@@ -659,7 +665,7 @@ async def compute_semantic_links_ann(
 
     _log(
         log_buffer,
-        f"      [8.1] ANN search (Phase 1): {len(unit_ids)} units → {len(links)} links in {time_mod.time() - ann_start:.3f}s",
+        f"      [8.1] ANN search (Phase 1): {len(unit_ids)} units → {len(links)} links in {time_mod.perf_counter() - ann_start:.3f}s",
     )
 
     return links
@@ -699,17 +705,17 @@ async def _ann_rows_pg(
                 continue
             await conn.execute(f"SET LOCAL {guc} = {value}")
 
-        t_setup = time_mod.time()
+        t_setup = time_mod.perf_counter()
         await conn.execute("CREATE TEMP TABLE _ann_seeds (unit_id text, emb_text text, fact_type text) ON COMMIT DROP")
 
         records = [(uid, embedding_to_pgvector(emb), ft) for uid, emb, ft in zip(unit_ids, embeddings, fact_types)]
         await conn.copy_records_to_table("_ann_seeds", records=records, columns=["unit_id", "emb_text", "fact_type"])
-        logger.debug(f"[ANN] Temp table setup: {time_mod.time() - t_setup:.3f}s ({len(records)} seeds)")
+        logger.debug(f"[ANN] Temp table setup: {time_mod.perf_counter() - t_setup:.3f}s ({len(records)} seeds)")
 
         # Run one ANN query per fact_type so each uses the right HNSW index.
         active_types = set(fact_types)
         for fact_type in active_types:
-            t_query = time_mod.time()
+            t_query = time_mod.perf_counter()
             seed_count = sum(1 for ft in fact_types if ft == fact_type)
             logger.debug(f"[ANN] Querying fact_type={fact_type}: {seed_count} seeds")
             # Cast each seed's text embedding to `vector` exactly once in a
@@ -746,7 +752,9 @@ async def _ann_rows_pg(
                 fact_type,
                 top_k,
             )
-            logger.debug(f"[ANN] fact_type={fact_type}: {len(ft_rows)} rows in {time_mod.time() - t_query:.3f}s")
+            logger.debug(
+                f"[ANN] fact_type={fact_type}: {len(ft_rows)} rows in {time_mod.perf_counter() - t_query:.3f}s"
+            )
             rows.extend(ft_rows)
     # Transaction commits here. _ann_seeds is dropped (ON COMMIT DROP).
     # Transaction-local ANN tuning reverts (SET LOCAL).
@@ -856,9 +864,7 @@ def compute_semantic_links_within_batch(
     return links
 
 
-async def _filter_links_to_existing_units(
-    conn, links: list[tuple]
-) -> list[tuple]:
+async def _filter_links_to_existing_units(conn, links: list[tuple]) -> list[tuple]:
     """Keep only links whose endpoints still exist after a delta retain's deletes.
 
     Phase 1 computes ANN links before Phase 2 removes changed/removed chunks.
@@ -942,7 +948,7 @@ async def create_semantic_links_batch(
         all_links = []
 
         # Within-batch similarities (numpy, no DB)
-        batch_start = time_mod.time()
+        batch_start = time_mod.perf_counter()
         within_batch_links = compute_semantic_links_within_batch(
             unit_ids,
             embeddings,
@@ -952,7 +958,7 @@ async def create_semantic_links_batch(
         all_links.extend(within_batch_links)
         _log(
             log_buffer,
-            f"      [8.1] Within-batch semantic: {len(within_batch_links)} links in {time_mod.time() - batch_start:.3f}s",
+            f"      [8.1] Within-batch semantic: {len(within_batch_links)} links in {time_mod.perf_counter() - batch_start:.3f}s",
         )
 
         # Phase 1 ANN links were computed before delta Phase 2 deletes changed
@@ -968,10 +974,11 @@ async def create_semantic_links_batch(
             )
 
         if all_links:
-            insert_start = time_mod.time()
+            insert_start = time_mod.perf_counter()
             await _bulk_insert_links(conn, all_links, bank_id=bank_id, ops=ops)
             _log(
-                log_buffer, f"      [8.3] Insert {len(all_links)} semantic links: {time_mod.time() - insert_start:.3f}s"
+                log_buffer,
+                f"      [8.3] Insert {len(all_links)} semantic links: {time_mod.perf_counter() - insert_start:.3f}s",
             )
 
         return len(all_links)
@@ -1081,9 +1088,11 @@ async def _write_causal_links_batch(
                 links.append((from_unit_id, to_unit_id, relation_type, 1.0, None))
 
         if links:
-            insert_start = time_mod.time()
+            insert_start = time_mod.perf_counter()
             await _bulk_insert_links(conn, links, bank_id=bank_id, skip_exists_check=True, ops=ops)
-            logger.debug(f"      [10.1] Insert {len(links)} causal links: {time_mod.time() - insert_start:.3f}s")
+            logger.debug(
+                f"      [10.1] Insert {len(links)} causal links: {time_mod.perf_counter() - insert_start:.3f}s"
+            )
 
         return len(links)
 

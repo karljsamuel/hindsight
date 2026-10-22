@@ -9,7 +9,6 @@ All tests are marked @pytest.mark.oracle and require ORACLE_TEST_DSN.
 
 import logging
 import uuid
-from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -40,7 +39,7 @@ async def _safe_http_cleanup(client: httpx.AsyncClient, bank_id: str) -> None:
         logger.warning(f"HTTP cleanup failed for {bank_id} (benign in tests): {e!s:.120}")
 
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(scope="function", loop_scope="session")
 async def api_client(oracle_memory: MemoryEngine):
     """Create an async test client backed by Oracle."""
     app = create_app(oracle_memory, initialize_memory=False)
@@ -57,7 +56,7 @@ async def api_client(oracle_memory: MemoryEngine):
 class TestOracleHTTP:
     """HTTP API tests against Oracle backend."""
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_http_retain_recall_cycle(self, api_client: httpx.AsyncClient):
         bank_id = _bank_id("retcall")
         try:
@@ -69,6 +68,7 @@ class TestOracleHTTP:
                         {
                             "content": "HTTP Oracle test: Alice is a principal engineer.",
                             "context": "team",
+                            "document_id": "http-retain-recall-alice",
                         }
                     ]
                 },
@@ -89,7 +89,7 @@ class TestOracleHTTP:
         finally:
             await _safe_http_cleanup(api_client, bank_id)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_http_reflect(self, api_client: httpx.AsyncClient):
         bank_id = _bank_id("reflect")
         try:
@@ -100,6 +100,7 @@ class TestOracleHTTP:
                         {
                             "content": "The system uses Oracle 23ai for vector search.",
                             "context": "architecture",
+                            "document_id": "http-reflect-setup",
                         }
                     ]
                 },
@@ -115,16 +116,20 @@ class TestOracleHTTP:
         finally:
             await _safe_http_cleanup(api_client, bank_id)
 
-    @pytest.mark.asyncio
-    async def test_http_bank_crud(self, api_client: httpx.AsyncClient):
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_http_bank_crud(
+        self,
+        api_client: httpx.AsyncClient,
+        oracle_memory: MemoryEngine,
+        request_context,
+    ):
         bank_id = _bank_id("bankcrud")
         try:
-            # Ensure bank exists by retaining a memory
-            resp = await api_client.post(
-                f"/v1/default/banks/{bank_id}/memories",
-                json={"items": [{"content": "Bank setup.", "context": "test"}]},
-            )
-            assert resp.status_code == 200
+            # Bank CRUD is the subject of this test. Set up the bank directly so
+            # this fixture does not run a real LLM retain just to create one; the
+            # retain/HTTP path is covered by the dedicated retain-recall tests and
+            # the real-provider smoke test.
+            await oracle_memory.ensure_bank_profile(bank_id=bank_id, request_context=request_context)
 
             # Update bank via PATCH
             resp = await api_client.patch(
@@ -142,7 +147,7 @@ class TestOracleHTTP:
             # Cleanup in case of earlier failure
             await _safe_http_cleanup(api_client, bank_id)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_http_document_crud(self, api_client: httpx.AsyncClient):
         bank_id = _bank_id("doccrud")
         try:
@@ -182,14 +187,22 @@ class TestOracleHTTP:
         finally:
             await _safe_http_cleanup(api_client, bank_id)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_http_memory_crud(self, api_client: httpx.AsyncClient):
         bank_id = _bank_id("memcrud")
         try:
             # Retain
             resp = await api_client.post(
                 f"/v1/default/banks/{bank_id}/memories",
-                json={"items": [{"content": "Memory CRUD via HTTP on Oracle.", "context": "test"}]},
+                json={
+                    "items": [
+                        {
+                            "content": "Memory CRUD via HTTP on Oracle.",
+                            "context": "test",
+                            "document_id": "http-memory-crud",
+                        }
+                    ]
+                },
             )
             assert resp.status_code == 200
 
@@ -208,14 +221,22 @@ class TestOracleHTTP:
         finally:
             await _safe_http_cleanup(api_client, bank_id)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_http_mental_model_crud(self, api_client: httpx.AsyncClient):
         bank_id = _bank_id("mmhttp")
         try:
             # Ensure bank exists by retaining a memory
             await api_client.post(
                 f"/v1/default/banks/{bank_id}/memories",
-                json={"items": [{"content": "Bank setup for mental model test.", "context": "test"}]},
+                json={
+                    "items": [
+                        {
+                            "content": "Bank setup for mental model test.",
+                            "context": "test",
+                            "document_id": "http-mental-model-setup",
+                        }
+                    ]
+                },
             )
 
             resp = await api_client.post(
@@ -237,14 +258,22 @@ class TestOracleHTTP:
         finally:
             await _safe_http_cleanup(api_client, bank_id)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_http_directives(self, api_client: httpx.AsyncClient):
         bank_id = _bank_id("dirhttp")
         try:
             # Ensure bank exists by retaining a memory
             await api_client.post(
                 f"/v1/default/banks/{bank_id}/memories",
-                json={"items": [{"content": "Bank setup for directives test.", "context": "test"}]},
+                json={
+                    "items": [
+                        {
+                            "content": "Bank setup for directives test.",
+                            "context": "test",
+                            "document_id": "http-directives-setup",
+                        }
+                    ]
+                },
             )
 
             # Create directive — requires both name and content
@@ -270,7 +299,7 @@ class TestOracleHTTP:
         finally:
             await _safe_http_cleanup(api_client, bank_id)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_http_search_docs(self, api_client: httpx.AsyncClient):
         bank_id = _bank_id("searchdocs")
         try:
@@ -295,13 +324,17 @@ class TestOracleHTTP:
         finally:
             await _safe_http_cleanup(api_client, bank_id)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_http_operations(self, api_client: httpx.AsyncClient):
         bank_id = _bank_id("opshttp")
         try:
             await api_client.post(
                 f"/v1/default/banks/{bank_id}/memories",
-                json={"items": [{"content": "Operations tracking test.", "context": "test"}]},
+                json={
+                    "items": [
+                        {"content": "Operations tracking test.", "context": "test", "document_id": "http-operations"}
+                    ]
+                },
             )
             resp = await api_client.get(f"/v1/default/banks/{bank_id}/operations")
             assert resp.status_code == 200
@@ -311,7 +344,7 @@ class TestOracleHTTP:
         finally:
             await _safe_http_cleanup(api_client, bank_id)
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_http_tags(self, api_client: httpx.AsyncClient):
         bank_id = _bank_id("tagshttp")
         try:
@@ -324,6 +357,7 @@ class TestOracleHTTP:
                         {
                             "content": "Tagged content for HTTP test.",
                             "context": "test",
+                            "document_id": "http-tags",
                             "tags": ["http-tag", "oracle-tag"],
                         }
                     ],
@@ -361,7 +395,7 @@ class TestOracleEndToEnd:
     executed) because it checks final state, not just HTTP 200.
     """
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_full_lifecycle(self, api_client: httpx.AsyncClient):
         """Retain content, recall it, reflect on it, create + verify a mental model."""
         bank_id = _bank_id("e2e")
@@ -374,14 +408,17 @@ class TestOracleEndToEnd:
                         {
                             "content": "Alice is a backend engineer who specializes in Python and FastAPI.",
                             "context": "team overview",
+                            "document_id": "http-e2e-alice",
                         },
                         {
                             "content": "Bob is a frontend developer with expertise in React and TypeScript.",
                             "context": "team overview",
+                            "document_id": "http-e2e-bob",
                         },
                         {
                             "content": "The team uses PostgreSQL and Oracle 23ai for data storage.",
                             "context": "tech stack",
+                            "document_id": "http-e2e-stack",
                         },
                     ],
                     "document_tags": ["e2e-test"],

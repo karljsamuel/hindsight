@@ -327,6 +327,15 @@ def parse_delta_operation_list(raw: Any) -> DeltaOperationList:
         return raw
     if isinstance(raw, dict):
         return DeltaOperationList(operations=_validate_operations_list(raw.get("operations", [])))
+    # A bare array reaches here parsed for the same reason the dict above does: the
+    # delta call sets a ``response_format`` under ``skip_validation``, so the provider
+    # returns the JSON it parsed. It is the same delta as the text-form array (#3820).
+    if isinstance(raw, list):
+        return DeltaOperationList(operations=_validate_operations_list(raw))
+    if raw is not None and not isinstance(raw, str):
+        # A TypeError, not the AttributeError ``.strip()`` would raise, so the
+        # caller's ask-again path still applies.
+        raise TypeError(f"delta reply must be text, an object or an array, got {type(raw).__name__}")
 
     text = (raw or "").strip()
     if not text:
@@ -439,6 +448,33 @@ def _unreachable_correction_prompt(
     return "\n".join(lines)
 
 
+def _replayed_reply_text(content: Any) -> str:
+    """The refused reply as text, for the retry's assistant turn.
+
+    ``content`` is not necessarily the text the model wrote. A provider only
+    parses the body when the call set a ``response_format`` — a dict under
+    ``skip_validation``, the validated model otherwise — and the delta call site
+    sets one. Replaying that object unchanged put it in ``messages[N].content``,
+    which every strict request-body validator types as a string or a list of
+    content blocks, so the retry was refused with a 422 before it was ever sent;
+    the caller's own retry ladder then re-sent the identical body and the delta
+    was dropped under a refresh that reported success (#4965).
+
+    Serialized, not stringified, so the model reads back the document it wrote
+    rather than a repr of it; and passed through untouched when it already is
+    text, so a provider that returned text still sees the exact bytes it sent.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, BaseModel):
+        return content.model_dump_json()
+    if content is None:
+        return ""
+    if isinstance(content, (dict, list)):
+        return json.dumps(content, ensure_ascii=False)
+    return str(content)
+
+
 async def request_delta_operations(
     llm: ConfiguredLLMProvider,
     *,
@@ -467,7 +503,9 @@ async def request_delta_operations(
 
     The retry APPENDS to the first request and never rewrites it, so the system
     prompt and the whole document stay a byte-identical prefix and the provider's
-    prompt cache still covers them on the second call.
+    prompt cache still covers them on the second call. The one appended turn the
+    caller has to rebuild is the model's own reply, and it is rebuilt as text —
+    see ``_replayed_reply_text`` for why a parsed reply cannot be replayed as one.
 
     ``document``, when given, also refuses a reply that parses but cannot fully
     land: an operation names a section or block the document does not have — all
@@ -505,7 +543,7 @@ async def request_delta_operations(
         correction = _unreachable_correction_prompt(unreachable, document, any_applied=bool(outcome.applied))
     retry_messages = [
         *messages,
-        {"role": "assistant", "content": first.content or ""},
+        {"role": "assistant", "content": _replayed_reply_text(first.content)},
         {"role": "user", "content": correction},
     ]
     second = await llm.call(messages=retry_messages, scope=scope, **call_kwargs)

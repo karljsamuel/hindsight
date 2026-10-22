@@ -1,5 +1,8 @@
 """Tests for metrics instrumentation."""
 
+import itertools
+import time
+
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -11,7 +14,6 @@ from hindsight_api.metrics import (
     get_token_bucket,
     create_metrics_collector,
     initialize_metrics,
-    normalize_http_endpoint,
 )
 
 
@@ -103,6 +105,26 @@ class TestMetricsCollector:
         assert "bank_id" not in attributes  # excluded by default to avoid high-cardinality OTel growth
         assert attributes["source"] == "api"
         assert attributes["success"] == "true"
+
+    @pytest.fixture
+    def wall_clock_steps_back(self, monkeypatch):
+        """Each time.time() reading is a second earlier than the last, as across an NTP step back."""
+        readings = itertools.count(1_790_897_894.0, -1.0)
+        monkeypatch.setattr(time, "time", lambda: next(readings))
+
+    def test_operation_duration_stays_non_negative_when_the_wall_clock_steps_back(
+        self, collector, wall_clock_steps_back
+    ):
+        with collector.record_operation("recall", bank_id="test_bank", source="api"):
+            pass
+
+        assert collector.operation_duration.record.call_args[0][0] >= 0
+
+    def test_http_duration_stays_non_negative_when_the_wall_clock_steps_back(self, collector, wall_clock_steps_back):
+        with collector.record_http_request("POST", "/v1/default/banks/b/memories/recall", lambda: 200):
+            pass
+
+        assert collector.http_request_duration.record.call_args[0][0] >= 0
 
     def test_record_operation_records_failure_on_exception(self, collector):
         """Test that record_operation records failure when exception occurs."""
@@ -439,24 +461,6 @@ class TestGetTokenBucket:
         assert get_token_bucket(50000) == "50k+"
         assert get_token_bucket(100000) == "50k+"
         assert get_token_bucket(1000000) == "50k+"
-
-
-class TestNormalizeHttpEndpoint:
-    """Tests for normalize_http_endpoint (low-cardinality HTTP metric labels)."""
-
-    def test_templates_high_cardinality_segments(self):
-        """Bank ids (incl. non-numeric), UUIDs, and numeric ids collapse to placeholders."""
-        cases = [
-            ("/v1/default/banks/user-1680/memories/recall", "/v1/default/banks/{bank_id}/memories/recall"),
-            ("/v1/default/banks/tenant-acme/memories", "/v1/default/banks/{bank_id}/memories"),
-            ("/v1/default/banks/user-1680", "/v1/default/banks/{bank_id}"),
-            ("/v1/default/banks/3f8c1e2a-1111-2222-3333-444455556666/config", "/v1/default/banks/{bank_id}/config"),
-            ("/v1/default/banks/42/config", "/v1/default/banks/{bank_id}/config"),
-            ("/v1/default/banks", "/v1/default/banks"),
-            ("/health", "/health"),
-        ]
-        for raw, expected in cases:
-            assert normalize_http_endpoint(raw) == expected, raw
 
 
 class TestLLMMetrics:

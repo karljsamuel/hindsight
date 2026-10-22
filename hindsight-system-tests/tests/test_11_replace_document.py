@@ -29,6 +29,7 @@ TRIMMED = "Alice plays cello."
 BERLIN = "Alice moved to Berlin | Involving: Alice"
 LISBON = "Alice moved to Lisbon | Involving: Alice"
 CELLO = "Alice plays cello | Involving: Alice"
+PYTHON = "Bob loves Python | Involving: Bob"
 
 
 async def _fact_texts(client, bank: str) -> list[str]:
@@ -106,3 +107,58 @@ async def test_replacing_does_not_multiply_the_document(client, bank_id, retaine
     listing = await client.documents.list_documents(bank_id)
     assert listing.total == 1
     assert listing.items[0].id == DOCUMENT_ID
+
+
+async def test_replacing_leaves_alone_an_item_retained_beside_it_without_an_id(client, llm, bank_id, settled):
+    """An item sent in the same request as the document, but with no `document_id`
+    of its own, is its own document — not a silent part of this one (#4931).
+
+    It used to be folded into the one id the request carried, so replacing that
+    document deleted its facts too. Nothing in the retain response said so: the
+    loss only showed up on the replace, a step later.
+    """
+    llm.on_step("extract_facts", contains="Berlin").returns(
+        extracted(fact("Alice moved to Berlin", who="Alice", entities=["Alice", "Berlin"]))
+    )
+    llm.on_step("extract_facts", contains="Lisbon").returns(
+        extracted(fact("Alice moved to Lisbon", who="Alice", entities=["Alice", "Lisbon"]))
+    )
+    llm.on_step("extract_facts", contains="Python").returns(
+        extracted(fact("Bob loves Python", who="Bob", entities=["Bob", "Python"]))
+    )
+    llm.on_step("consolidate").returns(consolidation())
+
+    await client.aretain_batch(
+        bank_id=bank_id,
+        items=[{"content": "Alice moved to Berlin.", "document_id": DOCUMENT_ID}, {"content": "Bob loves Python."}],
+    )
+    await settled(bank_id)
+
+    listing = await client.documents.list_documents(bank_id)
+    assert listing.total == 2
+
+    await client.aretain(bank_id=bank_id, content="Alice moved to Lisbon.", document_id=DOCUMENT_ID)
+    await settled(bank_id)
+
+    assert await _fact_texts(client, bank_id) == sorted([LISBON, PYTHON])
+
+
+async def test_re_sending_the_same_document_edits_no_fact(client, bank_id, retained):
+    """An unchanged re-send — same text, same tags — is a no-op on every fact (#5614).
+
+    A fact's `updated_at` is the "this fact was edited" signal: consolidation throws
+    away an in-flight batch whose source facts moved after it read them. Sync jobs
+    re-push whole documents unchanged, so a re-send that touched every fact kept
+    discarding consolidation work on that document, while the facts looked the same.
+    """
+
+    async def _written_at() -> dict[str, str | None]:
+        memories = await client.memory.list_memories(bank_id, limit=100)
+        return {item.id: item.updated_at for item in memories.items if item.fact_type != "observation"}
+
+    before = await _written_at()
+    assert len(before) == 2
+
+    await retained(ORIGINAL)
+
+    assert await _written_at() == before

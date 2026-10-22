@@ -2,7 +2,7 @@
 
 Long-term project memory for **coding agents**, backed by [Hindsight](https://vectorize.io/hindsight).
 One package, several agents: a shared reflect-and-inject core with a thin entry point per agent
-(**Claude Code**, **Codex CLI**, **DeepAgents Dcode**, **opencode**, **opencode 2**, **Kilo CLI**, **Cursor CLI**, **GitHub Copilot CLI**, **Grok Build**, **Qwen Code**, **Kimi Code**, **Factory Droid**, **ZCode**, **TraeCode**, **Antigravity CLI**, **Devin CLI**, **Cline CLI**, **pi**, **Prime Agent**, **DeepSeek Harness**). Ingestion is fully
+(**Claude Code**, **Codex CLI**, **DeepAgents Dcode**, **opencode**, **opencode 2**, **Kilo CLI**, **Cursor CLI**, **GitHub Copilot CLI**, **Grok Build**, **Qwen Code**, **Kimi Code**, **Factory Droid**, **ZCode**, **TraeCode**, **Antigravity CLI**, **Devin CLI**, **Cline CLI**, **pi**, **Prime Agent**, **DeepSeek Harness**, **WorkBuddy**, **CodeBuddy**). Ingestion is fully
 automatic — there is no setup command: a repo's git history and conversations flow into its memory
 bank in the background as you work.
 
@@ -15,6 +15,33 @@ in front of the agent at the moment it starts working, and keeps a curated set o
 <!-- figure: coding-agents -->
 
 [View Changelog →](https://hindsight.vectorize.io/changelog/integrations/coding-agents)
+
+## Does it work?
+
+[AMB's sdebench](https://agentmemorybenchmark.ai/dataset/sdebench) is the measurement: a coding
+agent over 61 real repository tasks, three runs each, with and without memory.
+
+Accuracy is not what moves — every run solves 60–61 of the 61 either way. These are tasks a good
+agent can already do. What memory changes is how much it costs you to get there: how often you have
+to stop and correct the agent, and what the tokens cost.
+
+<!-- figure: coding-agents-benchmark -->
+
+| Agent       | Corrections / task | Cost / task         |
+| ----------- | ------------------ | ------------------- |
+| Claude Code | 0.85 → **0.36**    | $0.445 → **$0.338** |
+| Codex CLI   | 1.34 → **0.47**    | $0.577 → **$0.276** |
+| opencode    | 1.20 → **0.80**    | $0.634 → **$0.553** |
+
+No memory → with Hindsight, mean of 3 runs. Corrections reproduce the labels AMB prints on its own
+chart; cost is derived from the same per-run table.
+
+Both numbers move together, and that is the mechanism rather than a coincidence. A correction is a
+round trip: the agent guesses a project-specific decision wrong, you stop it, you explain, it redoes
+the work. Every one of those costs a turn of tokens and a turn of your attention. Handing the agent
+the decision _before_ it starts — the rounding rule, the retry allowlist, the tie-break policy that
+was settled in a commit message or a conversation months ago — removes the guess, and the round trip
+with it.
 
 ## Install
 
@@ -145,7 +172,9 @@ npx @vectorize-io/hindsight-coding-agents install grok-build
 
 Native hooks in `~/.grok/hooks/hindsight.json`, MCP in `~/.grok/config.toml`, plus the companion
 skill. Grok also runs Claude Code's hooks from `~/.claude/settings.json`; those stay silent inside
-Grok, so a machine wired for both hosts records each Grok session once.
+Grok, so a machine wired for both hosts records each Grok session once. Grok passes hook context to
+the model only from tool hooks, so the session and prompt context arrive with the result of the
+agent's first tool call after each prompt (a `PostToolUse` hook).
 
 #### <img src="https://hindsight.vectorize.io/img/harness/qwen-code.svg" alt="" width="20" height="20" /> Qwen Code
 
@@ -333,6 +362,38 @@ published-package route, `dsh plugin --profile web add @vectorize-io/hindsight-c
 too: the package ships the profile patch layer, so nothing else needs editing. Either route gets the
 companion skill — a plugin wired by the host's own plugin manager installs it itself on the first
 session, since that route never runs our installer.
+
+#### <img src="https://hindsight.vectorize.io/img/harness/workbuddy.png" alt="" width="20" height="20" /> WorkBuddy
+
+```bash
+npx @vectorize-io/hindsight-coding-agents install workbuddy
+```
+
+3 hooks in `~/.workbuddy/settings.json`, the stdio MCP server in `~/.workbuddy/mcp.json`, and the
+companion skill in `~/.workbuddy/skills`. WorkBuddy (Tencent's AI workbench) is built on the shared
+`@genie/agent-cli` engine, so its hooks follow Claude Code's protocol — the main difference is the
+transcript schema (`type:"message"` records carrying top-level `role`/`content`), which the
+package's own reader normalizes.
+
+#### <img src="https://hindsight.vectorize.io/img/harness/codebuddy.png" alt="" width="20" height="20" /> CodeBuddy
+
+```bash
+npx @vectorize-io/hindsight-coding-agents install codebuddy
+```
+
+3 hooks in `~/.codebuddy/settings.json`, the stdio MCP server in `~/.codebuddy/.mcp.json` — the
+recommended file: the installer follows CodeBuddy's documented fallback chain, merging into an
+existing deprecated `~/.codebuddy/mcp.json` or legacy `~/.codebuddy.json` rather than shadowing it —
+and the companion skill in `~/.codebuddy/skills`. CodeBuddy Code runs the same `@genie/agent-cli`
+engine as WorkBuddy — WorkBuddy merely ships it with a different home folder — so it reuses
+WorkBuddy's hook runtime, and differs only in the root it writes to.
+
+**Both CodeBuddy hosts are covered, and they do not store sessions alike.** CodeBuddy Code (the CLI)
+writes the WorkBuddy JSONL that the shared reader parses. The IDE hands the Stop hook its own
+per-conversation directory instead — `CodeBuddyIDE/<uid>/history/<md5(workspace)>/<conversationId>/`,
+whose `index.json` _is_ the `transcript_path` and whose prose sits one level down, in
+`messages/<messageId>.json` — so the reader dispatches on the shape it was handed
+(core/transcript-codebuddy-ide.ts).
 
 Uninstall the same way: `npx @vectorize-io/hindsight-coding-agents uninstall claude-code` (or `uninstall all`).
 
@@ -603,12 +664,12 @@ hook by Codex...), so one shared config serves several agents side by side:
 | `reflectToolTimeoutMs`  | `330000`                             | timeout for the agent-invoked `hindsight_reflect` tool — a call the agent waits on, whose high-budget synthesis on a populated bank runs for minutes. Defaults above the server's own reflect wall timeout (`HINDSIGHT_API_REFLECT_WALL_TIMEOUT`, 300s) so the server decides when to give up. Unset, it inherits an explicitly raised `reflectTimeoutMs`, but a short one never lowers it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `injectTimeoutMs`       | `7000`                               | retrieval timeout in milliseconds for `autoInject: "pages"` and `autoInject: "recall"`; also the **shared** budget for page search then recall after a reflect timeout/5xx (recall gets only the time left after page search). Set e.g. `2000` to limit turn latency or `15000` for a slower self-hosted bank. Environment fallback: `HINDSIGHT_INJECT_TIMEOUT_MS`. On hook harnesses, injection must fit the host's prompt-hook timeout (30s by default); for reflect with fallback, allow for **`reflectTimeoutMs` + `injectTimeoutMs`**, and raise the host hook's `timeout` when needed                                                                                                                                                                                                                                                                                                                     |
 | `reflectBudget`         | `"high"`                             | reflect budget for the `hindsight_reflect` tool: `"low"`, `"mid"` or `"high"`. Drop it on a large bank where high-budget synthesis exceeds the server's wall timeout. The automatic session-start reflect always uses `"low"` to fit its hook window and is unaffected                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `autoInject`            | `"reflect"`                          | what to inject once, on the session's **first prompt**: `"reflect"` = a low-budget reflect synthesis (on timeout/5xx it falls back to page search, then recall); `"pages"` = the knowledge pages matching the prompt by search; `"recall"` = the bank's memories recalled for the prompt (what it asks for is `recallOptions`, observations by default); `"none"` = nothing — the agent searches knowledge pages first and reflects only when they are too shallow. `"pages"` and `"recall"` are retrieval only (no LLM), their time budget is `injectTimeoutMs`                                                                                                                                                                                                                                                                                                                                                |
+| `autoInject`            | `"reflect"`                          | what to inject once, on the session's **first prompt**: `"reflect"` = a low-budget reflect synthesis (on timeout/5xx it falls back to page search, then recall); `"pages"` = the knowledge pages matching the prompt by search; `"recall"` = the bank's memories recalled for the prompt (what it asks for is `recallOptions`, observations by default); `"none"` = nothing — the agent searches knowledge pages first and reflects only when they are too shallow. `"pages"` and `"recall"` are retrieval only (no LLM), their time budget is `injectTimeoutMs`, and when one finds nothing for the prompt it tries again on the next one, up to 5 prompts                                                                                                                                                                                                                                                     |
 | `autoReflect`           | `true`                               | **deprecated** — use `autoInject`. Still honoured (`false` = `autoInject: "none"`), ignored when `autoInject` is set, and logs a deprecation warning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `pageSearchLimit`       | `3`                                  | knowledge pages ONE search returns. Applies to every search of the bank — the `autoInject: "pages"` injection, the reflect fallback, and the agent's own `hindsight_search_knowledge_pages` tool — because the limit lives on the client they all share                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `recallOptions`         | see description                      | overrides merged key-by-key into the body of every recall — the `autoInject: "recall"` source and the reflect fallback. Keys are the API's own recall parameters, passed straight through, so anything recall accepts is settable without a new option here; `query` is the one field it cannot replace. The default body is `{"types": ["observation"], "budget": "low", "max_tokens": 2000, "include": {"entities": null}}`, and what you set is merged over it one key at a time — `{"max_tokens": 4000}` changes the budget and leaves the rest alone. Observations are the consolidated layer, so they answer best per token, but a bank with **consolidation disabled never grows any** and the default recall comes back empty on it: set `{"types": ["world", "experience"]}` there, or `{"types": null}` for every type. File-only, like `retainMetadata` — an object does not flatten into an env var |
 | `toolGuideExtra`        | —                                    | your own guidance on how the agent should treat memory, added **after** the built-in tool guide (at session start and on every refresh) and after the crediting note returned with `hindsight_search_knowledge_pages` results. It adds to the built-in text, never replaces it. Set it per harness or per bank like any other key, e.g. `"Memory is a past record, not current state: verify any claim against the code before acting on it."`                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `pageRefreshEveryTurns` | `10`                                 | refetch the knowledge pages and re-inject the page roster + tool guide every N user turns                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `pageRefreshEveryTurns` | `1`                                  | refetch the knowledge pages and re-inject the page roster + tool guide every N user turns (`0` also means 1)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `pageTriggerType`       | `"cron"`                             | when NEW knowledge pages refresh, i.e. what keeping them current costs — `"cron"` (default) on `pageTriggerCron` only and only when actually stale, `"auto-refresh"` after every consolidation that produced new material, `"manual"` never on their own. Auto-refresh is the most current and by far the most expensive: one synthesis per page per consolidation. Maps to the page's `trigger.refresh_cron`, or `trigger.refresh_after_consolidation` in the Hindsight API (`true` for auto-refresh, `false` for manual)                                                                                                                                                                                                                                                                                                                                                                                      |
 | `pageTriggerCron`       | `"H * * * *"`                        | schedule for `pageTriggerType: "cron"` — UTC, standard 5-field cron, e.g. `"0 3 * * *"`. The default is hourly, each page on its own hashed minute. Sets the page's `trigger.refresh_cron`, which the API treats as mutually exclusive with `refresh_after_consolidation`; a scheduled refresh is skipped when nothing changed. Write a field as `H` to give each page its own value there — see **Spreading refreshes with `H`** below                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `pages`                 | every page                           | per-page configuration for the seeded knowledge pages, keyed by page name (case-insensitive): `false` skips a page entirely, `{"source_query": "..."}` seeds it with your question instead of the built-in one. Omitted, all five pages are seeded with their built-in queries. This is the supported way to own a page's wording — the plugin re-syncs a page whose live query differs from the one it is configured to have, so a query edited through the API or the control plane is replaced on the next session. A skipped page is **not deleted**: one already seeded keeps its content and stops being re-synced. The scoping clause is appended to your query too, so a reworded page cannot start reporting a dependency's decisions as this project's. File-only, like `recallOptions`; in a `banks.<id>` section it replaces the global map rather than merging into it                             |
@@ -1121,8 +1182,8 @@ event is written on those turns — nothing reflected.
 `~/.hindsight/coding-agents-logs/usage.jsonl` (override `HINDSIGHT_USAGE_FILE`) — the `hindsight_*`
 tools the agent called during that turn, and whether its reply credited Hindsight memory ("From
 Hindsight memory"). The credit rate counts only turns that called a retrieval tool (search, list,
-read, reflect); saving a document is not expected to be credited. Recorded when the session is written back, so a scope with
-`retainSessions: false` records none. It never leaves your machine. Summarize it per agent with:
+read, reflect); saving a document is not expected to be credited. Recorded at the end of each turn,
+whether or not `retainSessions` writes the session back. It never leaves your machine. Summarize it per agent with:
 
 ```bash
 npx @vectorize-io/hindsight-coding-agents stats

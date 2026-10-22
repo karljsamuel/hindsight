@@ -4,6 +4,7 @@ Each case here was a live defect: either invalid SQL reaching Oracle, or a
 silently wrong answer with no error raised. They are asserted at the rewriter
 level because that is where the defect lives and where a fix is falsifiable.
 """
+
 import pytest
 
 from hindsight_api.engine.db import oracle as ora
@@ -39,8 +40,16 @@ def test_date_trunc_keeps_literal_out_of_output():
 
 @pytest.mark.parametrize(
     "interval,fmt",
-    [("year", "YYYY"), ("quarter", "Q"), ("month", "MM"), ("week", "IW"),
-     ("day", "DD"), ("hour", "HH24"), ("minute", "MI"), ("second", "SS")],
+    [
+        ("year", "YYYY"),
+        ("quarter", "Q"),
+        ("month", "MM"),
+        ("week", "IW"),
+        ("day", "DD"),
+        ("hour", "HH24"),
+        ("minute", "MI"),
+        ("second", "SS"),
+    ],
 )
 def test_date_trunc_interval_maps_to_its_own_bucket(interval, fmt):
     out = rw(f"SELECT date_trunc('{interval}', c) FROM t")
@@ -99,10 +108,7 @@ def test_multiple_returning_columns_get_one_bind_each():
 
 
 def test_for_update_uses_fetch_first_not_rownum():
-    out = rw(
-        "SELECT o.id FROM ops o WHERE o.status='pending' "
-        "ORDER BY o.created_at LIMIT $1 FOR UPDATE SKIP LOCKED"
-    )
+    out = rw("SELECT o.id FROM ops o WHERE o.status='pending' ORDER BY o.created_at LIMIT $1 FOR UPDATE SKIP LOCKED")
     assert "ROWNUM" not in out
     assert "ORDER BY o.created_at FETCH FIRST :1 ROWS ONLY FOR UPDATE SKIP LOCKED" in out
 
@@ -114,8 +120,7 @@ def test_for_update_preserves_order_by_before_fetch():
 
 def test_limit_with_offset_and_for_update():
     out = rw("SELECT id FROM t ORDER BY c LIMIT 10 OFFSET 20 FOR UPDATE")
-    assert "OFFSET :2 ROWS FETCH FIRST :1 ROWS ONLY" in out or \
-           "OFFSET 20 ROWS FETCH FIRST 10 ROWS ONLY" in out
+    assert "OFFSET :2 ROWS FETCH FIRST :1 ROWS ONLY" in out or "OFFSET 20 ROWS FETCH FIRST 10 ROWS ONLY" in out
     assert "ROWNUM" not in out
 
 

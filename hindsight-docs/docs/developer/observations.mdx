@@ -6,14 +6,14 @@ import CodeSnippet from '@site/src/components/CodeSnippet';
 import recallPy from '!!raw-loader!@site/examples/api/recall.py';
 import memoryBanksPy from '!!raw-loader!@site/examples/api/memory-banks.py';
 import observationsPy from '!!raw-loader!@site/examples/api/observations.py';
-import {Flow} from '@vectorize-io/interfig';
-import observationsFigure from '@vectorize-io/interfig/figures/observations';
+import Figure from '@site/src/components/Figure';
+import observationsFigure from '@site/figures/observations.json';
 
 # Observations: Knowledge Consolidation
 
 After memories are retained, Hindsight automatically consolidates related facts into **observations** — deduplicated, evidence-grounded beliefs the bank has built up from multiple memories. Each observation tracks its supporting evidence (with exact quotes) and a proof count, and is refined rather than overwritten when new evidence arrives.
 
-<Flow {...observationsFigure.props} />
+<Figure doc={observationsFigure} />
 
 ---
 
@@ -161,6 +161,19 @@ By default, observations are scoped to all of a memory's tags combined. The `obs
 See [`observation_scopes` in the Retain API](./api/retain#observation_scopes) for the full explanation and options.
 
 To inspect the scopes that already exist in a bank, call `GET /v1/default/banks/{bank_id}/observations/scopes`. The response lists each exact tag set with its observation count; the empty tag list is the global scope. The listing is paged (`limit`, default 100, and `offset`), with `total` reporting how many distinct scopes the bank holds. Use a returned scope as `tags` with `tags_match: "exact"` when you need to filter to that precise observation scope without also matching observations that carry extra tags. To recall **only** the global scope — the untagged observations written by `observation_scopes: "shared"` — pass an empty list with exact matching: `tags: []`, `tags_match: "exact"`.
+
+### Changing the Scopes of Existing Documents {#changing-scopes}
+
+The scoping is stored on each memory when it is retained. To move documents that are already in the bank, for example a bank retained with per-session tags under the default `combined` scoping that should now consolidate across sessions, send the new value on the document:
+
+<CodeSnippet code={observationsPy} section="change-document-scopes" language="python" />
+
+It takes the same values as retain (`"combined"` returns to the default). Nothing is re-extracted, and the memories keep their tags. A memory is consolidated again only if the change moves the scopes it resolves to. In that case its observations are deleted and rebuilt in the new scope by the next consolidation, and so are observations that other documents' memories shared with it. A change that resolves to the same scopes deletes nothing and queues nothing. Examples: `combined` over a single tag versus `[["that-tag"]]`, or re-sending the current value. The new value is also saved on the document, so a later reprocess keeps it.
+
+To move a whole bank, list its documents (filtering by tag if needed) and send one PATCH per document. Two things to know first:
+
+- **Update the client first.** A retain that appends to a document sends its own `observation_scopes`. If your client still retains without the new value, the next append moves that document back.
+- **Expect a rebuild.** Every moved memory loses its observations until consolidation runs again. On a large bank that is one LLM pass over most of its facts, and recall returns fewer observations meanwhile. Mental models citing the deleted observations refresh as usual. Moving documents in batches spreads the cost.
 
 ---
 

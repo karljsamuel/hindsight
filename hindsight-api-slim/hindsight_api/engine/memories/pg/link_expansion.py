@@ -163,7 +163,7 @@ class LinkExpansionRetriever(GraphRetriever):
         Returns:
             Tuple of (results, timings)
         """
-        start_time = time.time()
+        start_time = time.perf_counter()
         timings = GraphRetrievalTimings(fact_type=fact_type)
 
         async with acquire_with_retry(pool) as conn:
@@ -171,7 +171,7 @@ class LinkExpansionRetriever(GraphRetriever):
                 # A shared semantic pool is reusable only when its SQL threshold
                 # covers the independently configured graph threshold. Otherwise
                 # retain graph retrieval's own query and result semantics.
-                seeds_start = time.time()
+                seeds_start = time.perf_counter()
                 all_seeds = await _find_semantic_seeds(
                     conn,
                     query_embedding_str,
@@ -185,7 +185,7 @@ class LinkExpansionRetriever(GraphRetriever):
                     created_after=created_after,
                     created_before=created_before,
                 )
-                timings.seeds_time = time.time() - seeds_start
+                timings.seeds_time = time.perf_counter() - seeds_start
             else:
                 all_seeds = preselected_semantic_seeds
 
@@ -203,7 +203,7 @@ class LinkExpansionRetriever(GraphRetriever):
             seed_ids = list({s.id for s in all_seeds})
             timings.pattern_count = len(seed_ids)
 
-            query_start = time.time()
+            query_start = time.perf_counter()
 
             ops = pool.ops
             if fact_type == "observation":
@@ -226,7 +226,7 @@ class LinkExpansionRetriever(GraphRetriever):
                     created_before=created_before,
                 )
 
-            timings.edge_load_time = time.time() - query_start
+            timings.edge_load_time = time.perf_counter() - query_start
             timings.db_queries = 1
             timings.edge_count = len(expanded.entity) + len(expanded.semantic) + len(expanded.causal)
 
@@ -287,7 +287,7 @@ class LinkExpansionRetriever(GraphRetriever):
             results = filter_results_by_tag_groups(results, tag_groups)
 
         timings.result_count = len(results)
-        timings.traverse = time.time() - start_time
+        timings.traverse = time.perf_counter() - start_time
 
         logger.debug(
             f"LinkExpansion: {len(results)} results from {len(seed_ids)} seeds "
@@ -419,13 +419,26 @@ class LinkExpansionRetriever(GraphRetriever):
         # junction table with standard SQL joins (previously PG used native array
         # ops and Oracle used JSON_TABLE).
         # $1 seeds, $2 budget — the window binds after them.
-        return await ops.expand_observations(
-            conn,
-            mu,
-            ue,
-            ml,
-            seed_ids,
-            budget,
-            per_entity_limit,
-            UpdatedWindow(after=created_after, before=created_before, first_param_index=3),
-        )
+        # Same deadline as _expand_combined (#4529): the three arms are fused into
+        # one query, so there is no cheaper fallback — the graph arm yields nothing
+        # and recall continues on its other strategies.
+        try:
+            return await asyncio.wait_for(
+                ops.expand_observations(
+                    conn,
+                    mu,
+                    ue,
+                    ml,
+                    seed_ids,
+                    budget,
+                    per_entity_limit,
+                    UpdatedWindow(after=created_after, before=created_before, first_param_index=3),
+                ),
+                timeout=config.link_expansion_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[LinkExpansion] Observation expansion timed out after {config.link_expansion_timeout}s, "
+                "skipping graph results for fact_type=observation"
+            )
+            return LinkExpansionRows(entity=[], semantic=[], causal=[])

@@ -18,7 +18,8 @@ from typing import Any
 from ...db.ops import nullable_year1_timestamp_sql
 from ...search.tags import TagsMatch, build_tag_filter_clause, tag_filter_active
 from ..base import BankContentCounts, MemoryLocation, StoredMemory, TypedMemoryScope
-from .curation import visible_entity_stats_sql
+from .curation import visible_entity_mentions_sql, visible_entity_stats_sql
+from .graph import _ops_for
 
 # Ids per DELETE in the bulk delete, so one statement's parameter array stays bounded.
 _DELETE_CHUNK_SIZE = 10_000
@@ -306,7 +307,8 @@ async def _tag_filtered_entity_graph_edges(
     bank's postings, which is why only a tag-filtered read pays it.
 
     The tag clause filters an unaliased subquery for the reason given on
-    :func:`visible_entity_stats_sql` (the Oracle rewriter needs a bare column).
+    :func:`visible_entity_mentions_sql` (the Oracle rewriter needs a bare column),
+    which is also where an observation inherits its sources' entities.
     """
     built = build_tag_filter_clause(tags, tags_match, tag_groups, param_offset=2)
     params: list[Any] = [bank_id, *built.params, min_count, limit]
@@ -314,15 +316,7 @@ async def _tag_filtered_entity_graph_edges(
     limit_param = len(params)
     return await conn.fetch(
         f"""
-        WITH ve AS (
-            SELECT ue.unit_id, ue.entity_id, vu.seen_at
-            FROM {fq_table("unit_entities")} ue
-            JOIN (
-                SELECT id, COALESCE(occurred_start, mentioned_at, event_date) AS seen_at
-                FROM {fq_table("memory_units")}
-                WHERE bank_id = $1 {built.sql}
-            ) vu ON vu.id = ue.unit_id
-        ),
+        WITH ve AS ({visible_entity_mentions_sql(fq_table, _ops_for(conn), built.sql)}),
         pairs AS (
             -- One row per unordered pair, smaller id first, like the materialized table.
             SELECT a.entity_id AS entity_id_1,
@@ -394,7 +388,7 @@ async def entity_graph(
         SELECT ec.entity_id_1,
                ec.entity_id_2,
                ec.cooccurrence_count,
-               {nullable_year1_timestamp_sql('ec.last_cooccurred')} AS last_cooccurred,
+               {nullable_year1_timestamp_sql("ec.last_cooccurred")} AS last_cooccurred,
                e1.canonical_name AS name_1,
                e1.mention_count  AS mention_count_1,
                e2.canonical_name AS name_2,
@@ -498,11 +492,11 @@ async def get_entity_detail(
         entity_row = await conn.fetchrow(
             f"""
             SELECT e.id, e.canonical_name, s.mention_count,
-                   {nullable_year1_timestamp_sql('s.first_seen')} AS first_seen,
-                   {nullable_year1_timestamp_sql('s.last_seen')} AS last_seen,
+                   {nullable_year1_timestamp_sql("s.first_seen")} AS first_seen,
+                   {nullable_year1_timestamp_sql("s.last_seen")} AS last_seen,
                    e.metadata
             FROM {fq_table("entities")} e
-            JOIN ({visible_entity_stats_sql(fq_table, built.sql)}) s ON s.entity_id = e.id
+            JOIN ({visible_entity_stats_sql(fq_table, _ops_for(conn), built.sql)}) s ON s.entity_id = e.id
             WHERE e.bank_id = $1 AND e.id = ${len(built.params) + 2}
             """,
             bank_id,
@@ -513,8 +507,8 @@ async def get_entity_detail(
         entity_row = await conn.fetchrow(
             f"""
             SELECT id, canonical_name, mention_count,
-                   {nullable_year1_timestamp_sql('first_seen')} AS first_seen,
-                   {nullable_year1_timestamp_sql('last_seen')} AS last_seen,
+                   {nullable_year1_timestamp_sql("first_seen")} AS first_seen,
+                   {nullable_year1_timestamp_sql("last_seen")} AS last_seen,
                    metadata
             FROM {fq_table("entities")}
             WHERE bank_id = $1 AND id = $2

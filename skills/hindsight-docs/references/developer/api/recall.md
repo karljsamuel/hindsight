@@ -190,7 +190,7 @@ Observations are deduplicated, evidence-grounded beliefs consolidated from multi
 
 Because observations are consolidated from raw facts, recalling `observation` alongside `world` and `experience` can return the same information twice — once as the raw fact and once folded into an observation. With `prefer_observations` you get the best of both: you still recall every type, but whenever an observation in the results was built from a raw fact, that raw fact is dropped so the observation supersedes it. The freed slots are backfilled with the next-best results, so you don't lose coverage.
 
-This lets you ask for everything without choosing between "raw facts only" (no consolidation) and "observations only" (which may lag behind the latest retains while consolidation catches up). **Disabled by default** — set it to `true` to opt in. It has no effect unless both `observation` and at least one of `world`/`experience` are included in `types`.
+This lets you ask for everything without choosing between "raw facts only" (no consolidation) and "observations only" (which may lag behind the latest retains while consolidation catches up). Off unless the request or the bank turns it on. When a request leaves it out, the bank's `recall_prefer_observations` config decides (env `HINDSIGHT_API_RECALL_PREFER_OBSERVATIONS`, `false` unless configured), so a deployment can turn it on for clients that never pass it, such as MCP connectors. It has no effect unless both `observation` and at least one of `world`/`experience` are included in `types`.
 
 ### budget
 
@@ -796,6 +796,8 @@ Because freed slots are **not** backfilled, any floor can return fewer results t
 
 **Use floors with care.** The reranker's scores are reliable for *ordering* but not as *absolute* values — a clearly-relevant memory can score `~0.001` on one query and `~1.0` on another, so a fixed cutoff risks silently dropping good results. Calibrate any threshold against the scores you actually observe (recall with no `min_scores` first and inspect the [`scores`](#scores) object). See the note under [`scores`](#scores) on why the scale is relative, not absolute, before relying on a fixed threshold.
 
+**Not available with the TypeSafe reranker.** TypeSafe ranks the whole pool at once and returns each memory's rank position, not a relevance score: the top memory is `1.0` on every query, so a `reranker` floor would only keep a fixed share of the results. Recall rejects `min_scores.reranker` with HTTP 400 when TypeSafe is the configured reranker (and skips the floor if a failover chain falls back to it). Use `final` instead.
+
 ---
 
 ## Response
@@ -861,7 +863,7 @@ For `observation`-type results only: the IDs of the original facts this observat
 An object of the per-stage scores for this result. `null` for `source_facts` entries, which are attached by provenance rather than ranked. Fields:
 
 - **`final`** — the score this fact was ranked by (cross-encoder relevance × recency/temporal/evidence boosts). `results` is ordered by it descending. A relative signal, not a calibrated probability (see the note above).
-- **`reranker`** — the cross-encoder's normalized relevance (`0`–`1`). `null` when the deployment uses a passthrough reranker (RRF/interleave modes).
+- **`reranker`** — the cross-encoder's normalized relevance (`0`–`1`). `null` when the deployment uses a passthrough reranker (RRF/interleave modes), or a reranker that returns rank positions instead of scores (TypeSafe).
 - **`semantic`** — the raw vector cosine similarity (`0`–`1`). `null` if this result was not surfaced by semantic search.
 - **`keyword`** — the raw keyword/full-text (BM25) score (`≥ 0`, unbounded). `null` if this result was not surfaced by keyword search.
 

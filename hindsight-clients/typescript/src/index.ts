@@ -162,10 +162,12 @@ export interface HindsightClientOptions {
    */
   apiKey?: string;
   /**
-   * Override the default `User-Agent` header. Integrations should set this to
-   * identify themselves (e.g. `"hindsight-ai-sdk/1.2.0"`). Browsers ignore
-   * attempts to set `User-Agent`; this only takes effect in Node.js / Bun /
-   * Deno runtimes. Defaults to `hindsight-client-typescript/<version>`.
+   * Product token placed in front of the client's own in the `User-Agent`
+   * header. Integrations should set this to identify themselves (e.g.
+   * `"hindsight-ai-sdk/1.2.0"` is sent as
+   * `"hindsight-ai-sdk/1.2.0 hindsight-client-typescript/<version>"`). Browsers
+   * ignore attempts to set `User-Agent`; this only takes effect in Node.js /
+   * Bun / Deno runtimes. Defaults to `hindsight-client-typescript/<version>`.
    */
   userAgent?: string;
   /** Optional headers sent with every request. */
@@ -345,7 +347,11 @@ export class HindsightClient {
   constructor(options: HindsightClientOptions) {
     const headers: Record<string, string> = {
       ...options.headers,
-      "User-Agent": options.userAgent ?? DEFAULT_USER_AGENT,
+      // Prefix rather than replace, so the server still learns the client version behind an
+      // integration. Before, a caller's value replaced the default and the version was lost.
+      "User-Agent": options.userAgent
+        ? `${options.userAgent} ${DEFAULT_USER_AGENT}`
+        : DEFAULT_USER_AGENT,
     };
     if (options.apiKey) {
       headers.Authorization = `Bearer ${options.apiKey}`;
@@ -557,7 +563,7 @@ export class HindsightClient {
     query: string,
     options?: {
       types?: string[];
-      /** When recalling raw facts ('world'/'experience') together with 'observation', drop any raw fact a returned observation was consolidated from, so the observation supersedes it (no duplicate content). Disabled by default; no effect unless 'observation' and at least one raw type are both in types. */
+      /** When recalling raw facts ('world'/'experience') together with 'observation', drop any raw fact a returned observation was consolidated from, so the observation supersedes it (no duplicate content). No effect unless 'observation' and at least one raw type are both in types. Omitted: the bank's recall_prefer_observations config decides (false unless configured). */
       preferObservations?: boolean;
       maxTokens?: number;
       budget?: Budget;
@@ -955,6 +961,8 @@ export class HindsightClient {
       consolidationStrategies?: Record<string, unknown>[];
       /** Consolidate automatically after retain() rather than on demand. */
       enableAutoConsolidation?: boolean;
+      /** When the server has a decision model, let it settle restatements, new facts and chatter before the consolidation LLM call. */
+      consolidationUseDecisionModel?: boolean;
       /** Number of LLM calls to batch during consolidation. */
       consolidationLlmBatchSize?: number;
       /** Concurrent LLM calls during consolidation. */
@@ -971,12 +979,18 @@ export class HindsightClient {
       knowledgePageDefaultTrigger?: Record<string, unknown>;
       /** Default reflect options for this bank, applied whenever a reflect request (or a mental model's trigger) leaves the option unset: reflect_search_observations_max_tokens, reflect_search_observations_include_entities. */
       reflectDefaultOptions?: Record<string, unknown>;
+      /** When the server has a decision model, reflect lets it prune the evidence and decide when to stop (fewer LLM calls). False keeps agent turns. */
+      reflectUseDecisionModel?: boolean;
+      /** The same, for knowledge-page refreshes. */
+      mentalModelRefreshUseDecisionModel?: boolean;
       /** Token budget for source facts during reflect. -1 disables. */
       reflectSourceFactsMaxTokens?: number;
       /** Token budget for facts returned by recall. */
       recallMaxTokens?: number;
       /** Include source chunks in recall results. */
       recallIncludeChunks?: boolean;
+      /** Default prefer_observations for recall requests that omit it. */
+      recallPreferObservations?: boolean;
       /** Token budget for those chunks. */
       recallChunksMaxTokens?: number;
       /** How the per-query result budget is derived: 'fixed' or 'adaptive'. */
@@ -1056,6 +1070,8 @@ export class HindsightClient {
       updates.consolidation_strategies = options.consolidationStrategies;
     if (options.enableAutoConsolidation !== undefined)
       updates.enable_auto_consolidation = options.enableAutoConsolidation;
+    if (options.consolidationUseDecisionModel !== undefined)
+      updates.consolidation_use_decision_model = options.consolidationUseDecisionModel;
     if (options.consolidationLlmBatchSize !== undefined)
       updates.consolidation_llm_batch_size = options.consolidationLlmBatchSize;
     if (options.consolidationLlmParallelism !== undefined)
@@ -1074,11 +1090,17 @@ export class HindsightClient {
       updates.knowledge_page_default_trigger = options.knowledgePageDefaultTrigger;
     if (options.reflectDefaultOptions !== undefined)
       updates.reflect_default_options = options.reflectDefaultOptions;
+    if (options.reflectUseDecisionModel !== undefined)
+      updates.reflect_use_decision_model = options.reflectUseDecisionModel;
+    if (options.mentalModelRefreshUseDecisionModel !== undefined)
+      updates.mental_model_refresh_use_decision_model = options.mentalModelRefreshUseDecisionModel;
     if (options.reflectSourceFactsMaxTokens !== undefined)
       updates.reflect_source_facts_max_tokens = options.reflectSourceFactsMaxTokens;
     if (options.recallMaxTokens !== undefined) updates.recall_max_tokens = options.recallMaxTokens;
     if (options.recallIncludeChunks !== undefined)
       updates.recall_include_chunks = options.recallIncludeChunks;
+    if (options.recallPreferObservations !== undefined)
+      updates.recall_prefer_observations = options.recallPreferObservations;
     if (options.recallChunksMaxTokens !== undefined)
       updates.recall_chunks_max_tokens = options.recallChunksMaxTokens;
     if (options.recallBudgetFunction !== undefined)
@@ -1356,15 +1378,19 @@ export class HindsightClient {
 
   /**
    * Refresh a mental model to update with current knowledge.
+   *
+   * `mode: "full"` regenerates the content from scratch this once, whatever the
+   * model's trigger mode is; the trigger is not changed.
    */
   async refreshMentalModel(
     bankId: string,
     mentalModelId: string,
-    options?: { signal?: AbortSignal }
+    options?: { mode?: "full"; signal?: AbortSignal }
   ): Promise<AsyncOperationSubmitResponse> {
     const response = await sdk.refreshMentalModel({
       client: this.client,
       path: { bank_id: bankId, mental_model_id: mentalModelId },
+      ...(options?.mode ? { body: { mode: options.mode } } : {}),
       signal: options?.signal,
     });
 
@@ -1700,6 +1726,8 @@ export class HindsightClient {
   async listDocuments(
     bankId: string,
     options?: {
+      /** Case-insensitive substring match on document ID or text (unindexed; for browsing). */
+      q?: string;
       limit?: number;
       offset?: number;
       /** Time axis to filter and order by; `updated_at` is the default ordering. */
@@ -1715,6 +1743,7 @@ export class HindsightClient {
       client: this.client,
       path: { bank_id: bankId },
       query: {
+        q: options?.q,
         limit: options?.limit,
         offset: options?.offset,
         time_field: options?.timeField,
@@ -1944,13 +1973,33 @@ export class HindsightClient {
     const pollInterval = options?.pollIntervalMs ?? 2000;
     const timeout = options?.timeoutMs ?? 300000;
     const deadline = Date.now() + timeout;
+    const timedOut = () =>
+      new HindsightError(`Export operation ${operationId} did not complete within ${timeout}ms`);
     let resultMetadata: Record<string, unknown> | null | undefined;
     for (;;) {
-      const statusResponse = await sdk.getOperationStatus({
-        client: this.client,
-        path: { bank_id: bankId, operation_id: operationId },
-        signal: options?.signal,
+      // The deadline bounds the in-flight status request and the sleep too, so
+      // a slow poll or a long pollIntervalMs can't overrun it.
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw timedOut();
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const expired = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(timedOut()), remaining);
       });
+      let statusResponse;
+      try {
+        statusResponse = await Promise.race([
+          sdk.getOperationStatus({
+            client: this.client,
+            path: { bank_id: bankId, operation_id: operationId },
+            signal: options?.signal,
+          }),
+          expired,
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
       const status = this.validateResponse(statusResponse, "getOperationStatus");
       if (status.status === "completed") {
         resultMetadata = status.result_metadata;
@@ -1961,10 +2010,12 @@ export class HindsightClient {
           `Export operation ${operationId} ${status.status}: ${status.error_message ?? ""}`
         );
       }
-      if (Date.now() >= deadline) {
-        throw new HindsightError(
-          `Export operation ${operationId} did not complete within ${timeout}ms`
-        );
+      // Sleeping out a budget that can't fit another poll just burns the
+      // remainder, and on a coarse clock it can leave enough slack for a second
+      // poll the caller didn't ask for (the Python wrapper hit exactly that on
+      // Windows, whose timers wake up to ~16ms early).
+      if (deadline - Date.now() <= pollInterval) {
+        throw timedOut();
       }
       await new Promise((resolve) => setTimeout(resolve, pollInterval));
     }

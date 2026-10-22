@@ -1,0 +1,52 @@
+# KJS Sign published images — ported from upstream's sign-images.yml.
+# cosign keyless: needs id-token: write, declared below.
+name: KJS Sign published images
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+jobs:
+  sign:
+    name: Sign ${{ matrix.image }}:${{ inputs.version }}${{ matrix.suffix }}
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - image: hindsight
+          suffix: ''
+    steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+    - name: Log in to GHCR
+      uses: docker/login-action@v4
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    - name: Install cosign
+      uses: sigstore/cosign-installer@v3
+    - name: Resolve image digest
+      id: resolve
+      env:
+        IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+        TAG: ${{ inputs.version }}${{ matrix.suffix }}
+      run: "set -euo pipefail\nDIGEST=$(docker buildx imagetools inspect \"${IMAGE}:${TAG}\" --format '{{json .Manifest.Digest}}' | tr -d '\"')\nif [[ -z \"${DIGEST}\" || \"${DIGEST}\" != sha256:* ]]; then\n\
+        \  echo \"Failed to resolve digest for ${IMAGE}:${TAG} (got: ${DIGEST})\" >&2\n  exit 1\nfi\necho \"Resolved ${IMAGE}:${TAG} -> ${DIGEST}\"\necho \"ref=${IMAGE}@${DIGEST}\" >> \"$GITHUB_OUTPUT\"\
+        \n"
+    - name: Sign image
+      env:
+        REF: ${{ steps.resolve.outputs.ref }}
+      run: cosign sign --yes "${REF}"
+    - name: Verify signature
+      env:
+        REF: ${{ steps.resolve.outputs.ref }}
+      run: "cosign verify \"${REF}\" \\\n  --certificate-identity-regexp \"^https://github\\.com/${{ github.repository }}/\\.github/workflows/sign-images\\.yml@.*\" \\\n  --certificate-oidc-issuer https://token.actions.githubusercontent.com\n"
+'on':
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Tag to sign (e.g. oracle-latest, 17102026)
+        required: true
+        type: string
+        default: oracle-latest

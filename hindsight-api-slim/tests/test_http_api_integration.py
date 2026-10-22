@@ -15,6 +15,7 @@ import pytest_asyncio
 from hindsight_api.api import create_app
 from hindsight_api.config_resolver import BankConfigPersistenceConflictError
 from hindsight_api.engine.interface import BankTemplateImportWrite
+from hindsight_api.engine.search.tags import TagGroupLeaf
 from hindsight_api.extensions import (
     BankListResult,
     BankReadOperation,
@@ -2599,3 +2600,41 @@ async def test_legacy_bank_writes_apply_default_bank_template(
 
     # Cleanup
     await memory.delete_bank(bank_id, request_context=request_context)
+
+
+@pytest.mark.asyncio
+async def test_bank_template_export_is_refused_to_a_tag_scoped_caller(memory, api_client, monkeypatch):
+    """The template carries the bank's whole config, so like the full bank export it is not
+    narrowed to a tag scope: a scoped caller is refused (403), an unscoped one is not."""
+    bank_id = f"template_export_scope_{datetime.now().timestamp()}"
+    await memory.ensure_bank_profile(bank_id, request_context=RequestContext())
+    validator = _make_operation_validator()
+    monkeypatch.setattr(memory, "_operation_validator", validator)
+    try:
+        assert (await api_client.get(f"/v1/default/banks/{bank_id}/export")).status_code == 200
+
+        validator.resolve_tag_scope = AsyncMock(return_value=[TagGroupLeaf(tags=["user:dan"], match="any_strict")])
+        refused = await api_client.get(f"/v1/default/banks/{bank_id}/export")
+        assert refused.status_code == 403
+        assert "tag-scoped caller" in refused.json()["detail"]
+    finally:
+        monkeypatch.setattr(memory, "_operation_validator", None)
+        await memory.delete_bank(bank_id, request_context=RequestContext())
+
+
+@pytest.mark.asyncio
+async def test_refresh_endpoint_passes_a_full_mode_through(api_client, memory, test_bank_id, monkeypatch):
+    """POST /refresh takes an optional {"mode": "full"}; no body keeps the model's mode."""
+    seen: list[str | None] = []
+
+    async def _record(*, bank_id, mental_model_id, request_context, mode=None, **_):
+        seen.append(mode)
+        return {"operation_id": "op-1"}
+
+    monkeypatch.setattr(memory, "submit_async_refresh_mental_model", _record)
+    url = f"/v1/default/banks/{test_bank_id}/mental-models/mm-1/refresh"
+
+    assert (await api_client.post(url)).status_code == 200
+    assert (await api_client.post(url, json={"mode": "full"})).status_code == 200
+    assert (await api_client.post(url, json={"mode": "delta"})).status_code == 422
+    assert seen == [None, "full"]

@@ -22,6 +22,13 @@ if [[ -z "$OPENROUTER_API_KEY" ]]; then
     exit 1
 fi
 
+# Get NVIDIA API key from secret (for the LLM)
+NVIDIA_API_KEY="${KJS_TEST_NVIDIA_API_KEY:-}"
+if [[ -z "$NVIDIA_API_KEY" ]]; then
+    echo "❌ KJS_TEST_NVIDIA_API_KEY environment variable not set"
+    exit 1
+fi
+
 # Build the database URL with decoded DSN (oracledb thin mode compatible)
 # Use the high performance service (port 1522, TLS)
 DATABASE_URL="oracle+oracledb://HINDSIGHT_TEST:${DB_PASSWORD}@/?dsn=$(python3 -c "
@@ -122,14 +129,21 @@ docker run -d --name "$CONTAINER_NAME" \
     -e HINDSIGHT_API_DATABASE_BACKEND=oracle \
     -e HINDSIGHT_API_VECTOR_EXTENSION=oracle \
     -e HINDSIGHT_API_EMBEDDINGS_ONNX_DIMENSIONS=2048 \
+    -e HINDSIGHT_API_EMBEDDINGS_OPENAI_DIMENSIONS=2048 \
+    -e HINDSIGHT_API_EMBEDDINGS_NVIDIA_DIMENSIONS=2048 \
     -e HINDSIGHT_API_DATABASE_URL="$DATABASE_URL" \
-    -e HINDSIGHT_API_LLM_PROVIDER=none \
-    -e HINDSIGHT_API_EMBEDDINGS_PROVIDER=openrouter \
-    -e HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY="$OPENROUTER_API_KEY" \
-    -e HINDSIGHT_API_EMBEDDINGS_MODEL=nvidia/llama-nemotron-embed-vl-1b-v2:free \
+    -e HINDSIGHT_API_LLM_PROVIDER=openrouter \
+    -e HINDSIGHT_API_LLM_BASE_URL=https://openrouter.ai/api/v1 \
+    -e HINDSIGHT_API_LLM_API_KEY="$OPENROUTER_API_KEY" \
+    -e HINDSIGHT_API_LLM_MODEL=nvidia/nemotron-3.5-super-vl:free \
+    -e HINDSIGHT_API_LLM_REASONING_EFFORT=low \
+    -e HINDSIGHT_API_EMBEDDINGS_PROVIDER=nvidia \
+    -e HINDSIGHT_API_EMBEDDINGS_NVIDIA_BASE_URL=https://openrouter.ai/api/v1 \
+    -e HINDSIGHT_API_EMBEDDINGS_NVIDIA_API_KEY="$OPENROUTER_API_KEY" \
+    -e HINDSIGHT_API_EMBEDDINGS_NVIDIA_MODEL=nvidia/nemotron-3.5-embed-1b:free \
     -e HINDSIGHT_API_RERANKER_PROVIDER=openrouter \
     -e HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY="$OPENROUTER_API_KEY" \
-    -e HINDSIGHT_API_RERANKER_MODEL=nvidia/llama-nemotron-rerank-vl-1b-v2:free \
+    -e HINDSIGHT_API_RERANKER_OPENROUTER_MODEL=nvidia/nemotron-3.5-rerank-8b:free \
     -e HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP=false \
     -e HINDSIGHT_API_WORKER_ENABLED=false \
     -p "${HINDSIGHT_PORT}:8888" \
@@ -150,6 +164,20 @@ for i in {1..60}; do
     sleep 2
     if [ $i -eq 60 ]; then
         echo "❌ Health endpoint never responded after 120s"
+        # /health is an alias of /health/ready: it answers 503 when its database
+        # check fails, and `curl -sf` treats any non-2xx as "no response" — which is
+        # why this failure used to be opaque. The body names the reason
+        # ("not_initialized", or the exception repr), and /health/live never touches
+        # the database, so the pair separates "process wedged" from "database
+        # unreachable" without another CI round trip.
+        echo "=== /health response ==="
+        curl -s -o /tmp/health.json -w "HTTP %{http_code}\n" \
+            "http://localhost:${HINDSIGHT_PORT}/health" || echo "(no response at all)"
+        cat /tmp/health.json 2>/dev/null; echo
+        echo "=== /health/live response ==="
+        curl -s -o /tmp/live.json -w "HTTP %{http_code}\n" \
+            "http://localhost:${HINDSIGHT_PORT}/health/live" || echo "(no response at all)"
+        cat /tmp/live.json 2>/dev/null; echo
         echo "=== Final container logs ==="
         docker logs "$CONTAINER_NAME"
         exit 1
@@ -361,11 +389,13 @@ async def ingest():
     await engine.close()
 
 asyncio.run(ingest())
-" 2>&1)
+" 2>&1) || true
 
 INGEST1_ID=$(echo "${INGEST1}" | { grep 'INGEST_ID:' || true; } | cut -d: -f2)
 if [[ -z "$INGEST1_ID" ]]; then
     echo "❌ Failed to ingest content 1"
+    echo "--- ingest 1 output (last 40 lines) ---"
+    echo "${INGEST1}" | tail -40
     echo "$INGEST1"
     exit 1
 fi
@@ -401,11 +431,13 @@ async def ingest():
     await engine.close()
 
 asyncio.run(ingest())
-" 2>&1)
+" 2>&1) || true
 
 INGEST2_ID=$(echo "${INGEST2}" | { grep 'INGEST_ID:' || true; } | cut -d: -f2)
 if [[ -z "$INGEST2_ID" ]]; then
     echo "❌ Failed to ingest content 2"
+    echo "--- ingest 2 output (last 40 lines) ---"
+    echo "${INGEST2}" | tail -40
     exit 1
 fi
 echo "✅ Ingested content 2: $INGEST2_ID"
@@ -440,11 +472,13 @@ async def ingest():
     await engine.close()
 
 asyncio.run(ingest())
-" 2>&1)
+" 2>&1) || true
 
 INGEST3_ID=$(echo "${INGEST3}" | { grep 'INGEST_ID:' || true; } | cut -d: -f2)
 if [[ -z "$INGEST3_ID" ]]; then
     echo "❌ Failed to ingest content 3"
+    echo "--- ingest 3 output (last 40 lines) ---"
+    echo "${INGEST3}" | tail -40
     exit 1
 fi
 echo "✅ Ingested content 3: $INGEST3_ID"

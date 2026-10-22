@@ -18,9 +18,11 @@ Hindsight that copies the extension in — see [Packaging](#packaging-an-extensi
 | --- | --- | --- |
 | [`supabase-tenant`](./supabase-tenant) | `TENANT` | Validates [Supabase](https://supabase.com) Auth JWTs and gives each user their own Postgres schema |
 | [`static-keys-tenant`](./static-keys-tenant) | `TENANT` | Authenticates static API keys from env vars and gives each user their own Postgres schema |
+| [`bank-llm-routing`](./bank-llm-routing) | `LLM_REQUEST` | Picks the LLM and key of each call by bank-id and operation pattern — per-customer gateway keys, or a model per bank or operation |
 
-Extensions maintained outside this repository can be listed here too — open a PR
-adding a row that links to yours.
+Extensions maintained outside this repository can be listed here too —
+[open a feature request](https://github.com/vectorize-io/hindsight/issues/new?template=feature_request.yml)
+with a link to yours.
 
 ### What stays in the server
 
@@ -49,6 +51,7 @@ variable in `module.path:ClassName` form:
 | MCP tools | `HINDSIGHT_API_MCP_EXTENSION` | `MCPExtension` |
 | Operation hooks | `HINDSIGHT_API_OPERATION_VALIDATOR_EXTENSION` | `OperationValidatorExtension` |
 | Memory defense | `HINDSIGHT_API_MEMORY_DEFENSE_EXTENSION` | `MemoryDefenseExtension` |
+| LLM per call | `HINDSIGHT_API_LLM_REQUEST_EXTENSION` | `LLMRequestExtension` |
 
 Every other environment variable sharing the slot's prefix becomes the extension's
 config, lowercased and with the prefix stripped. For the `TENANT` slot:
@@ -269,15 +272,17 @@ schemas and background consolidation stops for every tenant.
 
 ---
 
-## Contributing an extension
+## Adding an extension
 
-Open a PR adding `hindsight-extensions/<name>/` with the layout above:
+Hindsight does not accept pull requests from outside the team (see
+[CONTRIBUTING.md](../CONTRIBUTING.md)). To propose a new extension,
+[open a feature request](https://github.com/vectorize-io/hindsight/issues/new?template=feature_request.yml).
+An extension added to this tree has the layout above:
 
 - a `README.md` documenting every environment variable it reads,
 - tests that exercise the extension through its base-class interface,
 - a `Dockerfile` that builds an image with it,
 - a row in the registry table above.
 
-Extensions here are owned by their contributors. If you would rather host yours
-yourself, add a registry row pointing at your repository and package — no code needs
-to live in this tree.
+If you host an extension yourself, ask for a registry row pointing at your
+repository and package — no code needs to live in this tree.

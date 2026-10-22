@@ -16,7 +16,6 @@ import importlib
 import logging
 import os
 import random
-import re
 
 _resource_mod = importlib.import_module("resource") if importlib.util.find_spec("resource") else None
 import threading
@@ -159,27 +158,6 @@ def get_token_bucket(token_count: int) -> str:
         return "10k-50k"
     else:
         return "50k+"
-
-
-# Template unbounded id segments before a path is used as the low-cardinality
-# "endpoint" metric label. A raw per-bank path segment (e.g. user-123) would
-# otherwise create one never-evicted OTel series per bank.
-_METRIC_BANK_SEGMENT_RE = re.compile(r"(/banks/)[^/]+")
-_METRIC_UUID_RE = re.compile(r"/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-_METRIC_NUMERIC_ID_RE = re.compile(r"/\d+(?=/|$)")
-
-
-def normalize_http_endpoint(path: str) -> str:
-    """Template high-cardinality id segments in an HTTP path for safe metric labeling.
-
-    Collapses the "/banks/<id>" segment (any bank id, including non-numeric ones like
-    "user-123"), UUIDs, and numeric ids to placeholders so the "endpoint" metric label
-    has bounded cardinality. Analogous to get_token_bucket for token counts.
-    """
-    path = _METRIC_BANK_SEGMENT_RE.sub(r"\g<1>{bank_id}", path)
-    path = _METRIC_UUID_RE.sub("/{id}", path)
-    path = _METRIC_NUMERIC_ID_RE.sub("/{id}", path)
-    return path
 
 
 logger = logging.getLogger(__name__)
@@ -708,7 +686,7 @@ class MetricsCollector(MetricsCollectorBase):
             budget: Optional budget level (low, mid, high)
             max_tokens: Optional max tokens for the operation
         """
-        start_time = time.time()
+        start_time = time.perf_counter()
         success = True
         cancelled = False
         # Resolved once, and published for the length of the operation so the recall phases
@@ -737,7 +715,7 @@ class MetricsCollector(MetricsCollectorBase):
                     operation,
                     bank_id,
                     success=success,
-                    duration=time.time() - start_time,
+                    duration=time.perf_counter() - start_time,
                     source=source,
                     budget=budget,
                     max_tokens=max_tokens,
@@ -886,7 +864,7 @@ class MetricsCollector(MetricsCollectorBase):
             endpoint: Request endpoint path
             status_code_getter: Callable that returns the status code after request completes
         """
-        start_time = time.time()
+        start_time = time.perf_counter()
         base_attributes = {"method": method, "endpoint": endpoint}
 
         # Track in-progress
@@ -895,7 +873,7 @@ class MetricsCollector(MetricsCollectorBase):
         try:
             yield
         finally:
-            duration = time.time() - start_time
+            duration = time.perf_counter() - start_time
             status_code = status_code_getter()
             status_class = f"{status_code // 100}xx"
 

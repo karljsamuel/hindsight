@@ -53,6 +53,23 @@ class LLMToolChoice:
         return self.function_name
 
 
+@dataclass(frozen=True, slots=True)
+class PromptCachePrefix:
+    """The reusable prompt prefix a caller wants cached, passed to ``LLMProvider.call``.
+
+    The caller says WHAT is cacheable; the provider that serves the call builds
+    its own handle from it. In a multi-LLM chain that is whichever member runs,
+    so a fallback member caches against its own account instead of being handed
+    the primary's handle, or none at all (#5123). Callers used to resolve the
+    handle themselves via ``llm_config._provider_impl``, which in a chain is the
+    primary only.
+    """
+
+    system_instruction: str
+    # Part of the cache key only; ``None`` keeps one cache across schema variants.
+    response_schema: Any | None = None
+
+
 LLM_TOOL_CHOICE_AUTO = LLMToolChoice(mode=LLMToolChoiceMode.AUTO)
 LLM_TOOL_CHOICE_NONE = LLMToolChoice(mode=LLMToolChoiceMode.NONE)
 LLM_TOOL_CHOICE_REQUIRED = LLMToolChoice(mode=LLMToolChoiceMode.REQUIRED)
@@ -260,6 +277,18 @@ class LLMInterface(ABC):
 
     def supports_attempt_scoped_concurrency(self) -> bool:
         """Whether retries can acquire concurrency permits per upstream attempt."""
+        return False
+
+    def supports_request_overrides(self) -> bool:
+        """Whether a call can be sent with the credentials an LLM request extension chose.
+
+        A provider that returns True must apply ``current_llm_request_overrides()``
+        (from ``hindsight_api.extensions.llm_request``) to every request it sends: the
+        ``api_key`` in place of its own, and the ``headers`` added. One that cannot —
+        OAuth/CLI-session providers, a router whose keys live per deployment — keeps
+        False, and an overridden call to it is refused instead of going out on the
+        server's credentials.
+        """
         return False
 
     def supports_vision(self) -> bool | None:

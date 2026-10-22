@@ -9,6 +9,7 @@ Configuration via environment variables - see hindsight_api.config for all env v
 import asyncio
 import contextvars
 import logging
+import os
 import time
 import warnings
 from abc import ABC, abstractmethod
@@ -16,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, cast
 
 import aiohttp
+from pydantic import BaseModel
 
 from .._cross_loop import CrossLoopSemaphore
 from ..config import (
@@ -26,12 +28,15 @@ from ..config import (
     DEFAULT_RERANKER_FLASHRANK_CACHE_DIR,
     DEFAULT_RERANKER_FLASHRANK_MODEL,
     DEFAULT_RERANKER_GOOGLE_MODEL,
-    DEFAULT_RERANKER_LITELLM_MAX_TOKENS_PER_DOC,
     DEFAULT_RERANKER_LITELLM_MODEL,
     DEFAULT_RERANKER_LITELLM_SDK_MODEL,
     DEFAULT_RERANKER_LOCAL_BATCH_SIZE,
     DEFAULT_RERANKER_LOCAL_MODEL,
     DEFAULT_RERANKER_LOCAL_TIMEOUT,
+    DEFAULT_RERANKER_NVIDIA_BASE_URL,
+    DEFAULT_RERANKER_NVIDIA_BATCH_SIZE,
+    DEFAULT_RERANKER_NVIDIA_MAX_CONCURRENT,
+    DEFAULT_RERANKER_NVIDIA_MODEL,
     DEFAULT_RERANKER_SILICONFLOW_BASE_URL,
     DEFAULT_RERANKER_SILICONFLOW_MODEL,
     DEFAULT_RERANKER_TEI_BATCH_SIZE,
@@ -48,8 +53,10 @@ from ..config import (
 from .aiohttp_session import LoopLocal, LoopLocalSession, UpstreamHTTPError, per_phase_timeout, raise_for_status
 from .bank_attribution import reranker_bank_attribution_headers
 from .local_device import (
+    LOCAL_MODEL_BUILD_LOCK,
     align_local_model_weights,
     assert_finite_local_output,
+    prefetch_local_model,
     release_local_inference_memory,
     resolve_model_device_type,
     select_local_device,
@@ -68,6 +75,14 @@ logger = logging.getLogger(__name__)
 _served_provider: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "hindsight_rerank_served_provider", default=None
 )
+
+# Providers whose score is a candidate's rank position within one pool, not a
+# relevance score for the pair: the top candidate is 1.0 on every recall however
+# weak it is, so a fixed floor just keeps a fixed share of the pool and the value
+# is not comparable between recalls (#4901). Recall rejects min_scores.reranker
+# for these and publishes no reranker score.
+# "decision_model" is recall's decision-model reranker (engine/search/decision_reranker.py).
+RANK_SCORE_PROVIDERS = frozenset({"typesafe", "decision_model"})
 
 
 class RerankTimeoutError(Exception):
@@ -112,6 +127,11 @@ class CrossEncoderModel(ABC):
         """
         return False
 
+    @property
+    def primary_provider_name(self) -> str:
+        """The provider that serves requests while nothing has failed over."""
+        return self.provider_name
+
     @abstractmethod
     async def initialize(self) -> None:
         """
@@ -139,6 +159,11 @@ class CrossEncoderModel(ABC):
     # unless the score is a real decision.
     prunes_candidates: bool = False
 
+    # Cap each candidate at this many tokens before it reaches the backend, or None to
+    # send it whole. Set by create_cross_encoder from the member's config; lives on the
+    # base class for the same reason as retry_policy, so every provider honors it.
+    max_tokens_per_candidate: int | None = None
+
     async def predict(self, pairs: list[tuple[str, str]]) -> list[float]:
         """
         Score query-document pairs for relevance, retrying transient failures.
@@ -149,6 +174,9 @@ class CrossEncoderModel(ABC):
         Returns:
             List of relevance scores (higher = more relevant)
         """
+        if self.max_tokens_per_candidate is not None and pairs:
+            docs = _truncate_docs_to_tokens([doc for _, doc in pairs], self.max_tokens_per_candidate)
+            pairs = [(query, doc) for (query, _), doc in zip(pairs, docs)]
         if self.retry_policy is None:
             return await self._predict(pairs)
         # One budget per predict(): rerank is one logical call on the synchronous
@@ -264,7 +292,8 @@ class LocalSTCrossEncoder(CrossEncoderModel):
 
         # Determine device based on hardware availability. We always set
         # low_cpu_mem_usage=False to prevent lazy loading (meta tensors) which can
-        # cause issues when accelerate is installed but no GPU is available.
+        # cause issues when accelerate is installed but no GPU is available. Only
+        # transformers 4.x honours it: 5.x drops the kwarg and always builds on meta.
         # Note: We do NOT use device_map because CrossEncoder internally calls .to(device)
         # after loading, which conflicts with accelerate's device_map handling.
         # MPS is never used — see engine/local_device.py for why.
@@ -288,51 +317,56 @@ class LocalSTCrossEncoder(CrossEncoderModel):
         except Exception:
             pass
 
-        # Suppress verbose transformers warnings during model loading
-        # This suppresses the "UNEXPECTED" warnings from CrossEncoder which are harmless
-        # but look alarming to users (e.g., "embeddings.position_ids | UNEXPECTED")
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=UserWarning)
-            warnings.filterwarnings("ignore", message=".*was not found in model state dict.*")
-            warnings.filterwarnings("ignore", message=".*UNEXPECTED.*")
+        # Download outside the lock; build and smoke-test under it, because a
+        # transformers build flips process-global state (see LOCAL_MODEL_BUILD_LOCK).
+        # sentence-transformers caches under SENTENCE_TRANSFORMERS_HOME when it is set.
+        prefetch_local_model(self.model_name, cache_dir=os.getenv("SENTENCE_TRANSFORMERS_HOME"))
+        with LOCAL_MODEL_BUILD_LOCK:
+            # Suppress verbose transformers warnings during model loading
+            # This suppresses the "UNEXPECTED" warnings from CrossEncoder which are harmless
+            # but look alarming to users (e.g., "embeddings.position_ids | UNEXPECTED")
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=UserWarning)
+                warnings.filterwarnings("ignore", message=".*was not found in model state dict.*")
+                warnings.filterwarnings("ignore", message=".*UNEXPECTED.*")
 
-            # Also suppress transformers library logging temporarily
-            transformers_logger = logging.getLogger("transformers")
-            original_level = transformers_logger.level
-            transformers_logger.setLevel(logging.ERROR)
+                # Also suppress transformers library logging temporarily
+                transformers_logger = logging.getLogger("transformers")
+                original_level = transformers_logger.level
+                transformers_logger.setLevel(logging.ERROR)
 
-            try:
-                self._model = CrossEncoder(
-                    self.model_name,
-                    device=device,
-                    model_kwargs={"low_cpu_mem_usage": False},
-                    trust_remote_code=self.trust_remote_code,
-                )
-            finally:
-                # Restore original logging level
-                transformers_logger.setLevel(original_level)
+                try:
+                    self._model = CrossEncoder(
+                        self.model_name,
+                        device=device,
+                        model_kwargs={"low_cpu_mem_usage": False},
+                        trust_remote_code=self.trust_remote_code,
+                    )
+                finally:
+                    # Restore original logging level
+                    transformers_logger.setLevel(original_level)
 
-        # Safetensors weights are mapped zero-copy and can land on a byte offset that
-        # is not a multiple of the dtype size, which makes torch's vectorized CPU matmul
-        # return corrupt scores. See engine/local_device.py. The default reranker
-        # (ms-marco-MiniLM-L-6-v2) is one of the affected files.
-        align_local_model_weights(self._model.model, label=f"Reranker[{self.model_name}]")
+            # Safetensors weights are mapped zero-copy and can land on a byte offset that
+            # is not a multiple of the dtype size, which makes torch's vectorized CPU matmul
+            # return corrupt scores. See engine/local_device.py. The default reranker
+            # (ms-marco-MiniLM-L-6-v2) is one of the affected files.
+            align_local_model_weights(self._model.model, label=f"Reranker[{self.model_name}]")
 
-        self._device_type = resolve_model_device_type(self._model)
+            self._device_type = resolve_model_device_type(self._model)
 
-        # FP16 inference: convert model weights to half precision.
-        # Empirically validated: 27-36% faster on MPS, quality-identical (20/20 overlap).
-        if self.fp16 and self._device_type != "cpu":
-            self._model.model.half()
-            logger.info("Reranker: FP16 inference enabled")
+            # FP16 inference: convert model weights to half precision.
+            # Empirically validated: 27-36% faster on MPS, quality-identical (20/20 overlap).
+            if self.fp16 and self._device_type != "cpu":
+                self._model.model.half()
+                logger.info("Reranker: FP16 inference enabled")
 
-        # Smoke-test the fully configured model (after any FP16 conversion). NaN logits
-        # are sanitized to 0.0 downstream, so startup is the last point at which a model
-        # that computes garbage is still observable.
-        assert_finite_local_output(
-            self._model.predict([("hindsight startup probe", "hindsight startup probe")]),
-            label=f"Reranker[{self.model_name}]",
-        )
+            # Smoke-test the fully configured model (after any FP16 conversion). NaN logits
+            # are sanitized to 0.0 downstream, so startup is the last point at which a model
+            # that computes garbage is still observable.
+            assert_finite_local_output(
+                self._model.predict([("hindsight startup probe", "hindsight startup probe")]),
+                label=f"Reranker[{self.model_name}]",
+            )
 
         # Initialize shared executor (limited workers naturally limits concurrency)
         if LocalSTCrossEncoder._executor is None:
@@ -950,11 +984,132 @@ class SiliconFlowCrossEncoder(CrossEncoderModel):
         return await self._client.predict(pairs)
 
 
+class _NvidiaText(BaseModel):
+    text: str
+
+
+class _NvidiaRerankRequest(BaseModel):
+    model: str
+    query: _NvidiaText
+    passages: list[_NvidiaText]
+
+
+class _NvidiaRanking(BaseModel):
+    index: int
+    logit: float
+
+
+class _NvidiaRerankResponse(BaseModel):
+    rankings: list[_NvidiaRanking]
+
+
+class NvidiaCrossEncoder(CrossEncoderModel):
+    """
+    NVIDIA NIM cross-encoder using the native reranking API.
+
+    Not Cohere-compatible, so it cannot reuse _CohereCompatibleRerankClient:
+    the path carries the model (/retrieval/<model>/reranking), the query is
+    {"text": ...}, each passage is {"text": ...}, and the response is
+    rankings[].logit — a raw logit, not a 0..1 relevance_score. Raw logits are
+    fine: each is a per-pair score, so they compare across batches and calls, and
+    recall's sigmoid normalization maps them into 0..1.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = DEFAULT_RERANKER_NVIDIA_MODEL,
+        base_url: str = DEFAULT_RERANKER_NVIDIA_BASE_URL,
+        timeout: float = 60.0,
+        batch_size: int = DEFAULT_RERANKER_NVIDIA_BATCH_SIZE,
+        max_concurrent: int = DEFAULT_RERANKER_NVIDIA_MAX_CONCURRENT,
+    ):
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.rerank_url = f"{self.base_url}/retrieval/{model.strip('/')}/reranking"
+        self.timeout = timeout
+        self.batch_size = batch_size
+        self.max_concurrent = max_concurrent
+        # CrossLoopSemaphore, not asyncio.Semaphore: the encoder is built once and
+        # reached from every loop in the process — same reasoning as TypeSafeCrossEncoder.
+        self._semaphore = CrossLoopSemaphore(max_concurrent)
+        self._session = LoopLocalSession(
+            timeout=per_phase_timeout(timeout),
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        )
+
+    @property
+    def provider_name(self) -> str:
+        return "nvidia"
+
+    async def initialize(self) -> None:
+        # Nothing to connect: the session is created lazily per event loop on first use.
+        logger.info(
+            f"Reranker: initializing NVIDIA provider at {self.rerank_url} "
+            f"(batch_size={self.batch_size}, max_concurrent={self.max_concurrent})"
+        )
+
+    async def _rerank_batch(self, query: str, texts: list[str]) -> list[float]:
+        request = _NvidiaRerankRequest(
+            model=self.model, query=_NvidiaText(text=query), passages=[_NvidiaText(text=t) for t in texts]
+        )
+        async with self._semaphore:
+            async with self._session.get().post(
+                self.rerank_url,
+                headers=reranker_bank_attribution_headers(),
+                json=request.model_dump(),
+            ) as response:
+                await raise_for_status(response)
+                result = _NvidiaRerankResponse.model_validate(await response.json(content_type=None))
+        scores = [0.0] * len(texts)
+        for ranking in result.rankings:
+            scores[ranking.index] = ranking.logit
+        return scores
+
+    async def _predict(self, pairs: list[tuple[str, str]]) -> list[float]:
+        # One request per distinct query (like the Cohere-compatible client), split
+        # into batch_size slices because the API caps passages per request; slices
+        # run concurrently, bounded by max_concurrent across all calls.
+        query_groups: dict[str, list[int]] = {}
+        for idx, (query, _) in enumerate(pairs):
+            query_groups.setdefault(query, []).append(idx)
+
+        slices = [
+            (query, indices[i : i + self.batch_size])
+            for query, indices in query_groups.items()
+            for i in range(0, len(indices), self.batch_size)
+        ]
+        # create_task copies contextvars, so the per-bank attribution header reaches every slice.
+        tasks = [
+            asyncio.create_task(self._rerank_batch(query, [pairs[idx][1] for idx in indices]))
+            for query, indices in slices
+        ]
+        try:
+            # Awaited in order, so the earliest failing slice is the one raised; its
+            # siblings are cancelled rather than left running unobserved.
+            results = [await task for task in tasks]
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        all_scores = [0.0] * len(pairs)
+        for (_, indices), scores in zip(slices, results):
+            for idx, score in zip(indices, scores):
+                all_scores[idx] = score
+        return all_scores
+
+
 # Single source of truth for prompt templates and overheads
 _RANK_INSTRUCTIONS_PREFIX = "Which candidate answers the question: "
 _CUT_INSTRUCTIONS = (
     "How far down this ranked list does genuine relevance to the question extend? "
     "Count a candidate as relevant only if it helps answer the question."
+)
+
+_SUFFICIENCY_INSTRUCTIONS = (
+    "Does the evidence above answer the question? Judge only what the evidence states, "
+    "not what could be guessed from it."
 )
 
 _OPTION_KEY_OVERHEAD = 7  # JSON envelope overhead per choice option: '"c249": "' + comma/newline
@@ -1005,6 +1160,11 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
     # keeps a handful, so a longer list costs tokens to no purpose.
     SHORTLIST = 12
 
+    # The fewest candidates a cut may keep, by rank. 0 for recall, where the cut is
+    # the whole point; reflect's decision model raises it, because the cut's levels jump from five
+    # to ten and it picked five for a question whose answer was a count over seven.
+    MIN_KEEP = 0
+
     # Context window safety limit for Jev /v1/systemone.
     # Single question context limit is 32k. A defensive safety margin (26k vs 32k)
     # absorbs cross-tokenizer divergence and JSON envelope formatting overheads.
@@ -1035,7 +1195,13 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
         timeout: float = DEFAULT_RERANKER_TYPESAFE_TIMEOUT,
         max_concurrent: int = DEFAULT_RERANKER_TYPESAFE_MAX_CONCURRENT,
         prune_candidates: bool = DEFAULT_RERANKER_TYPESAFE_PRUNE_CANDIDATES,
+        shortlist: int | None = None,
+        min_keep: int | None = None,
     ):
+        if shortlist is not None:
+            self.SHORTLIST = shortlist
+        if min_keep is not None:
+            self.MIN_KEEP = min_keep
         # Tolerate an unset-but-present value ("VAR=" in a compose file, or a config
         # built with every field zeroed) by falling back to the default.
         self.model = model or DEFAULT_RERANKER_TYPESAFE_MODEL
@@ -1180,6 +1346,55 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
         ranked_finalists = await self._rank_once(query, effective_docs, finalists)
         return ranked_finalists + rest
 
+    # Ordered verdicts for the reflect sufficiency question; only the last one ends
+    # retrieval. "Partly" is its own level so a half-answer keeps searching.
+    SUFFICIENCY_LEVELS = [
+        "The evidence does not answer the question",
+        "The evidence answers part of the question; something it asks is missing",
+        "The evidence fully answers the question",
+    ]
+
+    async def evidence_is_sufficient(self, query: str, evidence: str) -> bool:
+        """Whether ``evidence`` already answers ``query``: one Score question.
+
+        Used by a decision-orchestrated reflect to skip the LLM turns that would otherwise decide to keep
+        searching. A Score, not a yes/no Choice, for the reason the cut uses one: the
+        levels are ordered, and "partly" must not be rounded up to "yes".
+        """
+        overhead = (
+            count_tokens(_SUFFICIENCY_INSTRUCTIONS) + sum(count_tokens(level) for level in self.SUFFICIENCY_LEVELS) + 50
+        )
+        prefix = f"Question: {query}\n\nEvidence:\n"
+        budget = max(100, self.MAX_QUESTION_TOKENS - overhead - count_tokens(prefix))
+        if count_tokens(evidence) > budget:
+            # ponytail: keeps the head of the evidence; the agent's own results come
+            # first (pages, then observations, then facts), so the tail is raw facts.
+            evidence = truncate_to_tokens(evidence, budget).text
+        result = await self._ask(
+            {
+                "state": f"{prefix}{evidence}",
+                "model": self.model,
+                "questions": {
+                    "sufficient": {
+                        "type": "score",
+                        "instructions": _SUFFICIENCY_INSTRUCTIONS,
+                        "criteria": self.SUFFICIENCY_LEVELS,
+                    }
+                },
+            }
+        )
+        answer = result["answers"]["sufficient"]
+        # The most likely level, not the rounded expected score: an expected 1.43 is "partly" when
+        # rounded, though "fully" was the likeliest verdict at 0.54 (sde-bench boltons-budget), and
+        # every such rounding cost two LLM turns. The score is the fallback for a reply without
+        # per-level probabilities.
+        probabilities = answer.get("probabilities")
+        if probabilities:
+            level = int(max(probabilities, key=lambda key: float(probabilities[key])))
+        else:
+            level = round(float(answer["score"]))
+        return level >= len(self.SUFFICIENCY_LEVELS) - 1
+
     async def _cut(self, query: str, docs: list[str], order: list[int]) -> int:
         """How many of the ranked candidates are relevant, as the model sees it."""
         shortlist = order[: self.SHORTLIST]
@@ -1233,6 +1448,7 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
 
         order = await self._rank(query, docs, indices)
         keep = await self._cut(query, docs, order) if self.prunes_candidates else len(order)
+        keep = max(keep, min(self.MIN_KEEP, len(order)))
         # Positions, not confidences — see the class docstring. Descending from 1.0 so
         # the caller's ordering is preserved, and 0.0 for everything past the cut,
         # which is how prunes_candidates marks a candidate to leave out.
@@ -1520,7 +1736,6 @@ class LiteLLMCrossEncoder(CrossEncoderModel):
         api_key: str | None = None,
         model: str = DEFAULT_RERANKER_LITELLM_MODEL,
         timeout: float = 60.0,
-        max_tokens_per_doc: int | None = DEFAULT_RERANKER_LITELLM_MAX_TOKENS_PER_DOC,
     ):
         """
         Initialize LiteLLM cross-encoder client.
@@ -1531,15 +1746,11 @@ class LiteLLMCrossEncoder(CrossEncoderModel):
             model: Reranking model name (default: cohere/rerank-english-v3.0)
                    Use provider prefix (e.g., cohere/, together_ai/, voyage/)
             timeout: Request timeout in seconds (default: 60.0)
-            max_tokens_per_doc: If set, truncate each document to this many tokens before
-                                sending to the reranker (uses the configured encoding).
-                                Useful for models with small context windows (e.g. 1024 tokens).
         """
         self.api_base = api_base.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
-        self.max_tokens_per_doc = max_tokens_per_doc
         self._initialized = False
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -1586,8 +1797,6 @@ class LiteLLMCrossEncoder(CrossEncoderModel):
 
         for query, indexed_texts in query_groups.items():
             texts = [text for _, text in indexed_texts]
-            if self.max_tokens_per_doc is not None:
-                texts = _truncate_docs_to_tokens(texts, self.max_tokens_per_doc)
             indices = [idx for idx, _ in indexed_texts]
 
             # LiteLLM /rerank follows Cohere API format
@@ -1634,7 +1843,6 @@ class LiteLLMSDKCrossEncoder(CrossEncoderModel):
         model: str = DEFAULT_RERANKER_LITELLM_SDK_MODEL,
         api_base: str | None = None,
         timeout: float = 60.0,
-        max_tokens_per_doc: int | None = DEFAULT_RERANKER_LITELLM_MAX_TOKENS_PER_DOC,
     ):
         """
         Initialize LiteLLM SDK cross-encoder client.
@@ -1645,15 +1853,11 @@ class LiteLLMSDKCrossEncoder(CrossEncoderModel):
             model: Model name with provider prefix (e.g., "deepinfra/Qwen3-reranker-8B")
             api_base: Custom base URL for API (optional)
             timeout: Request timeout in seconds (default: 60.0)
-            max_tokens_per_doc: If set, truncate each document to this many tokens before
-                                sending to the reranker (uses the configured encoding).
-                                Useful for models with small context windows (e.g. 1024 tokens).
         """
         self.api_key = api_key
         self.model = model
         self.api_base = api_base
         self.timeout = timeout
-        self.max_tokens_per_doc = max_tokens_per_doc
         self._initialized = False
         self._litellm = None  # Will be set during initialization
 
@@ -1707,8 +1911,6 @@ class LiteLLMSDKCrossEncoder(CrossEncoderModel):
 
         for query, indexed_texts in query_groups.items():
             texts = [text for _, text in indexed_texts]
-            if self.max_tokens_per_doc is not None:
-                texts = _truncate_docs_to_tokens(texts, self.max_tokens_per_doc)
             indices = [idx for idx, _ in indexed_texts]
 
             # Build kwargs for rerank call
@@ -2095,6 +2297,10 @@ class MultiCrossEncoder(CrossEncoderModel):
         """
         return self._members[self._active].provider_name
 
+    @property
+    def primary_provider_name(self) -> str:
+        return self._members[0].provider_name
+
     async def _initialize_member(self, index: int) -> None:
         """Initialize one member, off the event loop when it loads a model in-process."""
         member = self._members[index]
@@ -2204,8 +2410,8 @@ def create_cross_encoder(member: RerankerMemberConfig) -> CrossEncoderModel:
     config) or an indexed fallback. Missing-setting errors name the member's own
     env var, so a chain misconfiguration points at the exact indexed variable.
 
-    Remote members come back carrying a ``retry_policy``, which the base class's
-    ``predict`` applies; see ``_RERANKER_PROVIDERS_WITHOUT_RETRY`` for the ones that
+    Every member carries its ``max_tokens_per_candidate`` cap, and remote members a
+    ``retry_policy``; the base class's ``predict`` applies both; see ``_RERANKER_PROVIDERS_WITHOUT_RETRY`` for the ones that
     deliberately do not get one.
 
     Args:
@@ -2215,6 +2421,7 @@ def create_cross_encoder(member: RerankerMemberConfig) -> CrossEncoderModel:
         Configured CrossEncoderModel instance
     """
     encoder = _create_cross_encoder_backend(member)
+    encoder.max_tokens_per_candidate = member.max_tokens_per_candidate
     if member.provider.lower() not in _RERANKER_PROVIDERS_WITHOUT_RETRY:
         encoder.retry_policy = _reranker_retry_policy()
     return encoder
@@ -2283,7 +2490,6 @@ def _create_cross_encoder_backend(member: RerankerMemberConfig) -> CrossEncoderM
             api_base=member.litellm_api_base,
             api_key=member.litellm_api_key,
             model=member.litellm_model,
-            max_tokens_per_doc=member.litellm_max_tokens_per_doc,
             timeout=member.litellm_timeout,
         )
     elif provider == "litellm-sdk":
@@ -2291,7 +2497,6 @@ def _create_cross_encoder_backend(member: RerankerMemberConfig) -> CrossEncoderM
             api_key=member.litellm_sdk_api_key or None,
             model=member.litellm_sdk_model,
             api_base=member.litellm_sdk_api_base,
-            max_tokens_per_doc=member.litellm_max_tokens_per_doc,
             timeout=member.litellm_sdk_timeout,
         )
     elif provider == "zeroentropy":
@@ -2319,6 +2524,20 @@ def _create_cross_encoder_backend(member: RerankerMemberConfig) -> CrossEncoderM
             model=member.siliconflow_model,
             base_url=member.siliconflow_base_url,
             timeout=member.siliconflow_timeout,
+        )
+    elif provider == "nvidia":
+        api_key = member.nvidia_api_key
+        if not api_key:
+            raise ValueError(
+                f"{member.env_name('NVIDIA_API_KEY')} is required when {member.env_name('PROVIDER')} is 'nvidia'"
+            )
+        return NvidiaCrossEncoder(
+            api_key=api_key,
+            model=member.nvidia_model,
+            base_url=member.nvidia_base_url,
+            timeout=member.nvidia_timeout,
+            batch_size=member.nvidia_batch_size,
+            max_concurrent=member.nvidia_max_concurrent,
         )
     elif provider == "google":
         project_id = member.google_project_id
@@ -2365,7 +2584,7 @@ def _create_cross_encoder_backend(member: RerankerMemberConfig) -> CrossEncoderM
         return JinaMLXCrossEncoder()
     else:
         raise ValueError(
-            f"Unknown reranker provider: {provider}. Supported: 'local', 'tei', 'cohere', 'zeroentropy', 'siliconflow', 'typesafe', 'alibaba', 'google', 'flashrank', 'litellm', 'litellm-sdk', 'rrf', 'jina-mlx'"
+            f"Unknown reranker provider: {provider}. Supported: 'local', 'tei', 'cohere', 'zeroentropy', 'siliconflow', 'nvidia', 'typesafe', 'alibaba', 'google', 'flashrank', 'litellm', 'litellm-sdk', 'rrf', 'jina-mlx'"
         )
 
 

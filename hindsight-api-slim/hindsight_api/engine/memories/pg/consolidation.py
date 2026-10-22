@@ -55,6 +55,22 @@ async def lock_live_memory_ids(
     return {str(r["id"]) for r in rows}
 
 
+async def lock_observation_tags(
+    *, conn, fq_table: Callable[[str], str], bank_id: str, observation_id: str
+) -> list[str] | None:
+    """The observation's current tags, row-locked until the transaction ends; None if it is gone.
+
+    ``FOR NO KEY UPDATE`` still lets other rows take FK references to it. Callers lock the
+    source rows first (``lock_live_memory_ids``), keeping the sources-before-observation order.
+    """
+    row = await conn.fetchrow(
+        f"SELECT tags FROM {fq_table('memory_units')} WHERE id = $1 AND bank_id = $2 FOR NO KEY UPDATE",
+        uuid.UUID(observation_id),
+        bank_id,
+    )
+    return None if row is None else list(row["tags"] or [])
+
+
 async def memories_changed_since(
     *, conn, fq_table: Callable[[str], str], bank_id: str, read_at: dict[str, datetime]
 ) -> list[str]:
@@ -65,16 +81,6 @@ async def memories_changed_since(
         bank_id,
     )
     return [str(r["id"]) for r in rows if r["updated_at"] != read_at[str(r["id"])]]
-
-
-async def any_memory_exists(*, conn, fq_table: Callable[[str], str], bank_id: str, unit_ids: list[uuid.UUID]) -> bool:
-    """Whether any of ``unit_ids`` still exists. Non-locking."""
-    found = await conn.fetchval(
-        f"SELECT 1 FROM {fq_table('memory_units')} WHERE id = ANY($1::uuid[]) AND bank_id = $2 LIMIT 1",
-        unit_ids,
-        bank_id,
-    )
-    return found is not None
 
 
 async def count_observations_with_tags(*, conn, fq_table: Callable[[str], str], bank_id: str, tags: list[str]) -> int:
@@ -288,7 +294,7 @@ async def insert_observation(
                     id, bank_id, text, fact_type, embedding, proof_count, source_memory_ids,
                     tags, event_date, occurred_start, occurred_end, mentioned_at, search_vector
                 )
-                VALUES ($1, $2, $3, 'observation', $4::vector, 1, $5, $6, $7, $8, $9, $10,
+                VALUES ($1, $2, $3, 'observation', $4::vector, $11, $5, $6, $7, $8, $9, $10,
                         tokenize($3, 'llmlingua2')::bm25_catalog.bm25vector)
                 RETURNING id
             """
@@ -303,7 +309,7 @@ async def insert_observation(
                     id, bank_id, text, fact_type, embedding, proof_count, source_memory_ids,
                     tags, event_date, occurred_start, occurred_end, mentioned_at, search_vector
                 )
-                VALUES ($1, $2, $3, 'observation', $4::vector, 1, $5, $6, $7, $8, $9, $10,
+                VALUES ($1, $2, $3, 'observation', $4::vector, $11, $5, $6, $7, $8, $9, $10,
                         to_tsvector('{config.text_search_extension_native_language}'::regconfig, COALESCE($3, '')))
                 RETURNING id
             """
@@ -313,7 +319,7 @@ async def insert_observation(
                     id, bank_id, text, fact_type, embedding, proof_count, source_memory_ids,
                     tags, event_date, occurred_start, occurred_end, mentioned_at
                 )
-                VALUES ($1, $2, $3, 'observation', $4::vector, 1, $5, $6, $7, $8, $9, $10)
+                VALUES ($1, $2, $3, 'observation', $4::vector, $11, $5, $6, $7, $8, $9, $10)
                 RETURNING id
             """
 
@@ -329,6 +335,7 @@ async def insert_observation(
         safe_entity_event_date(occurred_start),
         safe_entity_event_date(occurred_end),
         safe_entity_event_date(mentioned_at),
+        len(source_memory_ids),  # proof_count: the caller passes each live source once
     )
 
     # Populate observation_sources junction table (Oracle only — PG uses native array ops).

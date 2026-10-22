@@ -6,6 +6,7 @@ import asyncio
 import importlib.util
 import inspect
 import os
+import uuid
 from pathlib import Path
 
 import filelock
@@ -279,10 +280,24 @@ def pg0_db_url(db_url, tmp_path_factory, worker_id):
             # Bump max_connections so 8 xdist workers * pool_max_size=15 fits well
             # under the cap (postgres default is 100, which is easy to exhaust now
             # that consolidation_llm_parallelism=4 increases peak conns per op).
+            # `log_lock_waits` is what makes a red CI run readable. Eight workers share
+            # this one server, so a single statement holding AccessExclusiveLock (a
+            # TRUNCATE, a non-concurrent index drop) stalls every other worker until
+            # pytest-timeout kills them all at once — seven unrelated tests failing with
+            # `Timeout (>300.0s)` in the same second, which looks like seven bugs and is
+            # one lock. With this on, the server names the blocker and the blocked
+            # statement, and `deadlock detected`'s "See server log for query details"
+            # finally has a log to see (CI uploads it on failure; see test.yml).
             pg0 = EmbeddedPostgres(
                 name=pg0_instance_name,
                 port=pg0_instance_port,
-                config={"max_connections": "300"},
+                config={
+                    "max_connections": "300",
+                    "log_lock_waits": "on",
+                    # Report a wait well before pytest-timeout's 300s, so the log shows
+                    # the stall building rather than only the corpses.
+                    "deadlock_timeout": "1s",
+                },
             )
 
             # Run ensure_running in a new event loop
@@ -322,18 +337,34 @@ def _cleanup_stale_test_data(db_url: str) -> None:
     (3 per bank × thousands of test banks = tens of thousands of indexes).
     This eventually causes 'out of shared memory' errors because PostgreSQL
     tracks all indexes in shared lock tables.
+
+    Every statement here is best-effort — it only removes residue from EARLIER
+    runs, so skipping any of it costs nothing this run. What it must never do is
+    wait: ``DROP INDEX`` and ``TRUNCATE`` take AccessExclusiveLock on tables the
+    other seven xdist workers are using, and a lock request that queues puts every
+    later reader behind it, up to pytest-timeout's 300s. ``lock_timeout`` makes
+    such a request fail in 2s instead, and the per-statement ``except``es below turn
+    that into a skip. Without it one unlucky overlap fails a dozen unrelated tests
+    at once.
     """
     import asyncpg
 
     async def _do_cleanup():
         conn = await asyncpg.connect(db_url)
         try:
+            await conn.execute("SET lock_timeout = '2s'")
             idx_rows = await conn.fetch(
                 "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname LIKE 'idx_mu_emb_%'"
             )
-            if idx_rows:
-                for row in idx_rows:
+            for row in idx_rows:
+                try:
                     await conn.execute(f'DROP INDEX IF EXISTS public."{row["indexname"]}"')
+                except Exception:
+                    # Same bargain as the truncates below: a drop that cannot get the
+                    # lock within `lock_timeout` is residue left for the next run, not a
+                    # reason to fail this one. Unguarded it would raise out of a
+                    # session-scoped fixture and error every test on this worker.
+                    pass
 
             # Truncate test data in dependency order
             for table in [
@@ -424,8 +455,11 @@ def oracle_db_url(_oracle_admin_dsn):
     admin_pass = _oracle_admin_dsn["password"]
     bare_dsn = _oracle_admin_dsn["dsn"]
 
-    test_user = "HINDSIGHT_TEST"
-    test_pass = "hindsight_test"
+    # The test user lives on the target database and is provisioned outside CI
+    # (this bootstrap cannot create it — ORA-01031 above is tolerated), so its
+    # credentials come from the environment rather than the container defaults.
+    test_user = os.getenv("ORACLE_TEST_USER", "HINDSIGHT_TEST")
+    test_pass = os.getenv("ORACLE_TEST_PASSWORD", "hindsight_test")
 
     conn = oracledb.connect(user=admin_user, password=admin_pass, dsn=bare_dsn)
     cursor = conn.cursor()
@@ -473,7 +507,15 @@ def oracle_db_url(_oracle_admin_dsn):
         conn.close()
 
     # Return URL-format DSN for the test user
-    url = f"oracle://{test_user}:{test_pass}@{bare_dsn}"
+    if "(" in bare_dsn:
+        # A full connect descriptor (tcps, Autonomous Database) cannot sit in the
+        # host position of a URL; it rides in the `dsn=` query parameter, encoded,
+        # exactly as smoketest.sh builds DATABASE_URL for the same instance.
+        from urllib.parse import quote
+
+        url = f"oracle+oracledb://{test_user}:{quote(test_pass, safe='')}@/?dsn={quote(bare_dsn, safe='')}"
+    else:
+        url = f"oracle://{test_user}:{test_pass}@{bare_dsn}"
 
     # Run idempotent migrations once at session scope (mirrors PG's pg0_db_url).
     # This avoids re-running DDL checks on every function-scoped test.
@@ -484,13 +526,14 @@ def oracle_db_url(_oracle_admin_dsn):
     return url
 
 
-@pytest_asyncio.fixture(scope="function")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def oracle_memory(oracle_db_url, embeddings, cross_encoder, query_analyzer):
     """
-    Provide a MemoryEngine backed by Oracle 23ai for each test.
+    Provide one MemoryEngine backed by Oracle 23ai for the test session.
 
-    Mirrors the PG `memory` fixture but uses the Oracle backend.
-    Migrations are run once at session scope in the `oracle_db_url` fixture.
+    Tests use unique bank IDs and clean up their own data, so reusing the engine
+    avoids repeatedly creating pools and verifying remote providers. Migrations
+    are run once at session scope in the `oracle_db_url` fixture.
     """
     from hindsight_api.config import clear_config_cache
 
@@ -518,6 +561,34 @@ async def oracle_memory(oracle_db_url, embeddings, cross_encoder, query_analyzer
             task_backend=SyncTaskBackend(),
         )
         await mem.initialize()
+
+        # Production clients identify source documents; these lower-level Oracle
+        # tests historically omitted IDs and therefore exercised the UUID-generated
+        # fallback rather than the production contract. Oracle stores document IDs
+        # as VARCHAR2, so give every implicit test document a realistic text ID.
+        original_retain = mem.retain_async
+        original_retain_batch = mem.retain_batch_async
+
+        async def retain_with_source_document(*args, **kwargs):
+            bound = inspect.signature(original_retain).bind_partial(*args, **kwargs)
+            if not bound.arguments.get("document_id"):
+                bound.arguments["document_id"] = f"oracle-test-{uuid.uuid4().hex}"
+            return await original_retain(*bound.args, **bound.kwargs)
+
+        async def retain_batch_with_source_documents(*args, **kwargs):
+            bound = inspect.signature(original_retain_batch).bind_partial(*args, **kwargs)
+            # A batch-level ID intentionally groups all items into one source;
+            # otherwise mirror the API and assign each ID-less item its own source.
+            if not bound.arguments.get("document_id"):
+                contents = [dict(item) for item in bound.arguments["contents"]]
+                for item in contents:
+                    if not item.get("document_id"):
+                        item["document_id"] = f"oracle-test-{uuid.uuid4().hex}"
+                bound.arguments["contents"] = contents
+            return await original_retain_batch(*bound.args, **bound.kwargs)
+
+        mem.retain_async = retain_with_source_document
+        mem.retain_batch_async = retain_batch_with_source_documents
         yield mem
         await _teardown_memory_engine(mem)
     finally:
@@ -580,8 +651,17 @@ def embeddings(tmp_path_factory, worker_id):
 
     lock_file = root_tmp_dir / "embeddings_init.lock"
 
-    _skip_without_local_ml("embeddings")
-    emb = LocalSTEmbeddings()
+    # provider=local keeps upstream's exact behaviour (it is what the Postgres
+    # shards run); anything else is built from the app's own configuration, so the
+    # suite embeds with the model this fork ships — the Oracle job points it at the
+    # remote 2048-dim OpenRouter model, and the vector column must match.
+    if os.getenv("HINDSIGHT_API_EMBEDDINGS_PROVIDER", "local").lower() == "local":
+        _skip_without_local_ml("embeddings")
+        emb = LocalSTEmbeddings()
+    else:
+        from hindsight_api.engine.embeddings import create_embeddings_from_env
+
+        emb = create_embeddings_from_env()
 
     # Serialize model initialization across workers
     with filelock.FileLock(str(lock_file)):
@@ -612,8 +692,13 @@ def cross_encoder(tmp_path_factory, worker_id):
 
     lock_file = root_tmp_dir / "cross_encoder_init.lock"
 
-    _skip_without_local_ml("cross_encoder")
-    ce = LocalSTCrossEncoder()
+    if os.getenv("HINDSIGHT_API_RERANKER_PROVIDER", "local").lower() == "local":
+        _skip_without_local_ml("cross_encoder")
+        ce = LocalSTCrossEncoder()
+    else:
+        from hindsight_api.engine.cross_encoder import create_cross_encoder_from_env
+
+        ce = create_cross_encoder_from_env()
 
     # Serialize model initialization across workers
     with filelock.FileLock(str(lock_file)):

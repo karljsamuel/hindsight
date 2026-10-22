@@ -82,8 +82,7 @@ def _oracle_upgrade() -> None:
             # Already present (re-run or manual apply); adding again is ORA-02264.
             continue
         op.execute(
-            f"ALTER TABLE {table} ADD CONSTRAINT {name} "
-            f"CHECK (TO_CHAR({column}, 'YYYY') <> '0001') ENABLE NOVALIDATE"
+            f"ALTER TABLE {table} ADD CONSTRAINT {name} CHECK (TO_CHAR({column}, 'YYYY') <> '0001') ENABLE NOVALIDATE"
         )
 
 
