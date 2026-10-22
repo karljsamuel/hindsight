@@ -293,13 +293,20 @@ jobs:
         - 3
     name: test-api (${{ matrix.shard }}/3)
     env:
-      # No LLM: this job is upstream's shared-logic harness (4100 tests) and its
-      # real-LLM tests (api_client_real_llm + llm_judge) cannot finish inside the
-      # 300s per-test cap against a remote provider. They only ever passed because
-      # the LLM was broken and the calls failed fast. The fork's LLM path is
-      # covered by test-api-oracle and the smoke test, both on NIM.
-      HINDSIGHT_API_LLM_PROVIDER: none
+      # The `memory` fixture in tests/conftest.py builds the engine with
+      # memory_llm_provider="mock" — a canned-fact LLM that lets the full
+      # retain -> recall -> reflect pipeline run deterministically and free.
+      # Setting this env var to `none` OVERRIDES that fixture, so every retain
+      # dies with "LLMNotAvailableError: LLM provider is set to 'none'" (99
+      # tests across the three shards). It must be `mock`, matching the
+      # fixture, not `none`.
+      #
+      # Tests that need real LLM output quality carry hs_llm_core/hs_llm_mat
+      # and are excluded below; the fork's real-provider path is covered by
+      # test-api-oracle and the smoke test.
+      HINDSIGHT_API_LLM_PROVIDER: mock
       HINDSIGHT_API_EMBEDDINGS_PROVIDER: local
+      HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL: BAAI/bge-small-en-v1.5
       HINDSIGHT_API_RERANKER_PROVIDER: local
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -529,27 +536,88 @@ jobs:
     - name: Determine overall result
       id: result
       uses: actions/github-script@v9
+      env:
+        NEEDS_JSON: ${{ toJSON(needs) }}
       with:
-        script: "const needs = ${{ toJSON(needs) }};\nconst entries = Object.entries(needs);\nconst failed = entries.filter(([, v]) => v.result === 'failure');\nconst skipped = entries.filter(([, v]) =>\
-          \ v.result === 'skipped');\nconst succeeded = entries.filter(([, v]) => v.result === 'success');\nconst overall = failed.length > 0 ? 'failure' : 'success';\nconst icon = overall === 'success'\
-          \ ? '\u2705' : '\u274C';\nconst runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;\n\nlet body = `## ${icon} CI results\\n\\n`;\nbody += `|\
-          \ Status | Count |\\n|--------|-------|\\n`;\nbody += `| \u2705 Passed | ${succeeded.length} |\\n`;\nif (failed.length > 0) body += `| \u274C Failed | ${failed.length} |\\n`;\nif (skipped.length\
-          \ > 0) body += `| \u23ED\uFE0F Skipped | ${skipped.length} |\\n`;\n\nif (failed.length > 0) {\n  body += `\\n### Failed jobs\\n`;\n  for (const [name] of failed) {\n    body += `- \\`${name}\\\
-          `\\n`;\n  }\n}\n\nbody += `\\n[View full run](${runUrl})`;\n\ncore.setOutput('state', overall);\ncore.setOutput('description', failed.length > 0 ? 'Some CI checks failed' : 'All CI checks passed');\n\
-          core.setOutput('body', body);\ncore.setOutput('run_url', runUrl);\n"
+        script: |
+          const needs = JSON.parse(process.env.NEEDS_JSON);
+          const entries = Object.entries(needs);
+          const failed = entries.filter(([, v]) => v.result === 'failure');
+          const skipped = entries.filter(([, v]) => v.result === 'skipped');
+          const succeeded = entries.filter(([, v]) => v.result === 'success');
+          const overall = failed.length > 0 ? 'failure' : 'success';
+          const icon = overall === 'success' ? '\u2705' : '\u274C';
+          const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+          let body = `## ${icon} CI results\n\n`;
+          body += '| Status | Count |\n';
+          body += '|--------|-------|\n';
+          body += `| \u2705 Passed | ${succeeded.length} |\n`;
+          if (failed.length > 0) body += `| \u274C Failed | ${failed.length} |\n`;
+          if (skipped.length > 0) body += `| \u23ED\uFE0F Skipped | ${skipped.length} |\n`;
+          if (failed.length > 0) {
+            body += '\n### Failed jobs\n';
+            for (const [name] of failed) body += `- ${name}\n`;
+          }
+          body += `\n[View full run](${runUrl})`;
+
+          core.setOutput('state', overall);
+          core.setOutput('description', failed.length > 0 ? 'Some CI checks failed' : 'All CI checks passed');
+          core.setOutput('body', body);
+          core.setOutput('run_url', runUrl);
+
     - name: Report status to PR
       uses: actions/github-script@v9
+      env:
+        STATE: ${{ steps.result.outputs.state }}
+        DESCRIPTION: ${{ steps.result.outputs.description }}
+        RUN_URL: ${{ steps.result.outputs.run_url }}
       with:
-        script: "await github.rest.repos.createCommitStatus({\n  owner: context.repo.owner,\n  repo: context.repo.repo,\n  sha: context.payload.pull_request.head.sha,\n  state: '${{ steps.result.outputs.state\
-          \ }}',\n  context: 'CI / full-tests',\n  description: '${{ steps.result.outputs.description }}',\n  target_url: '${{ steps.result.outputs.run_url }}'\n});\n"
+        script: |
+          await github.rest.repos.createCommitStatus({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            sha: context.payload.pull_request?.head?.sha ?? context.sha,
+            state: process.env.STATE,
+            context: 'CI / full-tests',
+            description: process.env.DESCRIPTION,
+            target_url: process.env.RUN_URL,
+          });
+
     - name: Comment on PR
       uses: actions/github-script@v9
+      env:
+        BODY: ${{ steps.result.outputs.body }}
       with:
-        script: "const prNumber = context.payload.pull_request.number;\nconst marker = '<!-- ci-full-test-report -->';\nconst body = `${marker}\\n${{ steps.result.outputs.body }}`;\n\n// Update existing\
-          \ comment if present, otherwise create new one\nconst { data: comments } = await github.rest.issues.listComments({\n  owner: context.repo.owner,\n  repo: context.repo.repo,\n  issue_number: prNumber,\n\
-          });\nconst existing = comments.find(c => c.body.includes(marker));\n\nif (existing) {\n  await github.rest.issues.updateComment({\n    owner: context.repo.owner,\n    repo: context.repo.repo,\n\
-          \    comment_id: existing.id,\n    body,\n  });\n} else {\n  await github.rest.issues.createComment({\n    owner: context.repo.owner,\n    repo: context.repo.repo,\n    issue_number: prNumber,\n\
-          \    body,\n  });\n}\n"
+        script: |
+          const prNumber = context.payload.pull_request?.number;
+          if (!prNumber) {
+            core.info('No pull request in payload; skipping comment.');
+            return;
+          }
+          const marker = '<!-- ci-full-test-report -->';
+          const body = `${marker}\n${process.env.BODY}`;
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: prNumber,
+          });
+          const existing = comments.find((c) => c.body.includes(marker));
+          if (existing) {
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: existing.id,
+              body,
+            });
+          } else {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body,
+            });
+          }
 'on':
   pull_request:
     branches:
